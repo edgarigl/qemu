@@ -140,9 +140,11 @@ static inline bool ivshmem_is_master(IVShmemState *s)
 
 static void ivshmem_IntrMask_write(IVShmemState *s, uint32_t val)
 {
+    PCIDevice *pdev = PCI_DEVICE(s);
     IVSHMEM_DPRINTF("IntrMask write(w) val = 0x%04x\n", val);
 
     s->intrmask = val;
+    pci_set_irq(pdev, !!(s->intrstatus & s->intrmask));
 }
 
 static uint32_t ivshmem_IntrMask_read(IVShmemState *s)
@@ -155,17 +157,21 @@ static uint32_t ivshmem_IntrMask_read(IVShmemState *s)
 
 static void ivshmem_IntrStatus_write(IVShmemState *s, uint32_t val)
 {
+    PCIDevice *pdev = PCI_DEVICE(s);
     IVSHMEM_DPRINTF("IntrStatus write(w) val = 0x%04x\n", val);
 
     s->intrstatus = val;
+    pci_set_irq(pdev, !!(s->intrstatus & s->intrmask));
 }
 
 static uint32_t ivshmem_IntrStatus_read(IVShmemState *s)
 {
+    PCIDevice *pdev = PCI_DEVICE(s);
     uint32_t ret = s->intrstatus;
 
     /* reading ISR clears all interrupts */
     s->intrstatus = 0;
+    pci_set_irq(pdev, !!(s->intrstatus & s->intrmask));
     return ret;
 }
 
@@ -266,6 +272,8 @@ static void ivshmem_vector_notify(void *opaque)
     if (ivshmem_has_feature(s, IVSHMEM_MSI)) {
         if (msix_enabled(pdev)) {
             msix_notify(pdev, vector);
+        } else {
+            ivshmem_IntrStatus_write(s, 1);
         }
     } else {
         ivshmem_IntrStatus_write(s, 1);
@@ -846,6 +854,9 @@ static void ivshmem_common_realize(PCIDevice *dev, Error **errp)
 
     pci_conf = dev->config;
     pci_conf[PCI_COMMAND] = PCI_COMMAND_IO | PCI_COMMAND_MEMORY;
+
+    /* Enable Legacy INTX.  */
+    pci_config_set_interrupt_pin(pci_conf, 1);
 
     memory_region_init_io(&s->ivshmem_mmio, OBJECT(s), &ivshmem_mmio_ops, s,
                           "ivshmem-mmio", IVSHMEM_REG_BAR_SIZE);
