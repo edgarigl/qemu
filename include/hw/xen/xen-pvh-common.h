@@ -12,6 +12,7 @@
 #include <assert.h>
 #include "hw/hw.h"
 #include "hw/xen/xen-hvm-common.h"
+#include "hw/pci-host/gpex.h"
 
 typedef struct XenPVHCommonState {
     XenIOState ioreq;
@@ -22,8 +23,23 @@ typedef struct XenPVHCommonState {
     } ram;
 
     struct {
+        GPEXHost gpex;
+        MemoryRegion ecam_alias;
+        MemoryRegion mmio_alias;
+        MemoryRegion mmio_high_alias;
+    } pci;
+
+    struct {
         MemMapEntry ram_low;
         MemMapEntry ram_high;
+
+        struct {
+            MemMapEntry ecam;
+            MemMapEntry mmio;
+            MemMapEntry mmio_high;
+
+            int intx_irq_base;
+        } pci;
     } cfg;
 } XenPVHCommonState;
 
