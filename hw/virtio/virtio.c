@@ -2076,10 +2076,12 @@ static int virtio_validate_features(VirtIODevice *vdev)
 
     if (virtio_host_has_feature(vdev, VIRTIO_F_IOMMU_PLATFORM) &&
         !virtio_vdev_has_feature(vdev, VIRTIO_F_IOMMU_PLATFORM)) {
+        printf("ERROR            platform mismatch!!!\n");
         return -EFAULT;
     }
 
     if (k->validate_features) {
+        printf("ERROR            features invalid!!!\n");
         return k->validate_features(vdev);
     } else {
         return 0;
@@ -2091,6 +2093,7 @@ int virtio_set_status(VirtIODevice *vdev, uint8_t val)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     trace_virtio_set_status(vdev, val);
 
+    printf("%s: val %x\n", __func__, val);
     if (virtio_vdev_has_feature(vdev, VIRTIO_F_VERSION_1)) {
         if (!(vdev->status & VIRTIO_CONFIG_S_FEATURES_OK) &&
             val & VIRTIO_CONFIG_S_FEATURES_OK) {
