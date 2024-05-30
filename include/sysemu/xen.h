@@ -24,6 +24,8 @@
 # define CONFIG_XEN_IS_POSSIBLE
 #endif
 
+bool xen_map_cache_enabled(void);
+
 #ifdef CONFIG_XEN_IS_POSSIBLE
 
 extern bool xen_allowed;
@@ -31,7 +33,7 @@ extern bool xen_allowed;
 #define xen_enabled()           (xen_allowed)
 
 void xen_hvm_modified_memory(ram_addr_t start, ram_addr_t length);
-void xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size,
+void *xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size,
                    struct MemoryRegion *mr, Error **errp);
 
 #else /* !CONFIG_XEN_IS_POSSIBLE */
@@ -41,7 +43,7 @@ static inline void xen_hvm_modified_memory(ram_addr_t start, ram_addr_t length)
 {
     /* nothing */
 }
-static inline void xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size,
+static inline void *xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size,
                                  MemoryRegion *mr, Error **errp)
 {
     g_assert_not_reached();

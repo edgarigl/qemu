@@ -12,12 +12,33 @@
 
 MemoryRegion xen_memory;
 
-void xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size, MemoryRegion *mr,
+static void *xen_foreign_map_no_fail(hwaddr addr, hwaddr len)
+{
+    hwaddr nb_pfn = len >> XC_PAGE_SHIFT;
+    g_autofree xen_pfn_t *pfns = NULL;
+    void *va;
+    int i;
+
+    pfns = g_new0(xen_pfn_t, nb_pfn);
+    for (i = 0; i < nb_pfn; i++) {
+        pfns[i] = (addr >> XC_PAGE_SHIFT) + i;
+    }
+
+    va = xenforeignmemory_map2(xen_fmem, xen_domid, NULL,
+                               PROT_READ | PROT_WRITE,
+                               0, nb_pfn, pfns, NULL);
+    assert(va);
+    return va;
+}
+
+
+void *xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size, MemoryRegion *mr,
                    Error **errp)
 {
     unsigned target_page_bits = qemu_target_page_bits();
     unsigned long nr_pfn;
     xen_pfn_t *pfn_list;
+    void *va = NULL;
     int i;
 
     if (runstate_check(RUN_STATE_INMIGRATE)) {
@@ -25,11 +46,16 @@ void xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size, MemoryRegion *mr,
         warn_report("%s: do not alloc "RAM_ADDR_FMT
                 " bytes of ram at "RAM_ADDR_FMT" when runstate is INMIGRATE",
                 __func__, size, ram_addr);
-        return;
+        return NULL;
     }
 
     if (mr == &xen_memory) {
-        return;
+        if (!xen_map_cache_enabled()) {
+            /* Map it all.  */
+            printf("Map all xen_memory\n");
+            va = xen_foreign_map_no_fail(ram_addr, size);
+        }
+        return va;
     }
 
     trace_xen_ram_alloc(ram_addr, size);
@@ -46,7 +72,13 @@ void xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size, MemoryRegion *mr,
                    ram_addr);
     }
 
+    if (!xen_map_cache_enabled()) {
+        /* Map it all.  */
+        va = xen_foreign_map_no_fail(ram_addr, size);
+    }
+
     g_free(pfn_list);
+    return va;
 }
 
 static void xen_set_memory(struct MemoryListener *listener,

@@ -84,6 +84,11 @@ static inline void mapcache_unlock(void)
     qemu_mutex_unlock(&mapcache->lock);
 }
 
+bool xen_map_cache_enabled(void)
+{
+    return false;
+}
+
 static inline int test_bits(int nr, int size, const unsigned long *addr)
 {
     unsigned long res = find_next_zero_bit(addr, size + nr, nr);
