@@ -18,6 +18,10 @@ uint32_t virtio_config_readb(VirtIODevice *vdev, uint32_t addr)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint8_t val;
 
+    if (k->read_config) {
+        return k->read_config(vdev, sizeof val, addr);
+    }
+
     if (addr + sizeof(val) > vdev->config_len) {
         return (uint32_t)-1;
     }
@@ -32,6 +36,10 @@ uint32_t virtio_config_readw(VirtIODevice *vdev, uint32_t addr)
 {
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint16_t val;
+
+    if (k->read_config) {
+        return k->read_config(vdev, sizeof val, addr);
+    }
 
     if (addr + sizeof(val) > vdev->config_len) {
         return (uint32_t)-1;
@@ -48,6 +56,10 @@ uint32_t virtio_config_readl(VirtIODevice *vdev, uint32_t addr)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint32_t val;
 
+    if (k->read_config) {
+        return k->read_config(vdev, sizeof val, addr);
+    }
+
     if (addr + sizeof(val) > vdev->config_len) {
         return (uint32_t)-1;
     }
@@ -62,6 +74,10 @@ void virtio_config_writeb(VirtIODevice *vdev, uint32_t addr, uint32_t data)
 {
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint8_t val = data;
+
+    if (k->write_config) {
+        return k->write_config(vdev, sizeof val, addr, val);
+    }
 
     if (addr + sizeof(val) > vdev->config_len) {
         return;
@@ -79,6 +95,10 @@ void virtio_config_writew(VirtIODevice *vdev, uint32_t addr, uint32_t data)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint16_t val = data;
 
+    if (k->write_config) {
+        return k->write_config(vdev, sizeof val, addr, val);
+    }
+
     if (addr + sizeof(val) > vdev->config_len) {
         return;
     }
@@ -94,6 +114,10 @@ void virtio_config_writel(VirtIODevice *vdev, uint32_t addr, uint32_t data)
 {
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint32_t val = data;
+
+    if (k->write_config) {
+        return k->write_config(vdev, sizeof val, addr, val);
+    }
 
     if (addr + sizeof(val) > vdev->config_len) {
         return;
@@ -111,6 +135,10 @@ uint32_t virtio_config_modern_readb(VirtIODevice *vdev, uint32_t addr)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint8_t val;
 
+    if (k->read_config) {
+        return k->read_config(vdev, sizeof val, addr);
+    }
+
     if (addr + sizeof(val) > vdev->config_len) {
         return (uint32_t)-1;
     }
@@ -125,6 +153,10 @@ uint32_t virtio_config_modern_readw(VirtIODevice *vdev, uint32_t addr)
 {
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint16_t val;
+
+    if (k->read_config) {
+        return k->read_config(vdev, sizeof val, addr);
+    }
 
     if (addr + sizeof(val) > vdev->config_len) {
         return (uint32_t)-1;
@@ -141,6 +173,10 @@ uint32_t virtio_config_modern_readl(VirtIODevice *vdev, uint32_t addr)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint32_t val;
 
+    if (k->read_config) {
+        return k->read_config(vdev, sizeof val, addr);
+    }
+
     if (addr + sizeof(val) > vdev->config_len) {
         return (uint32_t)-1;
     }
@@ -156,6 +192,10 @@ void virtio_config_modern_writeb(VirtIODevice *vdev,
 {
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint8_t val = data;
+
+    if (k->write_config) {
+        return k->write_config(vdev, sizeof val, addr, val);
+    }
 
     if (addr + sizeof(val) > vdev->config_len) {
         return;
@@ -174,6 +214,10 @@ void virtio_config_modern_writew(VirtIODevice *vdev,
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint16_t val = data;
 
+    if (k->write_config) {
+        return k->write_config(vdev, sizeof val, addr, val);
+    }
+
     if (addr + sizeof(val) > vdev->config_len) {
         return;
     }
@@ -190,6 +234,10 @@ void virtio_config_modern_writel(VirtIODevice *vdev,
 {
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint32_t val = data;
+
+    if (k->write_config) {
+        return k->write_config(vdev, sizeof val, addr, val);
+    }
 
     if (addr + sizeof(val) > vdev->config_len) {
         return;
