@@ -183,6 +183,9 @@ struct VirtioDeviceClass {
     int (*validate_features)(VirtIODevice *vdev);
     void (*get_config)(VirtIODevice *vdev, uint8_t *config);
     void (*set_config)(VirtIODevice *vdev, const uint8_t *config);
+    uint32_t (*read_config)(VirtIODevice *vdev, int size, uint32_t addr);
+    void (*write_config)(VirtIODevice *vdev, int size, uint32_t addr,
+                         uint32_t data);
     void (*reset)(VirtIODevice *vdev);
     void (*set_status)(VirtIODevice *vdev, uint8_t val);
     /* Device must validate queue_index.  */
