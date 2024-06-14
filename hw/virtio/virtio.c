@@ -2552,6 +2552,20 @@ static void virtio_irq(VirtQueue *vq)
 {
     virtio_set_isr(vq->vdev, 0x1);
     virtio_notify_vector(vq->vdev, vq->vector);
+
+}
+
+void virtio_notify_force(VirtIODevice *vdev, VirtQueue *vq)
+{
+    BusState *qbus = qdev_get_parent_bus(DEVICE(vdev));
+    VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(qbus);
+
+    if (k->notify_queue) {
+        k->notify_queue(qbus->parent, virtio_get_queue_index(vq));
+    }
+
+    trace_virtio_notify(vdev, vq);
+    virtio_irq(vq);
 }
 
 void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
@@ -2562,8 +2576,7 @@ void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
         }
     }
 
-    trace_virtio_notify(vdev, vq);
-    virtio_irq(vq);
+    virtio_notify_force(vdev, vq);
 }
 
 void virtio_notify_config(VirtIODevice *vdev)
