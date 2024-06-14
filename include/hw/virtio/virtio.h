@@ -284,6 +284,7 @@ int virtqueue_get_avail_bytes(VirtQueue *vq, unsigned int *in_bytes,
 
 void virtio_notify_irqfd(VirtIODevice *vdev, VirtQueue *vq);
 void virtio_notify(VirtIODevice *vdev, VirtQueue *vq);
+void virtio_notify_force(VirtIODevice *vdev, VirtQueue *vq);
 
 int virtio_save(VirtIODevice *vdev, QEMUFile *f);
 
