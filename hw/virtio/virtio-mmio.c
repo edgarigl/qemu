@@ -402,6 +402,7 @@ static void virtio_mmio_write(void *opaque, hwaddr offset, uint64_t value,
                 ((uint64_t)proxy->vqs[vdev->queue_sel].used[1]) << 32 |
                 proxy->vqs[vdev->queue_sel].used[0]);
             proxy->vqs[vdev->queue_sel].enabled = 1;
+            virtio_queue_enable(vdev, vdev->queue_sel);
         } else {
             proxy->vqs[vdev->queue_sel].enabled = 0;
         }
