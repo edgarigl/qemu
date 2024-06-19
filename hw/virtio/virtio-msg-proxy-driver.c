@@ -14,6 +14,7 @@
 #include "hw/virtio/virtio.h"
 #include "hw/qdev-properties.h"
 #include "hw/virtio/virtio-msg-bus.h"
+#include "hw/virtio/virtio-msg-prot.h"
 #include "hw/virtio/virtio-msg-proxy-driver.h"
 
 #include "standard-headers/linux/virtio_ids.h"

@@ -12,7 +12,7 @@
 
 #include "qom/object.h"
 #include "hw/qdev-core.h"
-#include "hw/virtio/virtio-msg.h"
+#include "hw/virtio/virtio-msg-prot.h"
 
 #define TYPE_VIRTIO_MSG_BUS "virtio-msg-bus"
 DECLARE_INSTANCE_CHECKER(BusState, VIRTIO_MSG_BUS,
