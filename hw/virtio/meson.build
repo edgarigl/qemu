@@ -14,7 +14,7 @@ specific_virtio_ss.add(files('virtio-msg-machine.c'))
 specific_virtio_ss.add(files('virtio-msg-bus.c'))
 specific_virtio_ss.add(files('virtio-msg-bus-linux-user.c'))
 specific_virtio_ss.add(files('virtio-msg-proxy-driver.c'))
-specific_virtio_ss.add(files('virtio-msg-transport.c'))
+specific_virtio_ss.add(files('virtio-msg.c'))
 
 if have_vhost
   system_virtio_ss.add(files('vhost.c'))

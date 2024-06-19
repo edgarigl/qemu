@@ -4,7 +4,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-msg-bus.h"
-#include "hw/virtio/virtio-msg-transport.h"
+#include "hw/virtio/virtio-msg.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "trace.h"

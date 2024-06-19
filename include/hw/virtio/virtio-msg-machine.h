@@ -3,7 +3,7 @@
 
 #include "qom/object.h"
 #include "hw/boards.h"
-#include "hw/virtio/virtio-msg-transport.h"
+#include "hw/virtio/virtio-msg.h"
 
 struct VirtIOMSGMachineState {
     MachineState parent_obj;
