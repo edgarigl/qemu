@@ -39,29 +39,8 @@ The virtio-msg backend machine:
 Running
 -------
 
-Running a Linux guest on the virt machine:
-
-.. code-block:: bash
-
-   qemu-system-aarch64 -M virt -m 2G -cpu cortex-a72 \
-        -object memory-backend-file,id=mem,size=2G,mem-path=/dev/shm/qemu-ram,share=on \
-        -machine memory-backend=mem \
-        -chardev socket,id=chr0,path=linux-user.socket \
-        -serial mon:stdio -display none \
-        -kernel Image \
-        -initrd core-image-minimal-qemuarm64.rootfs.cpio.gz \
-        -append "rdinit=/sbin/init console=ttyAMA0 lpj=100" \
-        -device virtio-msg-proxy-driver-pci \
-        -device virtio-msg-bus-linux-user,name=linux-user,chardev=chr0
-
-
-To use virtio-mmio, replace the -device virtio-msg-proxy-driver-pci with:
-
-.. code-block:: bash
-
-   -device virtio-msg-proxy-driver,iommu_platform=on       \
-   -global virtio-mmio.force-legacy=false                  \
-
+To run this example you first need to run the virtio-msg machine and
+secondly then the virt machine with Linux.
 
 Running the virtio-msg backends machine:
 
@@ -80,5 +59,29 @@ remove any existing queue's.
         -device virtio-net-device,netdev=net0 \
         -netdev user,id=net0 \
         -object filter-dump,id=f0,netdev=net0,file=net.pcap
+
+
+Running a Linux guest on the virt machine:
+
+.. code-block:: bash
+
+   qemu-system-aarch64 -M virt -m 2G -cpu cortex-a72 \
+        -object memory-backend-file,id=mem,size=2G,mem-path=/dev/shm/qemu-ram,share=on \
+        -machine memory-backend=mem \
+        -chardev socket,id=chr0,path=linux-user.socket \
+        -serial mon:stdio -display none \
+        -kernel Image \
+        -initrd core-image-minimal-qemuarm64.rootfs.cpio.gz \
+        -append "rdinit=/sbin/init console=ttyAMA0 lpj=100" \
+        -device virtio-msg-proxy-driver-pci,virtio-id=0x1 \
+        -device virtio-msg-bus-linux-user,name=linux-user,chardev=chr0
+
+
+To use virtio-mmio, replace the -device virtio-msg-proxy-driver-pci with:
+
+.. code-block:: bash
+
+   -device virtio-msg-proxy-driver,iommu_platform=on,virtio-id=0x1      \
+   -global virtio-mmio.force-legacy=false                               \
 
 
