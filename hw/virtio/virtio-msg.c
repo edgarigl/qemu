@@ -207,7 +207,6 @@ static const VirtIOMSGHandler msg_handlers[VIRTIO_MSG_MAX] = {
 static int vmsg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(bd->opaque);
-    VirtIOMSGPayload mp;
     VirtIOMSGHandler handler;
 
     if (msg->type > ARRAY_SIZE(msg_handlers)) {
@@ -215,10 +214,10 @@ static int vmsg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     }
 
     handler = msg_handlers[msg->type];
-    virtio_msg_unpack(msg, &mp);
+    virtio_msg_unpack(msg);
 
     if (handler) {
-        handler(proxy, msg, &mp);
+        handler(proxy, msg, &msg->payload);
     }
 
     return VIRTIO_MSG_NO_ERROR;

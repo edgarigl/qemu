@@ -1,7 +1,5 @@
 /*
  * Virtio MSG - Message packing/unpacking functions.
- * TODO: Use either packed struct or memcpy (not both).
- * QEMU upstream OK with packed structs?
  *
  * Copyright (c) 2024 Advanced Micro Devices, Inc.
  * Written by Edgar E. Iglesias <edgar.iglesias@amd.com>.
@@ -124,92 +122,91 @@ typedef struct VirtIOMSG {
     VirtIOMSGPayload payload;
 } QEMU_PACKED VirtIOMSG;
 
-/* FIXME: Convert to in-place zero copy endian conversions.  */
-#define GEN_VIRTIO_MSG_UNPACK(W)                                            \
-static inline uint ## W ## _t virtio_msg_unpack_u ## W(VirtIOMSG *msg,      \
-                                                   unsigned int offset)     \
-{                                                                           \
-    uint ## W ## _t v;                                                      \
-                                                                            \
-    assert((offset + sizeof v) <= sizeof msg->payload.u8);                     \
-    memcpy(&v, &msg->payload.u8[offset], sizeof v);                            \
-    v = le ## W ## _to_cpu(v);                                              \
-    return v;                                                               \
+#define LE_TO_CPU(v)                                        \
+{                                                           \
+    if (sizeof(v) == 2) {                                   \
+        v = le16_to_cpu(v);                                 \
+    }                                                       \
+    if (sizeof(v) == 4) {                                   \
+        v = le32_to_cpu(v);                                 \
+    }                                                       \
+    if (sizeof(v) == 8) {                                   \
+        v = le64_to_cpu(v);                                 \
+    }                                                       \
 }
 
-GEN_VIRTIO_MSG_UNPACK(16);
-GEN_VIRTIO_MSG_UNPACK(32);
-GEN_VIRTIO_MSG_UNPACK(64);
+static inline void virtio_msg_unpack(VirtIOMSG *msg) {
+    VirtIOMSGPayload *pl = &msg->payload;
 
-static inline void virtio_msg_unpack(VirtIOMSG *msg, VirtIOMSGPayload *mp)
-{
     switch (msg->type) {
     case VIRTIO_MSG_GET_DEVICE_FEAT:
-        mp->get_device_feat.index = virtio_msg_unpack_u32(msg, 0);
-        mp->set_device_feat.features = virtio_msg_unpack_u64(msg, 4);
+        LE_TO_CPU(pl->get_device_feat.index);
+        LE_TO_CPU(pl->get_device_feat.features);
         break;
     case VIRTIO_MSG_SET_DEVICE_FEAT:
-        mp->set_device_feat.index = virtio_msg_unpack_u32(msg, 0);
-        mp->set_device_feat.features = virtio_msg_unpack_u64(msg, 4);
+        LE_TO_CPU(pl->set_device_feat.index);
+        LE_TO_CPU(pl->set_device_feat.features);
         break;
     case VIRTIO_MSG_SET_DEVICE_STATUS:
-        mp->set_device_status.status = virtio_msg_unpack_u32(msg, 0);
+        LE_TO_CPU(pl->set_device_status.status);
         break;
     case VIRTIO_MSG_GET_DEVICE_CONF:
-        mp->get_device_conf.size = virtio_msg_unpack_u32(msg, 0);
-        mp->get_device_conf.offset = virtio_msg_unpack_u32(msg, 4);
+        LE_TO_CPU(pl->get_device_conf.size);
+        LE_TO_CPU(pl->get_device_conf.offset);
         break;
     case VIRTIO_MSG_SET_DEVICE_CONF:
-        mp->set_device_conf.size = virtio_msg_unpack_u32(msg, 0);
-        mp->set_device_conf.offset = virtio_msg_unpack_u32(msg, 4);
-        mp->set_device_conf.data = virtio_msg_unpack_u32(msg, 8);
+        LE_TO_CPU(pl->set_device_conf.size);
+        LE_TO_CPU(pl->set_device_conf.offset);
+        LE_TO_CPU(pl->set_device_conf.data);
         break;
     case VIRTIO_MSG_GET_VQUEUE:
-        mp->get_vqueue.index = virtio_msg_unpack_u32(msg, 0);
+        LE_TO_CPU(pl->get_vqueue.index);
         break;
     case VIRTIO_MSG_SET_VQUEUE:
-        mp->set_vqueue.index = virtio_msg_unpack_u32(msg, 0);
-        mp->set_vqueue.size = virtio_msg_unpack_u32(msg, 4);
-        mp->set_vqueue.descriptor_addr = virtio_msg_unpack_u64(msg, 8);
-        mp->set_vqueue.driver_addr = virtio_msg_unpack_u64(msg, 16);
-        mp->set_vqueue.device_addr = virtio_msg_unpack_u64(msg, 24);
+        LE_TO_CPU(pl->set_vqueue.index);
+        LE_TO_CPU(pl->set_vqueue.size);
+        LE_TO_CPU(pl->set_vqueue.descriptor_addr);
+        LE_TO_CPU(pl->set_vqueue.driver_addr);
+        LE_TO_CPU(pl->set_vqueue.device_addr);
         break;
     case VIRTIO_MSG_EVENT_DRIVER:
-        mp->event_driver.index = virtio_msg_unpack_u32(msg, 0);
-        mp->event_driver.next_offset = virtio_msg_unpack_u64(msg, 4);
-        mp->event_driver.next_wrap = virtio_msg_unpack_u64(msg, 12);
+        LE_TO_CPU(pl->event_driver.index);
+        LE_TO_CPU(pl->event_driver.next_offset);
+        LE_TO_CPU(pl->event_driver.next_wrap);
         break;
     case VIRTIO_MSG_EVENT_DEVICE:
-        mp->event_device.index = virtio_msg_unpack_u32(msg, 0);
+        LE_TO_CPU(pl->event_device.index);
         break;
     default:
         break;
-    }
+    } 
 }
 
-static inline void virtio_msg_unpack_resp(VirtIOMSG *msg, VirtIOMSGPayload *mp)
+static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
 {
+    VirtIOMSGPayload *pl = &msg->payload;
+
     switch (msg->type) {
     case VIRTIO_MSG_DEVICE_INFO:
-        mp->get_device_info_resp.device_version = virtio_msg_unpack_u32(msg, 0);
-        mp->get_device_info_resp.device_id = virtio_msg_unpack_u32(msg, 4);
-        mp->get_device_info_resp.vendor_id = virtio_msg_unpack_u32(msg, 8);
+        LE_TO_CPU(pl->get_device_info_resp.device_version);
+        LE_TO_CPU(pl->get_device_info_resp.device_id);
+        LE_TO_CPU(pl->get_device_info_resp.vendor_id);
         break;
     case VIRTIO_MSG_GET_DEVICE_FEAT:
-        mp->get_device_feat_resp.index = virtio_msg_unpack_u32(msg, 0);
-        mp->get_device_feat_resp.features = virtio_msg_unpack_u64(msg, 4);
+        LE_TO_CPU(pl->get_device_feat_resp.index);
+        LE_TO_CPU(pl->get_device_feat_resp.features);
         break;
     case VIRTIO_MSG_GET_DEVICE_STATUS:
-        mp->get_device_status_resp.status = virtio_msg_unpack_u32(msg, 0);
+        LE_TO_CPU(pl->get_device_status_resp.status);
         break;
     case VIRTIO_MSG_GET_DEVICE_CONF:
-        mp->get_device_conf_resp.size = virtio_msg_unpack_u32(msg, 0);
-        mp->get_device_conf_resp.offset = virtio_msg_unpack_u32(msg, 4);
-        mp->get_device_conf_resp.data = virtio_msg_unpack_u32(msg, 8);
+        LE_TO_CPU(pl->get_device_conf_resp.size);
+        LE_TO_CPU(pl->get_device_conf_resp.offset);
+        LE_TO_CPU(pl->get_device_conf_resp.data);
         break;
     case VIRTIO_MSG_GET_VQUEUE:
-        mp->get_vqueue_resp.index = virtio_msg_unpack_u32(msg, 0);
-        mp->get_vqueue_resp.max_size = virtio_msg_unpack_u32(msg, 4);
+        LE_TO_CPU(pl->get_vqueue_resp.index);
+        LE_TO_CPU(pl->get_vqueue_resp.max_size);
         break;
     default:
         break;
@@ -451,7 +448,7 @@ static inline void virtio_msg_print_status(uint32_t status)
 
 static inline void virtio_msg_print(VirtIOMSG *msg, bool resp)
 {
-    VirtIOMSGPayload mp = {0};
+    VirtIOMSGPayload *pl = &msg->payload;
     int i;
 
     assert(msg);
@@ -466,20 +463,14 @@ static inline void virtio_msg_print(VirtIOMSG *msg, bool resp)
         }
     }
 
-    if (resp) {
-        virtio_msg_unpack(msg, &mp);
-    } else {
-        virtio_msg_unpack_resp(msg, &mp);
-    }
-
     switch (msg->type) {
     case VIRTIO_MSG_GET_DEVICE_STATUS:
         if (resp) {
-            virtio_msg_print_status(mp.get_device_status_resp.status);
+            virtio_msg_print_status(pl->get_device_status_resp.status);
         }
         break;
     case VIRTIO_MSG_SET_DEVICE_STATUS:
-        virtio_msg_print_status(mp.set_device_status.status);
+        virtio_msg_print_status(pl->set_device_status.status);
         break;
     }
     printf("\n");
