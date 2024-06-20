@@ -11,6 +11,7 @@
 #include "qemu/iov.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qemu/error-report.h"
 #include "hw/virtio/virtio.h"
 #include "hw/qdev-properties.h"
 #include "hw/virtio/virtio-msg-bus.h"
@@ -192,6 +193,13 @@ static void virtio_msg_pd_reset_hold(Object *obj, ResetType type)
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
     virtio_msg_unpack_resp(&msg_resp);
 
+    if (vpd->cfg.virtio_id != msg_resp.payload.get_device_info_resp.device_id) {
+        error_report("virtio-msg-proxy: Device-id missmatch! %x != %x",
+                     msg_resp.payload.get_device_info_resp.device_id,
+                     vpd->cfg.virtio_id);
+        exit(EXIT_FAILURE);
+    }
+
     /* Update features.  */
     vdev->host_features |= vmpd_get_features(vdev, vdev->host_features,
                                              &error_abort);
@@ -207,7 +215,7 @@ static void virtio_msg_pd_device_realize(DeviceState *dev, Error **errp)
     qbus_init(&vpd->bus, sizeof(vpd->bus), TYPE_VIRTIO_MSG_BUS, dev, NULL);
 
     /* TODO: Figure out a way to read this from the peer.  */
-    virtio_init(vdev, VIRTIO_ID_NET, 0);
+    virtio_init(vdev, vpd->cfg.virtio_id, 0);
 }
 
 static void virtio_msg_pd_device_unrealize(DeviceState *dev)
@@ -229,6 +237,8 @@ static const VMStateDescription vmstate_virtio_msg_pd = {
 };
 
 static Property virtio_msg_pd_properties[] = {
+    DEFINE_PROP_UINT16("virtio-id", VirtIOMSGProxyDriver, cfg.virtio_id,
+                       VIRTIO_ID_NET),
     DEFINE_PROP_END_OF_LIST(),
 };
 
