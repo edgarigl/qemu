@@ -9,10 +9,10 @@
 DECLARE_OBJ_CHECKERS(VirtioBusState, VirtioBusClass,
                      VIRTIO_MSG_PROXY_BUS, TYPE_VIRTIO_MSG_PROXY_BUS)
 
-#define TYPE_VIRTIO_MSG_PROXY_BACKEND "virtio-msg-proxy-backend"
-OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMSGProxyBackend, VIRTIO_MSG_PROXY_BACKEND)
+#define TYPE_VIRTIO_MSG "virtio-msg"
+OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMSGProxy, VIRTIO_MSG)
 
-struct VirtIOMSGProxyBackend {
+struct VirtIOMSGProxy {
     SysBusDevice parent_obj;
 
     /* virtio-bus */
