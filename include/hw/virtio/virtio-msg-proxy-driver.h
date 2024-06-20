@@ -23,5 +23,9 @@ struct VirtIOMSGProxyDriver {
 
     BusState bus;
     VirtQueue *vq;
+
+    struct {
+        uint16_t virtio_id;
+    } cfg;
 };
 #endif
