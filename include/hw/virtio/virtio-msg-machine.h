@@ -8,7 +8,7 @@
 struct VirtIOMSGMachineState {
     MachineState parent_obj;
 
-    VirtIOMSGProxyBackend backends[1];
+    VirtIOMSGProxy backends[1];
 };
 
 #define TYPE_VIRTIO_MSG_MACHINE "x-virtio-msg-machine"
