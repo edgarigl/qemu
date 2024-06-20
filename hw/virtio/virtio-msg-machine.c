@@ -19,7 +19,7 @@ static void virtio_msg_machine_init(MachineState *machine)
 
     for (i = 0; i < ARRAY_SIZE(s->backends); i++) {
         object_initialize_child(OBJECT(s), "backend[*]", &s->backends[i],
-                                TYPE_VIRTIO_MSG_PROXY_BACKEND);
+                                TYPE_VIRTIO_MSG);
         sysbus_realize(SYS_BUS_DEVICE(&s->backends[i]), &error_fatal);
     }
 }
