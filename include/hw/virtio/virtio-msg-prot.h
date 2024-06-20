@@ -1,5 +1,7 @@
 /*
  * Virtio MSG - Message packing/unpacking functions.
+ * TODO: Use either packed struct or memcpy (not both).
+ * QEMU upstream OK with packed structs?
  *
  * Copyright (c) 2024 Advanced Micro Devices, Inc.
  * Written by Edgar E. Iglesias <edgar.iglesias@amd.com>.
