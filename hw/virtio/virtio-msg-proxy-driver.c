@@ -32,15 +32,14 @@ static void virtio_msg_pd_handle_output(VirtIODevice *vdev, VirtQueue *vq)
 static bool virtio_msg_pd_probe_queue(VirtIOMSGProxyDriver *vpd, int i)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
-    VirtIOMSGPayload mp = {0};
     VirtIOMSG msg, msg_resp;
 
     virtio_msg_pack_get_vqueue(&msg, i);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
-    virtio_msg_unpack_resp(&msg_resp, &mp);
+    virtio_msg_unpack_resp(&msg_resp);
 
     virtio_add_queue(vdev, 64, virtio_msg_pd_handle_output);
-    return mp.get_vqueue_resp.max_size != 0;
+    return msg_resp.payload.get_vqueue_resp.max_size != 0;
 }
 
 static void virtio_msg_pd_probe_queues(VirtIOMSGProxyDriver *vpd)
@@ -68,14 +67,13 @@ static void vmb_event_device(VirtIOMSGProxyDriver *vpd,
 static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(bd->opaque);
-    VirtIOMSGPayload mp;
 
     //virtio_msg_print(msg, false);
-    virtio_msg_unpack(msg, &mp);
+    virtio_msg_unpack(msg);
 
     switch (msg->type) {
     case VIRTIO_MSG_EVENT_DEVICE:
-        vmb_event_device(vpd, msg, &mp);
+        vmb_event_device(vpd, msg, &msg->payload);
         break;
     default:
         /* Ignore.  */
@@ -93,14 +91,13 @@ static uint64_t vmpd_get_features(VirtIODevice *vdev, uint64_t f, Error **errp)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
-    VirtIOMSGPayload mp = {0};
 
     if (virtio_msg_bus_connected(&vpd->bus)) {
         virtio_msg_pack_get_device_feat(&msg, 0, f);
         virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
-        virtio_msg_unpack_resp(&msg_resp, &mp);
+        virtio_msg_unpack_resp(&msg_resp);
 
-        f = mp.get_device_feat_resp.features;
+        f = msg_resp.payload.get_device_feat_resp.features;
     }
 
     return f;
@@ -119,7 +116,6 @@ static void virtio_msg_pd_set_status(VirtIODevice *vdev, uint8_t status)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
-    VirtIOMSGPayload mp = {0};
 
     printf("%s: 0x%x\n", __func__, status);
     if (!vdev->vm_running) {
@@ -136,9 +132,9 @@ static void virtio_msg_pd_set_status(VirtIODevice *vdev, uint8_t status)
 
     virtio_msg_pack_get_device_status(&msg);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
-    virtio_msg_unpack_resp(&msg_resp, &mp);
+    virtio_msg_unpack_resp(&msg_resp);
 
-    vdev->status = mp.get_device_status_resp.status;
+    vdev->status = msg_resp.payload.get_device_status_resp.status;
 }
 
 static uint32_t virtio_msg_pd_read_config(VirtIODevice *vdev,
@@ -146,15 +142,14 @@ static uint32_t virtio_msg_pd_read_config(VirtIODevice *vdev,
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
-    VirtIOMSGPayload mp = {0};
 
     virtio_msg_pack_get_device_conf(&msg, size, addr);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
-    virtio_msg_unpack_resp(&msg_resp, &mp);
+    virtio_msg_unpack_resp(&msg_resp);
 
     printf("%s: size=%d addr=%x data=%x\n", __func__, size, addr,
-            mp.get_device_conf_resp.data);
-    return mp.get_device_conf_resp.data;
+            msg_resp.payload.get_device_conf_resp.data);
+    return msg_resp.payload.get_device_conf_resp.data;
 }
 
 static void virtio_msg_pd_write_config(VirtIODevice *vdev,
@@ -190,15 +185,12 @@ static void virtio_msg_pd_reset_hold(Object *obj, ResetType type)
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(obj);
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
     VirtIOMSG msg, msg_resp;
-    VirtIOMSGPayload mp = {0};
 
     virtio_msg_bus_connect(&vpd->bus, &vmb_port, vpd);
 
     virtio_msg_pack_get_device_info(&msg);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
-    virtio_msg_unpack_resp(&msg_resp, &mp);
-
-    printf("device-id = 0x%x\n", mp.get_device_info_resp.device_id);
+    virtio_msg_unpack_resp(&msg_resp);
 
     /* Update features.  */
     vdev->host_features |= vmpd_get_features(vdev, vdev->host_features,
