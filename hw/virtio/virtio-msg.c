@@ -219,7 +219,6 @@ static int vmsg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 
     if (handler) {
         handler(proxy, msg, &mp);
-        return VIRTIO_MSG_NO_ERROR;
     }
 
     return VIRTIO_MSG_NO_ERROR;
