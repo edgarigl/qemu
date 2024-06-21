@@ -135,6 +135,21 @@ typedef struct VirtIOMSG {
     }                                                       \
 }
 
+
+/**
+ * virtio_msg_unpack: Unpacks a wire virtio message into a host version
+ * @msg: the virtio message to unpack
+ *
+ * Virtio messages arriving on the virtio message bus have a specific
+ * formate (little-endian, packet encoding, etc). To simplify for the
+ * the rest of the implementation, we have packers and unpackers that
+ * convert the wire messages into host versions. This includes endianess
+ * conversion and potentially future decoding and expansion.
+ *
+ * At the moment, we only do endian conversion, virtio_msg_unpack() should
+ * get completely eliminated by the compiler when targetting little-endian
+ * hosts.
+ */
 static inline void virtio_msg_unpack(VirtIOMSG *msg) {
     VirtIOMSGPayload *pl = &msg->payload;
 
@@ -184,6 +199,13 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
     } 
 }
 
+/**
+ * virtio_msg_unpack_resp: Unpacks a wire virtio message responses into
+ *                         a host version
+ * @msg: the virtio message to unpack
+ *
+ * See virtio_msg_unpack().
+ */
 static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
 {
     VirtIOMSGPayload *pl = &msg->payload;
