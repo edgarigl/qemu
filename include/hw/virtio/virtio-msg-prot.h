@@ -126,12 +126,12 @@ typedef struct VirtIOMSG {
 {                                                           \
     if (sizeof(v) == 2) {                                   \
         v = le16_to_cpu(v);                                 \
-    }                                                       \
-    if (sizeof(v) == 4) {                                   \
+    } else if (sizeof(v) == 4) {                            \
         v = le32_to_cpu(v);                                 \
-    }                                                       \
-    if (sizeof(v) == 8) {                                   \
+    } else if (sizeof(v) == 8) {                            \
         v = le64_to_cpu(v);                                 \
+    } else {                                                \
+        g_assert_not_reached();                             \
     }                                                       \
 }
 
