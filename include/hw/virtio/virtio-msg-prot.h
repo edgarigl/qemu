@@ -138,6 +138,8 @@ typedef struct VirtIOMSG {
 static inline void virtio_msg_unpack(VirtIOMSG *msg) {
     VirtIOMSGPayload *pl = &msg->payload;
 
+    LE_TO_CPU(msg->dev_id);
+
     switch (msg->type) {
     case VIRTIO_MSG_GET_DEVICE_FEAT:
         LE_TO_CPU(pl->get_device_feat.index);
@@ -185,6 +187,8 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
 static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
 {
     VirtIOMSGPayload *pl = &msg->payload;
+
+    LE_TO_CPU(msg->dev_id);
 
     switch (msg->type) {
     case VIRTIO_MSG_DEVICE_INFO:
