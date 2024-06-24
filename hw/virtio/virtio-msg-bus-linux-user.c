@@ -47,7 +47,6 @@ static int virtio_msg_bus_linux_user_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg
                                           VirtIOMSG *msg_resp)
 {
     VirtIOMSGBusLinuxUser *s = VIRTIO_MSG_BUS_LINUX_USER(bd);
-    VirtIOMSG msg_little_endian;
     spsc_queue *q_tx;
     spsc_queue *q_rx;
     bool sent;
@@ -56,11 +55,8 @@ static int virtio_msg_bus_linux_user_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg
     q_tx = bd->peer->is_driver ? s->shm_queues.driver : s->shm_queues.device;
     q_rx = bd->peer->is_driver ? s->shm_queues.device : s->shm_queues.driver;
 
-    /* FIXME: endian convert header here or distributed? */
-    memcpy(&msg_little_endian, msg_req, sizeof *msg_req);
-
     do {
-        sent = spsc_send(q_tx, &msg_little_endian, sizeof *msg_req);
+        sent = spsc_send(q_tx, msg_req, sizeof *msg_req);
     } while (!sent);
 
     virtio_msg_bus_linux_user_send_notify(s);
@@ -70,7 +66,24 @@ static int virtio_msg_bus_linux_user_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg
 
         for (i = 0; !r && i < 40; i++){
             r = spsc_recv(q_rx, msg_resp, sizeof *msg_resp);
-            usleep(1);
+
+            if (!r) {
+                /* No message available, keep going with some delay.  */
+                usleep(i);
+            }
+
+            if (r && msg_resp->type != msg_req->type) {
+                /*
+                 * We've got a message but it's not the response we're
+                 * expecting. Forward it to the receiver logic.
+                 *
+                 * This should only happen for notifications.
+                 */
+                assert(bd->peer->receive);
+                bd->peer->receive(bd, msg_resp);
+                /* Keep going.  */
+                r = 0;
+            }
         }
         if (!r) {
             printf("ERROR: %s: timed out!!\n", __func__);
