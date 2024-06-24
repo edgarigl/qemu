@@ -30,9 +30,14 @@ static void vmsg_get_device_feat(VirtIOMSGProxy *proxy,
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
     VirtIOMSG msg_resp;
-    uint64_t features = mp->get_device_feat.features;
+    uint64_t features;
 
-    features = vdc->get_features(vdev, features, &error_abort);
+    /*
+     * The peer's host_features shouldn't matter here. When we're
+     * connected to a QEMU proxy, we need to advertise our local
+     * host features and not anything provided by the proxy.
+     */
+    features = vdc->get_features(vdev, vdev->host_features, &error_abort);
 
     virtio_msg_pack_get_device_feat_resp(&msg_resp, 0, features);
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);

@@ -55,7 +55,6 @@ typedef struct VirtIOMSGPayload {
         } QEMU_PACKED get_device_info_resp;
         struct {
             uint32_t index;
-            uint64_t features;
         } QEMU_PACKED get_device_feat;
         struct {
             uint32_t index;
@@ -158,7 +157,6 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
     switch (msg->type) {
     case VIRTIO_MSG_GET_DEVICE_FEAT:
         LE_TO_CPU(pl->get_device_feat.index);
-        LE_TO_CPU(pl->get_device_feat.features);
         break;
     case VIRTIO_MSG_SET_DEVICE_FEAT:
         LE_TO_CPU(pl->set_device_feat.index);
@@ -271,14 +269,12 @@ static inline void virtio_msg_pack_get_device_info_resp(VirtIOMSG *msg,
 }
 
 static inline void virtio_msg_pack_get_device_feat(VirtIOMSG *msg,
-                                                   uint32_t index,
-                                                   uint64_t f)
+                                                   uint32_t index)
 {
     VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_DEVICE_FEAT, 0, 0);
 
     pl->get_device_feat.index = cpu_to_le32(index);
-    pl->get_device_feat.features = cpu_to_le64(f);
 }
 
 static inline void virtio_msg_pack_get_device_feat_resp(VirtIOMSG *msg,
