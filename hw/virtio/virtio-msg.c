@@ -9,9 +9,9 @@
 #include "qemu/log.h"
 #include "trace.h"
 
-static void vmsg_device_info(VirtIOMSGProxy *proxy,
-                               VirtIOMSG *msg,
-                               VirtIOMSGPayload *mp)
+static void virtio_msg_device_info(VirtIOMSGProxy *proxy,
+                                   VirtIOMSG *msg,
+                                   VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
     VirtIOMSG msg_resp;
@@ -23,9 +23,9 @@ static void vmsg_device_info(VirtIOMSGProxy *proxy,
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
-static void vmsg_get_device_feat(VirtIOMSGProxy *proxy,
-                                   VirtIOMSG *msg,
-                                   VirtIOMSGPayload *mp)
+static void virtio_msg_get_device_feat(VirtIOMSGProxy *proxy,
+                                       VirtIOMSG *msg,
+                                       VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
@@ -43,22 +43,22 @@ static void vmsg_get_device_feat(VirtIOMSGProxy *proxy,
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
-static void vmsg_set_device_feat(VirtIOMSGProxy *proxy,
-                                   VirtIOMSG *msg,
-                                   VirtIOMSGPayload *mp)
+static void virtio_msg_set_device_feat(VirtIOMSGProxy *proxy,
+                                       VirtIOMSG *msg,
+                                       VirtIOMSGPayload *mp)
 {
     proxy->guest_features = mp->set_device_feat.features;
 }
 
-static void virtio_msg_pb_soft_reset(VirtIOMSGProxy *proxy)
+static void virtio_msg_soft_reset(VirtIOMSGProxy *proxy)
 {
     virtio_bus_reset(&proxy->bus);
     proxy->guest_features = 0;
 }
 
-static void vmsg_set_device_status(VirtIOMSGProxy *proxy,
-                                     VirtIOMSG *msg,
-                                     VirtIOMSGPayload *mp)
+static void virtio_msg_set_device_status(VirtIOMSGProxy *proxy,
+                                         VirtIOMSG *msg,
+                                         VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
     uint32_t status = mp->set_device_status.status;
@@ -81,13 +81,13 @@ static void vmsg_set_device_status(VirtIOMSGProxy *proxy,
     }
 
     if (status == 0) {
-        virtio_msg_pb_soft_reset(proxy);
+        virtio_msg_soft_reset(proxy);
     }
 }
 
-static void vmsg_get_device_status(VirtIOMSGProxy *proxy,
-                                     VirtIOMSG *msg,
-                                     VirtIOMSGPayload *mp)
+static void virtio_msg_get_device_status(VirtIOMSGProxy *proxy,
+                                         VirtIOMSG *msg,
+                                         VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
     VirtIOMSG msg_resp;
@@ -97,9 +97,9 @@ static void vmsg_get_device_status(VirtIOMSGProxy *proxy,
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
-static void vmsg_get_device_conf(VirtIOMSGProxy *proxy,
-                                   VirtIOMSG *msg,
-                                   VirtIOMSGPayload *mp)
+static void virtio_msg_get_device_conf(VirtIOMSGProxy *proxy,
+                                       VirtIOMSG *msg,
+                                       VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
     uint32_t size = mp->get_device_conf.size;
@@ -126,9 +126,9 @@ static void vmsg_get_device_conf(VirtIOMSGProxy *proxy,
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
-static void vmsg_set_device_conf(VirtIOMSGProxy *proxy,
-                                   VirtIOMSG *msg,
-                                   VirtIOMSGPayload *mp)
+static void virtio_msg_set_device_conf(VirtIOMSGProxy *proxy,
+                                       VirtIOMSG *msg,
+                                       VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
     uint32_t size = mp->set_device_conf.size;
@@ -151,9 +151,9 @@ static void vmsg_set_device_conf(VirtIOMSGProxy *proxy,
     }
 }
 
-static void vmsg_get_vqueue(VirtIOMSGProxy *proxy,
-                              VirtIOMSG *msg,
-                              VirtIOMSGPayload *mp)
+static void virtio_msg_get_vqueue(VirtIOMSGProxy *proxy,
+                                  VirtIOMSG *msg,
+                                  VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
     VirtIOMSG msg_resp;
@@ -168,9 +168,9 @@ static void vmsg_get_vqueue(VirtIOMSGProxy *proxy,
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
-static void vmsg_set_vqueue(VirtIOMSGProxy *proxy,
-                              VirtIOMSG *msg,
-                              VirtIOMSGPayload *mp)
+static void virtio_msg_set_vqueue(VirtIOMSGProxy *proxy,
+                                  VirtIOMSG *msg,
+                                  VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
 
@@ -182,9 +182,9 @@ static void vmsg_set_vqueue(VirtIOMSGProxy *proxy,
     virtio_queue_enable(vdev, vdev->queue_sel);
 }
 
-static void vmsg_event_driver(VirtIOMSGProxy *proxy,
-                                VirtIOMSG *msg,
-                                VirtIOMSGPayload *mp)
+static void virtio_msg_event_driver(VirtIOMSGProxy *proxy,
+                                    VirtIOMSG *msg,
+                                    VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
 
@@ -197,19 +197,19 @@ typedef void (*VirtIOMSGHandler)(VirtIOMSGProxy *proxy,
                                  VirtIOMSGPayload *mp);
 
 static const VirtIOMSGHandler msg_handlers[VIRTIO_MSG_MAX] = {
-    [VIRTIO_MSG_DEVICE_INFO] = vmsg_device_info,
-    [VIRTIO_MSG_GET_DEVICE_FEAT] = vmsg_get_device_feat,
-    [VIRTIO_MSG_SET_DEVICE_FEAT] = vmsg_set_device_feat,
-    [VIRTIO_MSG_GET_DEVICE_STATUS] = vmsg_get_device_status,
-    [VIRTIO_MSG_SET_DEVICE_STATUS] = vmsg_set_device_status,
-    [VIRTIO_MSG_GET_DEVICE_CONF] = vmsg_get_device_conf,
-    [VIRTIO_MSG_SET_DEVICE_CONF] = vmsg_set_device_conf,
-    [VIRTIO_MSG_GET_VQUEUE] = vmsg_get_vqueue,
-    [VIRTIO_MSG_SET_VQUEUE] = vmsg_set_vqueue,
-    [VIRTIO_MSG_EVENT_DRIVER] = vmsg_event_driver,
+    [VIRTIO_MSG_DEVICE_INFO] = virtio_msg_device_info,
+    [VIRTIO_MSG_GET_DEVICE_FEAT] = virtio_msg_get_device_feat,
+    [VIRTIO_MSG_SET_DEVICE_FEAT] = virtio_msg_set_device_feat,
+    [VIRTIO_MSG_GET_DEVICE_STATUS] = virtio_msg_get_device_status,
+    [VIRTIO_MSG_SET_DEVICE_STATUS] = virtio_msg_set_device_status,
+    [VIRTIO_MSG_GET_DEVICE_CONF] = virtio_msg_get_device_conf,
+    [VIRTIO_MSG_SET_DEVICE_CONF] = virtio_msg_set_device_conf,
+    [VIRTIO_MSG_GET_VQUEUE] = virtio_msg_get_vqueue,
+    [VIRTIO_MSG_SET_VQUEUE] = virtio_msg_set_vqueue,
+    [VIRTIO_MSG_EVENT_DRIVER] = virtio_msg_event_driver,
 };
 
-static int vmsg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
+static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(bd->opaque);
     VirtIOMSGHandler handler;
@@ -228,12 +228,12 @@ static int vmsg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     return VIRTIO_MSG_NO_ERROR;
 }
 
-static const VirtIOMSGBusPort vmsg_port = {
-    .receive = vmsg_receive_msg,
+static const VirtIOMSGBusPort virtio_msg_port = {
+    .receive = virtio_msg_receive_msg,
     .is_driver = false
 };
 
-static void virtio_msg_pb_notify_queue(DeviceState *opaque, uint16_t index)
+static void virtio_msg_notify_queue(DeviceState *opaque, uint16_t index)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(opaque);
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
@@ -247,7 +247,7 @@ static void virtio_msg_pb_notify_queue(DeviceState *opaque, uint16_t index)
     virtio_msg_bus_send(&proxy->msg_bus, &msg, NULL);
 }
 
-static const VMStateDescription vmstate_virtio_msg_pb_state_sub = {
+static const VMStateDescription vmstate_virtio_msg_state_sub = {
     .name = "virtio_msg_device",
     .version_id = 1,
     .minimum_version_id = 1,
@@ -265,41 +265,41 @@ static const VMStateDescription vmstate_virtio_msg = {
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {
-        &vmstate_virtio_msg_pb_state_sub,
+        &vmstate_virtio_msg_state_sub,
         NULL
     }
 };
 
-static void virtio_msg_pb_save_extra_state(DeviceState *opaque, QEMUFile *f)
+static void virtio_msg_save_extra_state(DeviceState *opaque, QEMUFile *f)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(opaque);
 
     vmstate_save_state(f, &vmstate_virtio_msg, proxy, NULL);
 }
 
-static int virtio_msg_pb_load_extra_state(DeviceState *opaque, QEMUFile *f)
+static int virtio_msg_load_extra_state(DeviceState *opaque, QEMUFile *f)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(opaque);
 
     return vmstate_load_state(f, &vmstate_virtio_msg, proxy, 1);
 }
 
-static bool virtio_msg_pb_has_extra_state(DeviceState *opaque)
+static bool virtio_msg_has_extra_state(DeviceState *opaque)
 {
     return true;
 }
 
-static void virtio_msg_pb_reset_hold(Object *obj, ResetType type)
+static void virtio_msg_reset_hold(Object *obj, ResetType type)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(obj);
 
-    virtio_msg_pb_soft_reset(proxy);
+    virtio_msg_soft_reset(proxy);
 
-    virtio_msg_bus_connect(&proxy->msg_bus, &vmsg_port, proxy);
+    virtio_msg_bus_connect(&proxy->msg_bus, &virtio_msg_port, proxy);
 }
 
-static int virtio_msg_pb_set_guest_notifier(DeviceState *d, int n, bool assign,
-                                          bool with_irqfd)
+static int virtio_msg_set_guest_notifier(DeviceState *d, int n, bool assign,
+                                         bool with_irqfd)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(d);
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
@@ -324,8 +324,9 @@ static int virtio_msg_pb_set_guest_notifier(DeviceState *d, int n, bool assign,
 
     return 0;
 }
-static int virtio_msg_pb_set_config_guest_notifier(DeviceState *d, bool assign,
-                                                 bool with_irqfd)
+
+static int virtio_msg_set_config_guest_notifier(DeviceState *d, bool assign,
+                                                bool with_irqfd)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(d);
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
@@ -348,8 +349,9 @@ static int virtio_msg_pb_set_config_guest_notifier(DeviceState *d, bool assign,
     }
     return r;
 }
-static int virtio_msg_pb_set_guest_notifiers(DeviceState *d, int nvqs,
-                                           bool assign)
+
+static int virtio_msg_set_guest_notifiers(DeviceState *d, int nvqs,
+                                    bool assign)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(d);
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
@@ -364,12 +366,12 @@ static int virtio_msg_pb_set_guest_notifiers(DeviceState *d, int nvqs,
             break;
         }
 
-        r = virtio_msg_pb_set_guest_notifier(d, n, assign, with_irqfd);
+        r = virtio_msg_set_guest_notifier(d, n, assign, with_irqfd);
         if (r < 0) {
             goto assign_error;
         }
     }
-    r = virtio_msg_pb_set_config_guest_notifier(d, assign, with_irqfd);
+    r = virtio_msg_set_config_guest_notifier(d, assign, with_irqfd);
     if (r < 0) {
         goto assign_error;
     }
@@ -380,12 +382,12 @@ assign_error:
     /* We get here on assignment failure. Recover by undoing for VQs 0 .. n. */
     assert(assign);
     while (--n >= 0) {
-        virtio_msg_pb_set_guest_notifier(d, n, !assign, false);
+        virtio_msg_set_guest_notifier(d, n, !assign, false);
     }
     return r;
 }
 
-static void virtio_msg_pb_pre_plugged(DeviceState *d, Error **errp)
+static void virtio_msg_pre_plugged(DeviceState *d, Error **errp)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(d);
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
@@ -393,11 +395,11 @@ static void virtio_msg_pb_pre_plugged(DeviceState *d, Error **errp)
     virtio_add_feature(&vdev->host_features, VIRTIO_F_VERSION_1);
 }
 
-static Property virtio_msg_pb_properties[] = {
+static Property virtio_msg_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
-static void virtio_msg_pb_realize(DeviceState *d, Error **errp)
+static void virtio_msg_realize(DeviceState *d, Error **errp)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(d);
 
@@ -407,70 +409,70 @@ static void virtio_msg_pb_realize(DeviceState *d, Error **errp)
               TYPE_VIRTIO_MSG_BUS, d, NULL);
 }
 
-static void virtio_msg_pb_class_init(ObjectClass *klass, void *data)
+static void virtio_msg_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
-    dc->realize = virtio_msg_pb_realize;
+    dc->realize = virtio_msg_realize;
     dc->user_creatable = true;
-    rc->phases.hold  = virtio_msg_pb_reset_hold;
+    rc->phases.hold  = virtio_msg_reset_hold;
 
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
-    device_class_set_props(dc, virtio_msg_pb_properties);
+    device_class_set_props(dc, virtio_msg_properties);
 }
 
-static const TypeInfo virtio_msg_pb_info = {
+static const TypeInfo virtio_msg_info = {
     .name          = TYPE_VIRTIO_MSG,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(VirtIOMSGProxy),
-    .class_init    = virtio_msg_pb_class_init,
+    .class_init    = virtio_msg_class_init,
 };
 
-static char *virtio_msg_pb_bus_get_dev_path(DeviceState *dev)
+static char *virtio_msg_bus_get_dev_path(DeviceState *dev)
 {
-    BusState *virtio_msg_pb_bus;
-    VirtIOMSGProxy *virtio_msg_pb_proxy;
+    BusState *virtio_msg_bus;
+    VirtIOMSGProxy *virtio_msg_proxy;
     char *proxy_path;
 
-    virtio_msg_pb_bus = qdev_get_parent_bus(dev);
-    virtio_msg_pb_proxy = VIRTIO_MSG(virtio_msg_pb_bus->parent);
-    proxy_path = qdev_get_dev_path(DEVICE(virtio_msg_pb_proxy));
+    virtio_msg_bus = qdev_get_parent_bus(dev);
+    virtio_msg_proxy = VIRTIO_MSG(virtio_msg_bus->parent);
+    proxy_path = qdev_get_dev_path(DEVICE(virtio_msg_proxy));
 
     return proxy_path;
 }
 
-static void virtio_msg_pb_bus_class_init(ObjectClass *klass, void *data)
+static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
 {
     BusClass *bus_class = BUS_CLASS(klass);
     VirtioBusClass *k = VIRTIO_BUS_CLASS(klass);
 
-    k->notify_queue = virtio_msg_pb_notify_queue;
-    k->save_extra_state = virtio_msg_pb_save_extra_state;
-    k->load_extra_state = virtio_msg_pb_load_extra_state;
-    k->has_extra_state = virtio_msg_pb_has_extra_state;
-    k->set_guest_notifiers = virtio_msg_pb_set_guest_notifiers;
+    k->notify_queue = virtio_msg_notify_queue;
+    k->save_extra_state = virtio_msg_save_extra_state;
+    k->load_extra_state = virtio_msg_load_extra_state;
+    k->has_extra_state = virtio_msg_has_extra_state;
+    k->set_guest_notifiers = virtio_msg_set_guest_notifiers;
 #if 0
-    k->ioeventfd_enabled = virtio_msg_pb_ioeventfd_enabled;
-    k->ioeventfd_assign = virtio_msg_pb_ioeventfd_assign;
+    k->ioeventfd_enabled = virtio_msg_ioeventfd_enabled;
+    k->ioeventfd_assign = virtio_msg_ioeventfd_assign;
 #endif
-    k->pre_plugged = virtio_msg_pb_pre_plugged;
+    k->pre_plugged = virtio_msg_pre_plugged;
     k->has_variable_vring_alignment = true;
     bus_class->max_dev = 1;
-    bus_class->get_dev_path = virtio_msg_pb_bus_get_dev_path;
+    bus_class->get_dev_path = virtio_msg_bus_get_dev_path;
 }
 
-static const TypeInfo virtio_msg_pb_bus_info = {
+static const TypeInfo virtio_msg_bus_info = {
     .name          = TYPE_VIRTIO_MSG_PROXY_BUS,
     .parent        = TYPE_VIRTIO_BUS,
     .instance_size = sizeof(VirtioBusState),
-    .class_init    = virtio_msg_pb_bus_class_init,
+    .class_init    = virtio_msg_bus_class_init,
 };
 
-static void virtio_msg_pb_register_types(void)
+static void virtio_msg_register_types(void)
 {
-    type_register_static(&virtio_msg_pb_bus_info);
-    type_register_static(&virtio_msg_pb_info);
+    type_register_static(&virtio_msg_bus_info);
+    type_register_static(&virtio_msg_info);
 }
 
-type_init(virtio_msg_pb_register_types)
+type_init(virtio_msg_register_types)
