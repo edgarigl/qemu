@@ -417,6 +417,11 @@ static inline void virtio_msg_pack_event_device(VirtIOMSG *msg, uint32_t index)
     pl->event_device.index = cpu_to_le32(index);
 }
 
+static inline void virtio_msg_pack_event_conf(VirtIOMSG *msg)
+{
+    virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_CONF, 0, 0);
+}
+
 static inline const char *virtio_msg_type_to_str(unsigned int type)
 {
 #define VIRTIO_MSG_TYPE2STR(x) [ VIRTIO_MSG_ ## x ] = stringify(x)

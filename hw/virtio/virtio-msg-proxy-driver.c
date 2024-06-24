@@ -81,6 +81,15 @@ static void vmb_event_device(VirtIOMSGProxyDriver *vpd,
     virtio_notify_force(vdev, vq);
 }
 
+static void vmb_event_conf(VirtIOMSGProxyDriver *vpd,
+                           VirtIOMSG *msg,
+                           VirtIOMSGPayload *mp)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
+
+    virtio_notify_config(vdev);
+}
+
 static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(bd->opaque);
@@ -91,6 +100,9 @@ static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     switch (msg->type) {
     case VIRTIO_MSG_EVENT_DEVICE:
         vmb_event_device(vpd, msg, &msg->payload);
+        break;
+    case VIRTIO_MSG_EVENT_CONF:
+        vmb_event_conf(vpd, msg, &msg->payload);
         break;
     default:
         /* Ignore.  */
