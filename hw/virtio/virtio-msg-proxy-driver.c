@@ -39,14 +39,30 @@ static bool virtio_msg_pd_probe_queue(VirtIOMSGProxyDriver *vpd, int i)
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
     virtio_msg_unpack_resp(&msg_resp);
 
-    virtio_add_queue(vdev, 64, virtio_msg_pd_handle_output);
+    if (msg_resp.payload.get_vqueue_resp.max_size) {
+        printf("%s: VQ add %d\n", __func__, i);
+        virtio_add_queue(vdev, msg_resp.payload.get_vqueue_resp.max_size,
+                         virtio_msg_pd_handle_output);
+    }
+
     return msg_resp.payload.get_vqueue_resp.max_size != 0;
 }
 
 static void virtio_msg_pd_probe_queues(VirtIOMSGProxyDriver *vpd)
 {
+    VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
     int i;
 
+    /* First, delete all queues.  */
+    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+        if (!virtio_queue_get_num(vdev, i)) {
+            break;
+        }
+        printf("%s: VQ Remove %d\n", __func__, i);
+        virtio_del_queue(vdev, i);
+    }
+
+    /* And start re-adding active queue's from the peer.  */
     for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
         if (!virtio_msg_pd_probe_queue(vpd, i)) {
             break;
@@ -94,7 +110,7 @@ static uint64_t vmpd_get_features(VirtIODevice *vdev, uint64_t f, Error **errp)
     VirtIOMSG msg, msg_resp;
 
     if (virtio_msg_bus_connected(&vpd->bus)) {
-        virtio_msg_pack_get_device_feat(&msg, 0, f);
+        virtio_msg_pack_get_device_feat(&msg, 0);
         virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
         virtio_msg_unpack_resp(&msg_resp);
 
@@ -123,9 +139,21 @@ static void virtio_msg_pd_set_status(VirtIODevice *vdev, uint8_t status)
         return;
     }
 
-    /* Probe peer queues after feature negotiation?  */
+    /*
+     * We need to update our view of available queue's from
+     * the peer after feature negotiation. This is because:
+     *
+     * Guests will first feature negotiate and then setup queues.
+     * Setting up the queues involves checking which queues are enabled
+     * by checking for non-zero virtio_queue_get_num(vdev, queue_index).
+     *
+     * When the guest queries for the max size over virtio-mmio or
+     * virtio-pci, QEMU will simply return the local view of
+     * virtio_queue_get_num(), which may get updated during feature
+     * negotiation (see virtio-net mq support for an example).
+     */
     if (status & VIRTIO_CONFIG_S_FEATURES_OK) {
-        //virtio_msg_pd_probe_queues(vpd);
+        virtio_msg_pd_probe_queues(vpd);
     }
 
     virtio_msg_pack_set_device_status(&msg, status);
@@ -148,8 +176,6 @@ static uint32_t virtio_msg_pd_read_config(VirtIODevice *vdev,
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
     virtio_msg_unpack_resp(&msg_resp);
 
-    printf("%s: size=%d addr=%x data=%x\n", __func__, size, addr,
-            msg_resp.payload.get_device_conf_resp.data);
     return msg_resp.payload.get_device_conf_resp.data;
 }
 
@@ -159,7 +185,6 @@ static void virtio_msg_pd_write_config(VirtIODevice *vdev,
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg;
 
-    printf("%s: size=%d addr=%x val=%x\n", __func__, size, addr, val);
     virtio_msg_pack_set_device_conf(&msg, size, addr, val);
     virtio_msg_bus_send(&vpd->bus, &msg, NULL);
 }
@@ -173,7 +198,6 @@ static void virtio_msg_pd_queue_enable(VirtIODevice *vdev, uint32_t n)
     uint64_t device_addr = virtio_queue_get_used_addr(vdev, n);
     uint32_t size = virtio_queue_get_num(vdev, n);
 
-    printf("%s: index=%d\n", __func__, n);
     virtio_msg_pack_set_vqueue(&msg, n, size,
                                descriptor_addr,
                                driver_addr,
@@ -200,10 +224,9 @@ static void virtio_msg_pd_reset_hold(Object *obj, ResetType type)
         exit(EXIT_FAILURE);
     }
 
-    /* Update features.  */
-    vdev->host_features |= vmpd_get_features(vdev, vdev->host_features,
-                                             &error_abort);
-    printf("Update host_features=%lx\n", vdev->host_features);
+    /* Update host features.  */
+    vdev->host_features = vmpd_get_features(vdev, vdev->host_features,
+                                            &error_abort);
     virtio_msg_pd_probe_queues(vpd);
 }
 
