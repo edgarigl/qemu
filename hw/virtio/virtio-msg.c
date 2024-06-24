@@ -183,12 +183,19 @@ static void virtio_msg_set_vqueue(VirtIOMSGProxy *proxy,
 }
 
 static void virtio_msg_event_driver(VirtIOMSGProxy *proxy,
-                                    VirtIOMSG *msg,
+                                    VirtIOMSG *msg_unused,
                                     VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
 
-    //printf("%s: %d\n", __func__, mp->event_driver.index);
+    if (!(vdev->status & VIRTIO_CONFIG_S_DRIVER_OK)) {
+        VirtIOMSG msg;
+
+        virtio_error(vdev, "Notification while driver not OK?");
+        virtio_msg_pack_event_conf(&msg);
+        virtio_msg_bus_send(&proxy->msg_bus, &msg, NULL);
+        return;
+    }
     virtio_queue_notify(vdev, mp->event_driver.index);
 }
 
@@ -214,6 +221,7 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     VirtIOMSGProxy *proxy = VIRTIO_MSG(bd->opaque);
     VirtIOMSGHandler handler;
 
+    //virtio_msg_print(msg, false);
     if (msg->type > ARRAY_SIZE(msg_handlers)) {
         return VIRTIO_MSG_ERROR_UNSUPPORTED_PACKET_TYPE;
     }
