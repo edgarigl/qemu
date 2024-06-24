@@ -83,9 +83,8 @@ static int virtio_msg_bus_linux_user_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg
 
 static int virtio_msg_bus_linux_user_can_receive(void *opaque)
 {
-    VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(opaque);
-
-    return bd->peer != NULL;
+    /* Consume multiple piled up notifications.  */
+    return 128;
 }
 
 static void virtio_msg_bus_linux_user_receive(void *opaque,
