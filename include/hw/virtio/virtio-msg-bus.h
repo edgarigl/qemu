@@ -61,6 +61,11 @@ static inline void virtio_msg_bus_connect(BusState *bus,
     VirtIOMSGBusDeviceClass *bdc;
 
     VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
+    if (!bd) {
+        /* Nothing connected to this virtio-msg device. Ignore. */
+        return;
+    }
+
     bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
 
     bd->peer = port;
