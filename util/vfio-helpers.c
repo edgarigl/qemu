@@ -104,7 +104,8 @@ struct QEMUVFIOState {
  * Find group file by PCI device address as specified @device, and return the
  * path. The returned string is owned by caller and should be g_free'ed later.
  */
-static char *sysfs_find_group_file(const char *device, Error **errp)
+static char *sysfs_find_group_file(const char *device,
+                                   const char *prefix, Error **errp)
 {
     g_autoptr(GError) gerr = NULL;
     char *sysfs_link;
@@ -125,7 +126,7 @@ static char *sysfs_find_group_file(const char *device, Error **errp)
         goto out;
     }
 
-    path = g_strdup_printf("/dev/vfio/%s", p + 1);
+    path = g_strdup_printf("/dev/vfio/%s%s", prefix, p + 1);
 out:
     g_free(sysfs_link);
     g_free(sysfs_group);
@@ -301,7 +302,9 @@ static int qemu_vfio_init_pci(QEMUVFIOState *s, const char *device,
     struct vfio_iommu_type1_info *iommu_info = NULL;
     size_t iommu_info_size = sizeof(*iommu_info);
     struct vfio_device_info device_info = { .argsz = sizeof(device_info) };
+    int iommu_model = VFIO_TYPE1_IOMMU;
     char *group_file = NULL;
+    bool has_iommu = true;
 
     s->usable_iova_ranges = NULL;
 
@@ -325,13 +328,27 @@ static int qemu_vfio_init_pci(QEMUVFIOState *s, const char *device,
     }
 
     /* Open the group */
-    group_file = sysfs_find_group_file(device, errp);
+    group_file = sysfs_find_group_file(device, "", errp);
     if (!group_file) {
         ret = -EINVAL;
         goto fail_container;
     }
 
     s->group = open(group_file, O_RDWR);
+    if (s->group == -1) {
+        /* Try again without IOMMU.  */
+        has_iommu = false;
+        g_free(group_file);
+        iommu_model = VFIO_NOIOMMU_IOMMU;
+        group_file = sysfs_find_group_file(device, "noiommu-", errp);
+        if (!group_file) {
+            ret = -EINVAL;
+            goto fail_container;
+        }
+
+        s->group = open(group_file, O_RDWR);
+    }
+
     if (s->group == -1) {
         error_setg_errno(errp, errno, "Failed to open VFIO group file: %s",
                          group_file);
@@ -362,7 +379,7 @@ static int qemu_vfio_init_pci(QEMUVFIOState *s, const char *device,
     }
 
     /* Enable the IOMMU model we want */
-    if (ioctl(s->container, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU)) {
+    if (ioctl(s->container, VFIO_SET_IOMMU, iommu_model)) {
         error_setg_errno(errp, errno, "Failed to set VFIO IOMMU type");
         ret = -errno;
         goto fail;
@@ -372,7 +389,7 @@ static int qemu_vfio_init_pci(QEMUVFIOState *s, const char *device,
     iommu_info->argsz = iommu_info_size;
 
     /* Get additional IOMMU info */
-    if (ioctl(s->container, VFIO_IOMMU_GET_INFO, iommu_info)) {
+    if (has_iommu && ioctl(s->container, VFIO_IOMMU_GET_INFO, iommu_info)) {
         error_setg_errno(errp, errno, "Failed to get IOMMU info");
         ret = -errno;
         goto fail;
@@ -438,15 +455,19 @@ static int qemu_vfio_init_pci(QEMUVFIOState *s, const char *device,
         }
     }
 
-    /* Enable bus master */
-    ret = qemu_vfio_pci_read_config(s, &pci_cmd, sizeof(pci_cmd), PCI_COMMAND);
-    if (ret) {
-        goto fail;
-    }
-    pci_cmd |= PCI_COMMAND_MASTER;
-    ret = qemu_vfio_pci_write_config(s, &pci_cmd, sizeof(pci_cmd), PCI_COMMAND);
-    if (ret) {
-        goto fail;
+    /* Enable bus master only if the device is behind an IOMMU. */
+    if (has_iommu) {
+        ret = qemu_vfio_pci_read_config(s, &pci_cmd, sizeof(pci_cmd),
+                                        PCI_COMMAND);
+        if (ret) {
+            goto fail;
+        }
+        pci_cmd |= PCI_COMMAND_MASTER;
+        ret = qemu_vfio_pci_write_config(s, &pci_cmd, sizeof(pci_cmd),
+                                         PCI_COMMAND);
+        if (ret) {
+            goto fail;
+        }
     }
     g_free(iommu_info);
     return 0;
