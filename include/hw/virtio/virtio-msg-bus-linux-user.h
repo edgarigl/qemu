@@ -29,8 +29,6 @@ typedef struct VirtIOMSGBusLinuxUser {
         spsc_queue *device;
     } shm_queues;
 
-    int notification_fd;
-
     struct {
         char *name;
         CharBackend chr;
