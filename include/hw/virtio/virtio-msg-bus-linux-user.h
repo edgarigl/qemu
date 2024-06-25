@@ -1,5 +1,10 @@
 /*
- * VirtIO MSG bus.
+ * VirtIO MSG bus between user-space proccesses on the same Linux host.
+ * A QEMU Chardev (preferably UNIX sockets) is used for notifications
+ * and an SPSC shared memory queue is used to move virtio-msg messages.
+ *
+ * The SPSC was borrowed from switchboard:
+ * https://github.com/zeroasiccorp/switchboard/
  *
  * Copyright (c) 2024 Advanced Micro Devices, Inc.
  * Written by Edgar E. Iglesias <edgar.iglesias@amd.com>
