@@ -47,7 +47,7 @@
 #define IVSHMEM_IOEVENTFD   0
 #define IVSHMEM_MSI     1
 
-#define IVSHMEM_REG_BAR_SIZE 0x100
+#define IVSHMEM_REG_BAR_SIZE 0x1000
 
 #define IVSHMEM_DEBUG 0
 #define IVSHMEM_DPRINTF(fmt, ...)                       \
