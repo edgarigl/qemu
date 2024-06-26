@@ -1,11 +1,10 @@
 #include "qemu/osdep.h"
 
-#include "hw/virtio/virtio-msg-machine.h"
 #include "exec/memory.h"
 #include "qapi/error.h"
-#include "hw/pci/pci_host.h"
 #include "hw/qdev-core.h"
-#include "hw/pci/msi.h"
+#include "sysemu/dma.h"
+#include "hw/virtio/virtio-msg-machine.h"
 
 #define RAM_BASE 0x40000000U
 
@@ -15,7 +14,9 @@ static void virtio_msg_machine_init(MachineState *machine)
     MemoryRegion *sysmem = get_system_memory();
     int i;
 
-    memory_region_add_subregion(sysmem, RAM_BASE, machine->ram);
+    if (machine->ram) {
+        memory_region_add_subregion(sysmem, RAM_BASE, machine->ram);
+    }
 
     for (i = 0; i < ARRAY_SIZE(s->backends); i++) {
         object_initialize_child(OBJECT(s), "backend[*]", &s->backends[i],
