@@ -191,6 +191,19 @@ void qemu_vfio_pci_unmap_bar(QEMUVFIOState *s, int index, void *bar,
     }
 }
 
+void qemu_vfio_pci_unmask_irq(QEMUVFIOState *s, int irq_type)
+{
+    struct vfio_irq_set irq_set = {
+        .argsz = sizeof(irq_set),
+        .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_UNMASK,
+        .index = irq_type,
+        .start = 0,
+        .count = 1,
+    };
+
+    ioctl(s->device, VFIO_DEVICE_SET_IRQS, &irq_set);
+}
+
 /**
  * Initialize device IRQ with @irq_type and register an event notifier.
  */
