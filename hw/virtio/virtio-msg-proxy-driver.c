@@ -223,7 +223,10 @@ static void virtio_msg_pd_reset_hold(Object *obj, ResetType type)
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
     VirtIOMSG msg, msg_resp;
 
-    virtio_msg_bus_connect(&vpd->bus, &vmb_port, vpd);
+    if (!virtio_msg_bus_connect(&vpd->bus, &vmb_port, vpd)) {
+        error_report("virtio-msg-proxy: Failed to connect!");
+        exit(EXIT_FAILURE);
+    }
 
     virtio_msg_pack_get_device_info(&msg);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);

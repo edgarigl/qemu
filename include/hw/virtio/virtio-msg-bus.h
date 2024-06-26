@@ -54,7 +54,7 @@ static inline VirtIOMSGBusDevice *virtio_msg_bus_get_device(BusState *qbus)
     return (VirtIOMSGBusDevice *)qdev;
 }
 
-static inline void virtio_msg_bus_connect(BusState *bus,
+static inline bool virtio_msg_bus_connect(BusState *bus,
                                           const VirtIOMSGBusPort *port,
                                           void *opaque)
 {
@@ -63,7 +63,7 @@ static inline void virtio_msg_bus_connect(BusState *bus,
     VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
     if (!bd) {
         /* Nothing connected to this virtio-msg device. Ignore. */
-        return;
+        return false;
     }
 
     bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
@@ -73,6 +73,8 @@ static inline void virtio_msg_bus_connect(BusState *bus,
     if (bdc->connect) {
         bdc->connect(bd, port, opaque);
     }
+
+    return true;
 }
 
 static inline bool virtio_msg_bus_connected(BusState *bus)
