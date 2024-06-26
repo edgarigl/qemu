@@ -16,6 +16,8 @@ specific_virtio_ss.add(files('virtio-msg-bus-linux-user.c'))
 specific_virtio_ss.add(files('virtio-msg-proxy-driver.c'))
 specific_virtio_ss.add(files('virtio-msg.c'))
 
+system_virtio_ss.add(when: 'CONFIG_VIRTIO_PCI', if_true: files('virtio-msg-proxy-driver-pci.c'))
+
 if have_vhost
   system_virtio_ss.add(files('vhost.c'))
   specific_virtio_ss.add(files('vhost-backend.c', 'vhost-iova-tree.c'))
@@ -24,7 +26,6 @@ if have_vhost
     specific_virtio_ss.add(files('vhost-user.c'))
     system_virtio_ss.add(files('vhost-user-device.c'))
     system_virtio_ss.add(when: 'CONFIG_VIRTIO_PCI', if_true: files('vhost-user-device-pci.c'))
-    system_virtio_ss.add(when: 'CONFIG_VIRTIO_PCI', if_true: files('virtio-msg-proxy-driver-pci.c'))
   endif
   if have_vhost_vdpa
     system_virtio_ss.add(files('vhost-vdpa.c'))
