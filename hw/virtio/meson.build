@@ -13,6 +13,7 @@ specific_virtio_ss.add(files('virtio-config-io.c', 'virtio-qmp.c'))
 specific_virtio_ss.add(files('virtio-msg-machine.c'))
 specific_virtio_ss.add(files('virtio-msg-bus.c'))
 specific_virtio_ss.add(files('virtio-msg-bus-linux-user.c'))
+specific_virtio_ss.add(files('virtio-msg-bus-ivshmem.c'))
 specific_virtio_ss.add(files('virtio-msg-proxy-driver.c'))
 specific_virtio_ss.add(files('virtio-msg.c'))
 
