@@ -17,6 +17,8 @@ specific_virtio_ss.add(files('virtio-msg-bus-linux-user.c'))
 specific_virtio_ss.add(files('virtio-msg-proxy-driver.c'))
 specific_virtio_ss.add(files('virtio-msg.c'))
 
+system_virtio_ss.add(when: 'CONFIG_VIRTIO_PCI', if_true: files('virtio-msg-proxy-driver-pci.c'))
+
 if have_vhost
   system_virtio_ss.add(files('vhost.c'))
   specific_virtio_ss.add(files('vhost-backend.c', 'vhost-iova-tree.c'))
@@ -35,7 +37,6 @@ if have_vhost
 
     # PCI Stubs
     system_virtio_ss.add(when: 'CONFIG_VIRTIO_PCI', if_true: files('vhost-user-device-pci.c'))
-    system_virtio_ss.add(when: 'CONFIG_VIRTIO_PCI', if_true: files('virtio-msg-proxy-driver-pci.c'))
     system_virtio_ss.add(when: ['CONFIG_VIRTIO_PCI', 'CONFIG_VHOST_USER_GPIO'],
                          if_true: files('vhost-user-gpio-pci.c'))
     system_virtio_ss.add(when: ['CONFIG_VIRTIO_PCI', 'CONFIG_VHOST_USER_I2C'],
