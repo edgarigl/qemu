@@ -46,6 +46,16 @@ static void virtio_msg_bus_ivshmem_send_notify(VirtIOMSGBusIVSHMEM *s)
                     s->cfg.remote_vmid << 16);
 }
 
+static AddressSpace *virtio_msg_bus_ivshmem_get_remote_as(VirtIOMSGBusDevice *bd)
+{
+    VirtIOMSGBusIVSHMEM *s = VIRTIO_MSG_BUS_IVSHMEM(bd);
+
+    if (!s->cfg.memdev) {
+        return NULL;
+    }
+    return &s->as;
+}
+
 static void virtio_msg_bus_ivshmem_process(VirtIOMSGBusDevice *bd) {
     VirtIOMSGBusIVSHMEM *s = VIRTIO_MSG_BUS_IVSHMEM(bd);
     spsc_queue *q;
@@ -134,20 +144,11 @@ static int virtio_msg_bus_ivshmem_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_re
 static void virtio_msg_bus_ivshmem_realize(DeviceState *dev, Error **errp)
 {
     VirtIOMSGBusIVSHMEM *s = VIRTIO_MSG_BUS_IVSHMEM(dev);
+    uint64_t mem_size;
     int ret;
 
-    if (s->cfg.msg_dev == NULL) {
-        error_setg(errp, "property 'msg-dev' not specified.");
-        return;
-    }
-
-    if (s->cfg.mem_dev == NULL) {
-        error_setg(errp, "property 'mem-dev' not specified.");
-        return;
-    }
-
-    if (s->cfg.mem_dev == 0) {
-        error_setg(errp, "property 'mem-size' not specified.");
+    if (s->cfg.dev == NULL) {
+        error_setg(errp, "property 'dev' not specified.");
         return;
     }
 
@@ -157,8 +158,7 @@ static void virtio_msg_bus_ivshmem_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    s->msg.dev = qemu_vfio_open_pci(s->cfg.msg_dev, &error_fatal);
-    s->mem.dev = qemu_vfio_open_pci(s->cfg.mem_dev, &error_fatal);
+    s->msg.dev = qemu_vfio_open_pci(s->cfg.dev, &error_fatal);
 
     s->msg.doorbell = qemu_vfio_pci_map_bar(s->msg.dev, 0, 0, 4 * KiB,
                                             PROT_READ | PROT_WRITE,
@@ -171,15 +171,16 @@ static void virtio_msg_bus_ivshmem_realize(DeviceState *dev, Error **errp)
                                           PROT_READ | PROT_WRITE,
                                           &error_fatal);
 
-    s->mem.mem = qemu_vfio_pci_map_bar(s->mem.dev, 2, 0, s->cfg.mem_size,
-                                       PROT_READ | PROT_WRITE,
-                                       &error_fatal);
-
     qemu_vfio_pci_init_irq(s->msg.dev, &s->notifier,
                            VFIO_PCI_INTX_IRQ_INDEX, &error_fatal);
 
     qemu_set_fd_handler(event_notifier_get_fd(&s->notifier),
                         ivshmem_intx_interrupt, NULL, s);
+
+    if (s->cfg.reset_queues) {
+        memset(s->msg.driver, 0, 4 * KiB);
+        memset(s->msg.device, 0, 4 * KiB);
+    }
 
     s->shm_queues.driver = spsc_open_mem("queue-driver",
                                          spsc_capacity(4 * KiB), s->msg.driver);
@@ -188,13 +189,49 @@ static void virtio_msg_bus_ivshmem_realize(DeviceState *dev, Error **errp)
 
     /* Unmask interrupts.  */
     ivshmem_write32(s->msg.doorbell + IVD_BAR0_INTR_MASK, 0xffffffff);
+
+    if (s->cfg.memdev == NULL) {
+        /* No memory mappings needed.  */
+        return;
+    }
+
+    s->mr_memdev = host_memory_backend_get_memory(s->cfg.memdev);
+    memory_region_init(&s->mr, OBJECT(s), "mr", UINT64_MAX);
+
+    mem_size = memory_region_size(s->mr_memdev);
+    if (s->cfg.mem_hole > 0) {
+        uint64_t lowmem_end = s->cfg.mem_offset + s->cfg.mem_low_size;
+        uint64_t highmem_start = lowmem_end + s->cfg.mem_hole;
+
+        memory_region_init_alias(&s->mr_lowmem, OBJECT(s), "lowmem",
+                                 s->mr_memdev, 0, s->cfg.mem_low_size);
+        memory_region_init_alias(&s->mr_highmem, OBJECT(s), "highmem",
+                                 s->mr_memdev, s->cfg.mem_low_size,
+                                 mem_size - s->cfg.mem_low_size);
+
+        memory_region_add_subregion(&s->mr, s->cfg.mem_offset, &s->mr_lowmem);
+        memory_region_add_subregion(&s->mr, highmem_start, &s->mr_highmem);
+    } else {
+        memory_region_init_alias(&s->mr_lowmem, OBJECT(s), "mem",
+                                 s->mr_memdev, 0, mem_size);
+        memory_region_add_subregion(&s->mr, s->cfg.mem_offset, &s->mr_lowmem);
+    }
+
+    address_space_init(&s->as, MEMORY_REGION(&s->mr), "msg-bus-as");
 }
 
 static Property virtio_msg_bus_ivshmem_props[] = {
-    DEFINE_PROP_STRING("msg-dev", VirtIOMSGBusIVSHMEM, cfg.msg_dev),
-    DEFINE_PROP_STRING("mem-dev", VirtIOMSGBusIVSHMEM, cfg.mem_dev),
-    DEFINE_PROP_SIZE("mem-size", VirtIOMSGBusIVSHMEM, cfg.mem_size, 0),
+    DEFINE_PROP_STRING("dev", VirtIOMSGBusIVSHMEM, cfg.dev),
     DEFINE_PROP_UINT32("remote-vmid", VirtIOMSGBusIVSHMEM, cfg.remote_vmid, 0),
+    DEFINE_PROP_BOOL("reset-queues", VirtIOMSGBusIVSHMEM,
+                     cfg.reset_queues, false),
+    DEFINE_PROP_LINK("memdev", VirtIOMSGBusIVSHMEM, cfg.memdev,
+                     TYPE_MEMORY_BACKEND, HostMemoryBackend *),
+    DEFINE_PROP_UINT64("mem-offset", VirtIOMSGBusIVSHMEM, cfg.mem_offset, 0),
+    DEFINE_PROP_UINT64("mem-low-size", VirtIOMSGBusIVSHMEM,
+                       cfg.mem_low_size, 0),
+    DEFINE_PROP_UINT64("mem-hole", VirtIOMSGBusIVSHMEM,
+                       cfg.mem_hole, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -205,6 +242,7 @@ static void virtio_msg_bus_ivshmem_class_init(ObjectClass *klass, void *data)
 
     bdc->process = virtio_msg_bus_ivshmem_process;
     bdc->send = virtio_msg_bus_ivshmem_send;
+    bdc->get_remote_as = virtio_msg_bus_ivshmem_get_remote_as;
 
     dc->realize = virtio_msg_bus_ivshmem_realize;
     device_class_set_props(dc, virtio_msg_bus_ivshmem_props);

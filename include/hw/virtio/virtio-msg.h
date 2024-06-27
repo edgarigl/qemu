@@ -15,6 +15,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMSGProxy, VIRTIO_MSG)
 struct VirtIOMSGProxy {
     SysBusDevice parent_obj;
 
+    AddressSpace dma_as;
+    AddressSpace *bus_as;
+    IOMMUMemoryRegion mr_iommu;
+    MemoryRegion *mr_bus;
+
     /* virtio-bus */
     VirtioBusState bus;
     /* virtio-msg-bus.  */

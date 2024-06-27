@@ -37,6 +37,11 @@ struct VirtIOMSGBusDeviceClass {
     void (*process)(VirtIOMSGBusDevice *bd);
     int (*send)(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req,
                 VirtIOMSG *msg_resp);
+
+    /*
+     * A bus device can construct a view into the guests address-space.
+     */
+    AddressSpace *(*get_remote_as)(VirtIOMSGBusDevice *bd);
 };
 
 typedef struct VirtIOMSGBusDevice {
@@ -54,35 +59,16 @@ static inline VirtIOMSGBusDevice *virtio_msg_bus_get_device(BusState *qbus)
     return (VirtIOMSGBusDevice *)qdev;
 }
 
-static inline bool virtio_msg_bus_connect(BusState *bus,
-                                          const VirtIOMSGBusPort *port,
-                                          void *opaque)
-{
-    VirtIOMSGBusDeviceClass *bdc;
-
-    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
-    if (!bd) {
-        /* Nothing connected to this virtio-msg device. Ignore. */
-        return false;
-    }
-
-    bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
-
-    bd->peer = port;
-    bd->opaque = opaque;
-    if (bdc->connect) {
-        bdc->connect(bd, port, opaque);
-    }
-
-    return true;
-}
-
 static inline bool virtio_msg_bus_connected(BusState *bus)
 {
     VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
 
     return bd && bd->peer != NULL;
 }
+
+bool virtio_msg_bus_connect(BusState *bus,
+                            const VirtIOMSGBusPort *port,
+                            void *opaque);
 
 static inline void virtio_msg_bus_process(BusState *bus)
 {
@@ -110,5 +96,18 @@ static inline int virtio_msg_bus_send(BusState *bus,
         r = bdc->send(bd, msg_req, msg_resp);
     }
     return r;
+}
+
+static inline AddressSpace *virtio_msg_bus_get_remote_as(BusState *bus)
+{
+    VirtIOMSGBusDeviceClass *bdc;
+
+    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
+    bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
+
+    if (bdc->get_remote_as) {
+        return bdc->get_remote_as(bd);
+    }
+    return NULL;
 }
 #endif

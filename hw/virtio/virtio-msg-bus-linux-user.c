@@ -23,6 +23,17 @@ static void virtio_msg_bus_linux_user_send_notify(VirtIOMSGBusLinuxUser *s)
     qemu_chr_fe_write_all(&s->cfg.chr, &c, sizeof c);
 }
 
+static AddressSpace *
+virtio_msg_bus_linux_user_get_remote_as(VirtIOMSGBusDevice *bd)
+{
+    VirtIOMSGBusLinuxUser *s = VIRTIO_MSG_BUS_LINUX_USER(bd);
+
+    if (!s->cfg.memdev) {
+        return NULL;
+    }
+    return &s->as;
+}
+
 static void virtio_msg_bus_linux_user_process(VirtIOMSGBusDevice *bd) {
     VirtIOMSGBusLinuxUser *s = VIRTIO_MSG_BUS_LINUX_USER(bd);
     spsc_queue *q;
@@ -113,6 +124,7 @@ static void virtio_msg_bus_linux_user_realize(DeviceState *dev, Error **errp)
     VirtIOMSGBusLinuxUser *s = VIRTIO_MSG_BUS_LINUX_USER(dev);
     g_autofree char *name_driver = NULL;
     g_autofree char *name_device = NULL;
+    uint64_t mem_size;
 
     if (s->cfg.name == NULL) {
         error_setg(errp, "property 'name' not specified.");
@@ -129,10 +141,46 @@ static void virtio_msg_bus_linux_user_realize(DeviceState *dev, Error **errp)
                              virtio_msg_bus_linux_user_can_receive,
                              virtio_msg_bus_linux_user_receive,
                              NULL, NULL, s, NULL, true);
+
+    if (s->cfg.memdev == NULL) {
+        /* No memory mappings needed.  */
+        return;
+    }
+
+    s->mr_memdev = host_memory_backend_get_memory(s->cfg.memdev);
+    memory_region_init(&s->mr, OBJECT(s), "mr", UINT64_MAX);
+
+    mem_size = memory_region_size(s->mr_memdev);
+    if (s->cfg.mem_hole > 0) {
+        uint64_t lowmem_end = s->cfg.mem_offset + s->cfg.mem_low_size;
+        uint64_t highmem_start = lowmem_end + s->cfg.mem_hole;
+
+        memory_region_init_alias(&s->mr_lowmem, OBJECT(s), "lowmem",
+                                 s->mr_memdev, 0, s->cfg.mem_low_size);
+        memory_region_init_alias(&s->mr_highmem, OBJECT(s), "highmem",
+                                 s->mr_memdev, s->cfg.mem_low_size,
+                                 mem_size - s->cfg.mem_low_size);
+
+        memory_region_add_subregion(&s->mr, s->cfg.mem_offset, &s->mr_lowmem);
+        memory_region_add_subregion(&s->mr, highmem_start, &s->mr_highmem);
+    } else {
+        memory_region_init_alias(&s->mr_lowmem, OBJECT(s), "mem",
+                                 s->mr_memdev, 0, mem_size);
+        memory_region_add_subregion(&s->mr, s->cfg.mem_offset, &s->mr_lowmem);
+    }
+
+    address_space_init(&s->as, MEMORY_REGION(&s->mr), "msg-bus-as");
 }
 
 static Property virtio_msg_bus_linux_user_props[] = {
     DEFINE_PROP_STRING("name", VirtIOMSGBusLinuxUser, cfg.name),
+    DEFINE_PROP_LINK("memdev", VirtIOMSGBusLinuxUser, cfg.memdev,
+                     TYPE_MEMORY_BACKEND, HostMemoryBackend *),
+    DEFINE_PROP_UINT64("mem-offset", VirtIOMSGBusLinuxUser, cfg.mem_offset, 0),
+    DEFINE_PROP_UINT64("mem-low-size", VirtIOMSGBusLinuxUser,
+                       cfg.mem_low_size, 0),
+    DEFINE_PROP_UINT64("mem-hole", VirtIOMSGBusLinuxUser,
+                       cfg.mem_hole, 0),
     DEFINE_PROP_CHR("chardev", VirtIOMSGBusLinuxUser, cfg.chr),
     DEFINE_PROP_END_OF_LIST(),
 };
@@ -144,6 +192,7 @@ static void virtio_msg_bus_linux_user_class_init(ObjectClass *klass, void *data)
 
     bdc->process = virtio_msg_bus_linux_user_process;
     bdc->send = virtio_msg_bus_linux_user_send;
+    bdc->get_remote_as = virtio_msg_bus_linux_user_get_remote_as;
 
     dc->realize = virtio_msg_bus_linux_user_realize;
     device_class_set_props(dc, virtio_msg_bus_linux_user_props);
