@@ -119,7 +119,8 @@ static int virtio_msg_bus_ivshmem_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_re
                 usleep(i);
             }
 
-            if (r && msg_resp->type != msg_req->type) {
+            if (r && (msg_resp->id != msg_req->id ||
+                      (msg_resp->type & VIRTIO_MSG_TYPE_RESPONSE) == 0)) {
                 /*
                  * We've got a message but it's not the response we're
                  * expecting. Forward it to the receiver logic.
