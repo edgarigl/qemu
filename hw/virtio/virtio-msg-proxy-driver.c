@@ -97,7 +97,7 @@ static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     //virtio_msg_print(msg, false);
     virtio_msg_unpack(msg);
 
-    switch (msg->type) {
+    switch (msg->id) {
     case VIRTIO_MSG_EVENT_DEVICE:
         vmb_event_device(vpd, msg, &msg->payload);
         break;
