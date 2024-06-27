@@ -1,4 +1,6 @@
 #include "qemu/osdep.h"
+#include "qemu/units.h"
+#include "sysemu/dma.h"
 #include "qapi/error.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
@@ -8,6 +10,8 @@
 #include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "trace.h"
+
+#define TYPE_VIRTIO_MSG_IOMMU_MEMORY_REGION "virtio-msg-iommu-memory-region"
 
 static void virtio_msg_device_info(VirtIOMSGProxy *proxy,
                                    VirtIOMSG *msg,
@@ -221,7 +225,7 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     VirtIOMSGProxy *proxy = VIRTIO_MSG(bd->opaque);
     VirtIOMSGHandler handler;
 
-    //virtio_msg_print(msg, false);
+    virtio_msg_print(msg, false);
     if (msg->id > ARRAY_SIZE(msg_handlers)) {
         return VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID;
     }
@@ -300,10 +304,14 @@ static bool virtio_msg_has_extra_state(DeviceState *opaque)
 static void virtio_msg_reset_hold(Object *obj, ResetType type)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(obj);
+    bool r;
 
     virtio_msg_soft_reset(proxy);
 
-    virtio_msg_bus_connect(&proxy->msg_bus, &virtio_msg_port, proxy);
+    r = virtio_msg_bus_connect(&proxy->msg_bus, &virtio_msg_port, proxy);
+    if (r) {
+        proxy->bus_as = virtio_msg_bus_get_remote_as(&proxy->msg_bus);
+    }
 }
 
 static void virtio_msg_pre_plugged(DeviceState *d, Error **errp)
@@ -312,6 +320,13 @@ static void virtio_msg_pre_plugged(DeviceState *d, Error **errp)
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
 
     virtio_add_feature(&vdev->host_features, VIRTIO_F_VERSION_1);
+}
+
+static AddressSpace *virtio_msg_get_dma_as(DeviceState *d)
+{
+    VirtIOMSGProxy *proxy = VIRTIO_MSG(d);
+
+    return &proxy->dma_as;
 }
 
 static Property virtio_msg_properties[] = {
@@ -326,6 +341,11 @@ static void virtio_msg_realize(DeviceState *d, Error **errp)
               TYPE_VIRTIO_MSG_PROXY_BUS, d, NULL);
     qbus_init(&proxy->msg_bus, sizeof(proxy->msg_bus),
               TYPE_VIRTIO_MSG_BUS, d, NULL);
+
+    memory_region_init_iommu(&proxy->mr_iommu, sizeof(proxy->mr_iommu),
+                             TYPE_VIRTIO_MSG_IOMMU_MEMORY_REGION,
+                             OBJECT(d), "virtio-msg-iommu", UINT64_MAX);
+    address_space_init(&proxy->dma_as, MEMORY_REGION(&proxy->mr_iommu), "dma");
 }
 
 static void virtio_msg_class_init(ObjectClass *klass, void *data)
@@ -347,6 +367,28 @@ static const TypeInfo virtio_msg_info = {
     .instance_size = sizeof(VirtIOMSGProxy),
     .class_init    = virtio_msg_class_init,
 };
+
+#define VIRTIO_MSG_PAGE_SIZE (4 * KiB)
+
+static IOMMUTLBEntry virtio_msg_iommu_translate(IOMMUMemoryRegion *iommu,
+                                                hwaddr addr,
+                                                IOMMUAccessFlags flags,
+                                                int iommu_idx)
+{
+    VirtIOMSGProxy *s = VIRTIO_MSG(container_of(iommu,
+                                                VirtIOMSGProxy, mr_iommu));
+
+    IOMMUTLBEntry ret = {
+        .iova = addr & ~(VIRTIO_MSG_PAGE_SIZE - 1),
+        .translated_addr = addr & ~(VIRTIO_MSG_PAGE_SIZE - 1),
+        .addr_mask = VIRTIO_MSG_PAGE_SIZE - 1,
+        .perm = IOMMU_RW,
+        .target_as = s->bus_as,
+    };
+
+    printf("%s: addr 0x%lx\n", __func__, addr);
+    return ret;
+}
 
 static char *virtio_msg_bus_get_dev_path(DeviceState *dev)
 {
@@ -372,6 +414,7 @@ static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
     k->has_extra_state = virtio_msg_has_extra_state;
     k->pre_plugged = virtio_msg_pre_plugged;
     k->has_variable_vring_alignment = true;
+    k->get_dma_as = virtio_msg_get_dma_as;
     bus_class->max_dev = 1;
     bus_class->get_dev_path = virtio_msg_bus_get_dev_path;
 }
@@ -383,8 +426,23 @@ static const TypeInfo virtio_msg_bus_info = {
     .class_init    = virtio_msg_bus_class_init,
 };
 
+static void virtio_msg_iommu_memory_region_class_init(ObjectClass *klass,
+                                                      void *data)
+{
+    IOMMUMemoryRegionClass *imrc = IOMMU_MEMORY_REGION_CLASS(klass);
+
+    imrc->translate = virtio_msg_iommu_translate;
+}
+
+static const TypeInfo virtio_msg_iommu_info = {
+    .name = TYPE_VIRTIO_MSG_IOMMU_MEMORY_REGION,
+    .parent = TYPE_IOMMU_MEMORY_REGION,
+    .class_init = virtio_msg_iommu_memory_region_class_init,
+};
+
 static void virtio_msg_register_types(void)
 {
+    type_register_static(&virtio_msg_iommu_info);
     type_register_static(&virtio_msg_bus_info);
     type_register_static(&virtio_msg_info);
 }

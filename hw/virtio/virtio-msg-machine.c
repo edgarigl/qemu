@@ -6,18 +6,12 @@
 #include "sysemu/dma.h"
 #include "hw/virtio/virtio-msg-machine.h"
 
-#define RAM_BASE 0x40000000U
-
 static void virtio_msg_machine_init(MachineState *machine)
 {
     VirtIOMSGMachineState *s = VIRTIO_MSG_MACHINE(machine);
-    MemoryRegion *sysmem = get_system_memory();
     int i;
 
-    if (machine->ram) {
-        memory_region_add_subregion(sysmem, RAM_BASE, machine->ram);
-    }
-
+    /* FIXME: Why is this backend a Sysbus dev?  */
     for (i = 0; i < ARRAY_SIZE(s->backends); i++) {
         object_initialize_child(OBJECT(s), "backend[*]", &s->backends[i],
                                 TYPE_VIRTIO_MSG);
