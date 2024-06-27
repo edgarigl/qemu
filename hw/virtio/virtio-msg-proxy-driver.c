@@ -94,7 +94,7 @@ static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(bd->opaque);
 
-    //virtio_msg_print(msg, false);
+    //virtio_msg_print(msg);
     virtio_msg_unpack(msg);
 
     switch (msg->id) {
@@ -135,10 +135,10 @@ static uint64_t vmpd_get_features(VirtIODevice *vdev, uint64_t f, Error **errp)
 static void vmpd_set_features(VirtIODevice *vdev, uint64_t f)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
-    VirtIOMSG msg;
+    VirtIOMSG msg, msg_resp;
 
     virtio_msg_pack_set_device_feat(&msg, 0, f);
-    virtio_msg_bus_send(&vpd->bus, &msg, NULL);
+    virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 }
 
 static void virtio_msg_pd_set_status(VirtIODevice *vdev, uint8_t status)
@@ -146,7 +146,6 @@ static void virtio_msg_pd_set_status(VirtIODevice *vdev, uint8_t status)
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
 
-    printf("%s: 0x%x\n", __func__, status);
     if (!vdev->vm_running) {
         return;
     }
@@ -195,10 +194,10 @@ static void virtio_msg_pd_write_config(VirtIODevice *vdev,
                                       int size, uint32_t addr, uint32_t val)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
-    VirtIOMSG msg;
+    VirtIOMSG msg, msg_resp;
 
     virtio_msg_pack_set_device_conf(&msg, size, addr, val);
-    virtio_msg_bus_send(&vpd->bus, &msg, NULL);
+    virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 }
 
 static void virtio_msg_pd_queue_enable(VirtIODevice *vdev, uint32_t n)
