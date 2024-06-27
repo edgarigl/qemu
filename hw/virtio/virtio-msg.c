@@ -97,7 +97,7 @@ static void virtio_msg_get_device_status(VirtIOMSGProxy *proxy,
     VirtIOMSG msg_resp;
 
     virtio_msg_pack_get_device_status_resp(&msg_resp, vdev->status);
-    virtio_msg_print(&msg_resp, true);
+    virtio_msg_print(&msg_resp);
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
@@ -186,9 +186,9 @@ static void virtio_msg_set_vqueue(VirtIOMSGProxy *proxy,
     virtio_queue_enable(vdev, vdev->queue_sel);
 }
 
-static void virtio_msg_event_driver(VirtIOMSGProxy *proxy,
-                                    VirtIOMSG *msg_unused,
-                                    VirtIOMSGPayload *mp)
+static void virtio_msg_event_avail(VirtIOMSGProxy *proxy,
+                                   VirtIOMSG *msg_unused,
+                                   VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
 
@@ -200,7 +200,7 @@ static void virtio_msg_event_driver(VirtIOMSGProxy *proxy,
         virtio_msg_bus_send(&proxy->msg_bus, &msg, NULL);
         return;
     }
-    virtio_queue_notify(vdev, mp->event_driver.index);
+    virtio_queue_notify(vdev, mp->event_avail.index);
 }
 
 typedef void (*VirtIOMSGHandler)(VirtIOMSGProxy *proxy,
@@ -217,7 +217,7 @@ static const VirtIOMSGHandler msg_handlers[VIRTIO_MSG_MAX] = {
     [VIRTIO_MSG_SET_DEVICE_CONF] = virtio_msg_set_device_conf,
     [VIRTIO_MSG_GET_VQUEUE] = virtio_msg_get_vqueue,
     [VIRTIO_MSG_SET_VQUEUE] = virtio_msg_set_vqueue,
-    [VIRTIO_MSG_EVENT_DRIVER] = virtio_msg_event_driver,
+    [VIRTIO_MSG_EVENT_AVAIL] = virtio_msg_event_avail,
 };
 
 static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
@@ -225,7 +225,7 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     VirtIOMSGProxy *proxy = VIRTIO_MSG(bd->opaque);
     VirtIOMSGHandler handler;
 
-    virtio_msg_print(msg, false);
+    virtio_msg_print(msg);
     if (msg->id > ARRAY_SIZE(msg_handlers)) {
         return VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID;
     }
@@ -255,7 +255,7 @@ static void virtio_msg_notify_queue(DeviceState *opaque, uint16_t index)
         return;
     }
 
-    virtio_msg_pack_event_device(&msg, index);
+    virtio_msg_pack_event_used(&msg, index);
     virtio_msg_bus_send(&proxy->msg_bus, &msg, NULL);
 }
 
