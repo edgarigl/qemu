@@ -222,11 +222,11 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     VirtIOMSGHandler handler;
 
     //virtio_msg_print(msg, false);
-    if (msg->type > ARRAY_SIZE(msg_handlers)) {
-        return VIRTIO_MSG_ERROR_UNSUPPORTED_PACKET_TYPE;
+    if (msg->id > ARRAY_SIZE(msg_handlers)) {
+        return VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID;
     }
 
-    handler = msg_handlers[msg->type];
+    handler = msg_handlers[msg->id];
     virtio_msg_unpack(msg);
 
     if (handler) {
