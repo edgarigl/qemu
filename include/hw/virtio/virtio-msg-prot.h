@@ -75,17 +75,20 @@ typedef struct VirtIOMSGPayload {
             uint32_t status;
         } QEMU_PACKED set_device_status;
         struct {
-            uint32_t size;
-            uint32_t offset;
+            uint16_t offset;
+            uint8_t offset_msb;
+            uint8_t size;
         } QEMU_PACKED get_device_conf;
         struct {
-            uint32_t size;
-            uint32_t offset;
+            uint16_t offset;
+            uint8_t offset_msb;
+            uint8_t size;
             uint32_t data;
         } QEMU_PACKED get_device_conf_resp;
         struct {
-            uint32_t size;
-            uint32_t offset;
+            uint16_t offset;
+            uint8_t offset_msb;
+            uint8_t size;
             uint32_t data;
         } QEMU_PACKED set_device_conf;
         struct {
@@ -281,8 +284,8 @@ static inline void virtio_msg_pack_get_device_feat(VirtIOMSG *msg,
 }
 
 static inline void virtio_msg_pack_get_device_feat_resp(VirtIOMSG *msg,
-                                                   uint32_t index,
-                                                   uint64_t f)
+                                                        uint32_t index,
+                                                        uint64_t f)
 {
     VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_DEVICE_FEAT,
@@ -328,41 +331,44 @@ static inline void virtio_msg_pack_get_device_status_resp(VirtIOMSG *msg,
 }
 
 static inline void virtio_msg_pack_get_device_conf(VirtIOMSG *msg,
-                                                   uint32_t size,
+                                                   uint8_t size,
                                                    uint32_t offset)
 {
     VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_DEVICE_CONF, 0, 0);
 
-    pl->get_device_conf.size = cpu_to_le32(size);
-    pl->get_device_conf.offset = cpu_to_le32(offset);
+    pl->get_device_conf.size = size;
+    pl->get_device_conf.offset = cpu_to_le16(offset);
+    pl->get_device_conf.offset_msb = offset >> 16;
 }
 
 static inline void virtio_msg_pack_get_device_conf_resp(VirtIOMSG *msg,
-                                                        uint32_t size,
+                                                        uint8_t size,
                                                         uint32_t offset,
-                                                        uint32_t data)
+                                                        uint64_t data)
 {
     VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_DEVICE_CONF,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->get_device_conf_resp.size = cpu_to_le32(size);
-    pl->get_device_conf_resp.offset = cpu_to_le32(offset);
+    pl->get_device_conf_resp.offset = cpu_to_le16(offset);
+    pl->get_device_conf_resp.offset_msb = offset >> 16;
     pl->get_device_conf_resp.data = cpu_to_le32(data);
+    pl->get_device_conf_resp.size = size;
 }
 
 static inline void virtio_msg_pack_set_device_conf(VirtIOMSG *msg,
-                                                   uint32_t size,
+                                                   uint8_t size,
                                                    uint32_t offset,
-                                                   uint32_t data)
+                                                   uint64_t data)
 {
     VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_SET_DEVICE_CONF, 0, 0);
 
-    pl->set_device_conf.size = cpu_to_le32(size);
-    pl->set_device_conf.offset = cpu_to_le32(offset);
+    pl->set_device_conf.offset = cpu_to_le16(offset);
+    pl->set_device_conf.offset_msb = offset >> 16;
     pl->set_device_conf.data = cpu_to_le32(data);
+    pl->set_device_conf.size = size;
 }
 
 static inline void virtio_msg_pack_get_vqueue(VirtIOMSG *msg,
