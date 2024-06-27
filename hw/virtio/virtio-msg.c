@@ -306,95 +306,6 @@ static void virtio_msg_reset_hold(Object *obj, ResetType type)
     virtio_msg_bus_connect(&proxy->msg_bus, &virtio_msg_port, proxy);
 }
 
-static int virtio_msg_set_guest_notifier(DeviceState *d, int n, bool assign,
-                                         bool with_irqfd)
-{
-    VirtIOMSGProxy *proxy = VIRTIO_MSG(d);
-    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
-    VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
-    VirtQueue *vq = virtio_get_queue(vdev, n);
-    EventNotifier *notifier = virtio_queue_get_guest_notifier(vq);
-
-    if (assign) {
-        int r = event_notifier_init(notifier, 0);
-        if (r < 0) {
-            return r;
-        }
-        virtio_queue_set_guest_notifier_fd_handler(vq, true, with_irqfd);
-    } else {
-        virtio_queue_set_guest_notifier_fd_handler(vq, false, with_irqfd);
-        event_notifier_cleanup(notifier);
-    }
-
-    if (vdc->guest_notifier_mask && vdev->use_guest_notifier_mask) {
-        vdc->guest_notifier_mask(vdev, n, !assign);
-    }
-
-    return 0;
-}
-
-static int virtio_msg_set_config_guest_notifier(DeviceState *d, bool assign,
-                                                bool with_irqfd)
-{
-    VirtIOMSGProxy *proxy = VIRTIO_MSG(d);
-    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
-    VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
-    EventNotifier *notifier = virtio_config_get_guest_notifier(vdev);
-    int r = 0;
-
-    if (assign) {
-        r = event_notifier_init(notifier, 0);
-        if (r < 0) {
-            return r;
-        }
-        virtio_config_set_guest_notifier_fd_handler(vdev, assign, with_irqfd);
-    } else {
-        virtio_config_set_guest_notifier_fd_handler(vdev, assign, with_irqfd);
-        event_notifier_cleanup(notifier);
-    }
-    if (vdc->guest_notifier_mask && vdev->use_guest_notifier_mask) {
-        vdc->guest_notifier_mask(vdev, VIRTIO_CONFIG_IRQ_IDX, !assign);
-    }
-    return r;
-}
-
-static int virtio_msg_set_guest_notifiers(DeviceState *d, int nvqs,
-                                    bool assign)
-{
-    VirtIOMSGProxy *proxy = VIRTIO_MSG(d);
-    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
-    /* TODO: need to check if kvm-arm supports irqfd */
-    bool with_irqfd = false;
-    int r, n;
-
-    nvqs = MIN(nvqs, VIRTIO_QUEUE_MAX);
-
-    for (n = 0; n < nvqs; n++) {
-        if (!virtio_queue_get_num(vdev, n)) {
-            break;
-        }
-
-        r = virtio_msg_set_guest_notifier(d, n, assign, with_irqfd);
-        if (r < 0) {
-            goto assign_error;
-        }
-    }
-    r = virtio_msg_set_config_guest_notifier(d, assign, with_irqfd);
-    if (r < 0) {
-        goto assign_error;
-    }
-
-    return 0;
-
-assign_error:
-    /* We get here on assignment failure. Recover by undoing for VQs 0 .. n. */
-    assert(assign);
-    while (--n >= 0) {
-        virtio_msg_set_guest_notifier(d, n, !assign, false);
-    }
-    return r;
-}
-
 static void virtio_msg_pre_plugged(DeviceState *d, Error **errp)
 {
     VirtIOMSGProxy *proxy = VIRTIO_MSG(d);
@@ -459,11 +370,6 @@ static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
     k->save_extra_state = virtio_msg_save_extra_state;
     k->load_extra_state = virtio_msg_load_extra_state;
     k->has_extra_state = virtio_msg_has_extra_state;
-    k->set_guest_notifiers = virtio_msg_set_guest_notifiers;
-#if 0
-    k->ioeventfd_enabled = virtio_msg_ioeventfd_enabled;
-    k->ioeventfd_assign = virtio_msg_ioeventfd_assign;
-#endif
     k->pre_plugged = virtio_msg_pre_plugged;
     k->has_variable_vring_alignment = true;
     bus_class->max_dev = 1;
