@@ -19,7 +19,7 @@
 
 enum {
     VIRTIO_MSG_NO_ERROR = 0,
-    VIRTIO_MSG_ERROR_UNSUPPORTED_PACKET_TYPE = 1,
+    VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID = 1,
 };
 
 enum {
@@ -114,7 +114,7 @@ typedef struct VirtIOMSGPayload {
 
 typedef struct VirtIOMSG {
     uint8_t type;
-    uint8_t msg_id;
+    uint8_t id;
     uint16_t dev_id;
     uint32_t unused;
 
@@ -238,12 +238,12 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
 }
 
 static inline void virtio_msg_pack_header(VirtIOMSG *msg,
+                                          uint8_t id,
                                           uint8_t type,
-                                          uint8_t msg_id,
                                           uint16_t dev_id)
 {
     msg->type = type;
-    msg->msg_id = msg_id; /* sequence number? */
+    msg->id = id;
     msg->dev_id = cpu_to_le16(dev_id); /* dest demux? */
 
     /* Keep things predictable.  */
@@ -422,7 +422,7 @@ static inline void virtio_msg_pack_event_conf(VirtIOMSG *msg)
     virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_CONF, 0, 0);
 }
 
-static inline const char *virtio_msg_type_to_str(unsigned int type)
+static inline const char *virtio_msg_id_to_str(unsigned int type)
 {
 #define VIRTIO_MSG_TYPE2STR(x) [ VIRTIO_MSG_ ## x ] = stringify(x)
     static const char *type2str[VIRTIO_MSG_MAX] = {
@@ -479,9 +479,9 @@ static inline void virtio_msg_print(VirtIOMSG *msg, bool resp)
     int i;
 
     assert(msg);
-    printf("virtio-msg: type %s 0x%x msg_id 0x%x dev_id 0x%0x\n",
-           virtio_msg_type_to_str(msg->type),
-           msg->type, msg->msg_id, msg->dev_id);
+    printf("virtio-msg: id %s 0x%x type 0x%x dev_id 0x%0x\n",
+           virtio_msg_id_to_str(msg->id), msg->id,
+           msg->type, msg->dev_id);
 
     for (i = 0; i < 32; i++) {
         printf("%2.2x ", msg->payload.u8[i]);
@@ -490,7 +490,7 @@ static inline void virtio_msg_print(VirtIOMSG *msg, bool resp)
         }
     }
 
-    switch (msg->type) {
+    switch (msg->id) {
     case VIRTIO_MSG_GET_DEVICE_STATUS:
         if (resp) {
             virtio_msg_print_status(pl->get_device_status_resp.status);
