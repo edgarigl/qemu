@@ -51,7 +51,12 @@ static void virtio_msg_set_device_feat(VirtIOMSGProxy *proxy,
                                        VirtIOMSG *msg,
                                        VirtIOMSGPayload *mp)
 {
+    VirtIOMSG msg_resp;
+
     proxy->guest_features = mp->set_device_feat.features;
+
+    virtio_msg_pack_set_device_feat_resp(&msg_resp, 0, proxy->guest_features);
+    virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
 static void virtio_msg_soft_reset(VirtIOMSGProxy *proxy)
@@ -106,10 +111,13 @@ static void virtio_msg_get_device_conf(VirtIOMSGProxy *proxy,
                                        VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
-    uint32_t size = mp->get_device_conf.size;
+    uint8_t size = mp->get_device_conf.size;
     uint32_t offset = mp->get_device_conf.offset;
-    uint32_t data;
+    uint64_t data;
     VirtIOMSG msg_resp;
+
+    /* Add the 3rd byte of offset.  */
+    offset += mp->get_device_conf.offset_msb << 16;
 
     switch (size) {
     case 4:
@@ -135,9 +143,13 @@ static void virtio_msg_set_device_conf(VirtIOMSGProxy *proxy,
                                        VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
-    uint32_t size = mp->set_device_conf.size;
+    uint8_t size = mp->set_device_conf.size;
     uint32_t offset = mp->set_device_conf.offset;
-    uint32_t data = mp->set_device_conf.data;
+    uint64_t data = mp->set_device_conf.data;
+    VirtIOMSG msg_resp;
+
+    /* Add the 3rd byte of offset.  */
+    offset += mp->set_device_conf.offset_msb << 16;
 
     switch (size) {
     case 4:
@@ -153,6 +165,9 @@ static void virtio_msg_set_device_conf(VirtIOMSGProxy *proxy,
         g_assert_not_reached();
         break;
     }
+
+    virtio_msg_pack_set_device_conf_resp(&msg_resp, size, offset, data);
+    virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
 static void virtio_msg_get_vqueue(VirtIOMSGProxy *proxy,
@@ -207,7 +222,7 @@ typedef void (*VirtIOMSGHandler)(VirtIOMSGProxy *proxy,
                                  VirtIOMSG *msg,
                                  VirtIOMSGPayload *mp);
 
-static const VirtIOMSGHandler msg_handlers[VIRTIO_MSG_MAX] = {
+static const VirtIOMSGHandler msg_handlers[] = {
     [VIRTIO_MSG_DEVICE_INFO] = virtio_msg_device_info,
     [VIRTIO_MSG_GET_DEVICE_FEAT] = virtio_msg_get_device_feat,
     [VIRTIO_MSG_SET_DEVICE_FEAT] = virtio_msg_set_device_feat,
@@ -225,7 +240,7 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     VirtIOMSGProxy *proxy = VIRTIO_MSG(bd->opaque);
     VirtIOMSGHandler handler;
 
-    virtio_msg_print(msg);
+    //virtio_msg_print(msg);
     if (msg->id > ARRAY_SIZE(msg_handlers)) {
         return VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID;
     }
