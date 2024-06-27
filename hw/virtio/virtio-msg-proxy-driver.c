@@ -26,7 +26,7 @@ static void virtio_msg_pd_handle_output(VirtIODevice *vdev, VirtQueue *vq)
     uint32_t index = virtio_get_queue_index(vq);
     VirtIOMSG msg;
 
-    virtio_msg_pack_event_driver(&msg, index, 0, 0);
+    virtio_msg_pack_event_avail(&msg, index, 0, 0);
     virtio_msg_bus_send(&vpd->bus, &msg, NULL);
 }
 
@@ -70,14 +70,14 @@ static void virtio_msg_pd_probe_queues(VirtIOMSGProxyDriver *vpd)
     }
 }
 
-static void vmb_event_device(VirtIOMSGProxyDriver *vpd,
-                             VirtIOMSG *msg,
-                             VirtIOMSGPayload *mp)
+static void vmb_event_used(VirtIOMSGProxyDriver *vpd,
+                           VirtIOMSG *msg,
+                           VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
     VirtQueue *vq;
 
-    vq = virtio_get_queue(vdev, mp->event_device.index);
+    vq = virtio_get_queue(vdev, mp->event_used.index);
     virtio_notify_force(vdev, vq);
 }
 
@@ -98,8 +98,8 @@ static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     virtio_msg_unpack(msg);
 
     switch (msg->id) {
-    case VIRTIO_MSG_EVENT_DEVICE:
-        vmb_event_device(vpd, msg, &msg->payload);
+    case VIRTIO_MSG_EVENT_USED:
+        vmb_event_used(vpd, msg, &msg->payload);
         break;
     case VIRTIO_MSG_EVENT_CONF:
         vmb_event_conf(vpd, msg, &msg->payload);
