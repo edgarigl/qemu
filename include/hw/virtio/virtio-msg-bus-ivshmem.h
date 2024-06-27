@@ -12,6 +12,7 @@
 
 #include "qom/object.h"
 #include "qemu/vfio-helpers.h"
+#include "sysemu/hostmem.h"
 #include "hw/virtio/virtio-msg-bus.h"
 #include "hw/virtio/spsc_queue.h"
 
@@ -23,7 +24,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMSGBusIVSHMEM, VIRTIO_MSG_BUS_IVSHMEM)
 typedef struct VirtIOMSGBusIVSHMEM {
     VirtIOMSGBusDevice parent;
 
-    QEMUVFIOState *mem_dev;
+    AddressSpace as;
+    MemoryRegion mr;
+    MemoryRegion mr_lowmem;
+    MemoryRegion mr_highmem;
+    MemoryRegion *mr_memdev;
+
     EventNotifier notifier;
 
     struct {
@@ -41,17 +47,16 @@ typedef struct VirtIOMSGBusIVSHMEM {
     } msg;
 
     struct {
-        QEMUVFIOState *dev;
-
-        /* Memmap.  */
-        void *mem;
-    } mem;
-
-    struct {
-        char *msg_dev;
-        char *mem_dev;
-        uint64_t mem_size;
+        char *dev;
         uint32_t remote_vmid;
+        bool reset_queues;
+
+        HostMemoryBackend *memdev;
+        /* FIXME: Need a better way  */
+        uint64_t mem_offset;
+        uint64_t mem_low_size;
+        uint64_t mem_hole;
+
     } cfg;
 } VirtIOMSGBusIVSHMEM;
 
