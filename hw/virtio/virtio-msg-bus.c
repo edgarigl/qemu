@@ -33,6 +33,70 @@ bool virtio_msg_bus_connect(BusState *bus,
     return true;
 }
 
+static inline void virtio_msg_bus_ooo_enqueue(VirtIOMSGBusDevice *bd,
+                                              VirtIOMSG *msg)
+{
+    /* TODO: Add support for wrapping the queue.  */
+    assert(bd->ooo_queue.num < ARRAY_SIZE(bd->ooo_queue.msg));
+    bd->ooo_queue.msg[bd->ooo_queue.num++] = *msg;
+}
+
+void virtio_msg_bus_ooo_process(VirtIOMSGBusDevice *bd)
+{
+    while (bd->ooo_queue.pos < bd->ooo_queue.num) {
+        int pos = bd->ooo_queue.pos++;
+        bd->peer->receive(bd, &bd->ooo_queue.msg[pos]);
+    }
+    bd->ooo_queue.num = 0;
+    bd->ooo_queue.pos = 0;
+}
+
+void virtio_msg_bus_ooo_receive(VirtIOMSGBusDevice *bd,
+                                VirtIOMSG *msg_req,
+                                VirtIOMSG *msg_resp)
+{
+    /*
+     * Event notifications are posted and shouldn't be handled immediately
+     * because they may trigger additional recursive requests further
+     * further complicating the situation.
+     *
+     * Instead, queue events and wait for the notification path to re-trigger
+     * processing of messages and process the OOO queue there.
+     */
+    if (msg_resp->id == VIRTIO_MSG_EVENT_AVAIL ||
+            msg_resp->id == VIRTIO_MSG_EVENT_USED ||
+            msg_resp->id == VIRTIO_MSG_EVENT_CONF) {
+        virtio_msg_bus_ooo_enqueue(bd, msg_resp);
+    } else {
+        bd->peer->receive(bd, msg_resp);
+    }
+}
+
+void virtio_msg_bus_process(VirtIOMSGBusDevice *bd)
+{
+    VirtIOMSGBusDeviceClass *bdc;
+    bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
+
+    virtio_msg_bus_ooo_process(bd);
+    bdc->process(bd);
+}
+
+int virtio_msg_bus_send(BusState *bus,
+                        VirtIOMSG *msg_req,
+                        VirtIOMSG *msg_resp)
+{
+    VirtIOMSGBusDeviceClass *bdc;
+    int r = VIRTIO_MSG_NO_ERROR;
+
+    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
+    bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
+
+    if (bdc->send) {
+        r = bdc->send(bd, msg_req, msg_resp);
+    }
+    return r;
+}
+
 static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
 {
     BusClass *bc = BUS_CLASS(klass);
