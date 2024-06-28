@@ -56,6 +56,17 @@ static AddressSpace *virtio_msg_bus_ivshmem_get_remote_as(VirtIOMSGBusDevice *bd
     return &s->as;
 }
 
+static IOMMUTLBEntry
+virtio_msg_bus_ivshmem_iommu_translate(VirtIOMSGBusDevice *bd,
+                                          uint64_t va,
+                                          uint8_t prot)
+{
+    IOMMUTLBEntry ret;
+
+    ret = virtio_msg_bus_pagemap_translate(bd, va, prot);
+    return ret;
+}
+
 static void virtio_msg_bus_ivshmem_process(VirtIOMSGBusDevice *bd) {
     VirtIOMSGBusIVSHMEM *s = VIRTIO_MSG_BUS_IVSHMEM(bd);
     spsc_queue *q;
@@ -240,6 +251,7 @@ static void virtio_msg_bus_ivshmem_class_init(ObjectClass *klass, void *data)
     bdc->process = virtio_msg_bus_ivshmem_process;
     bdc->send = virtio_msg_bus_ivshmem_send;
     bdc->get_remote_as = virtio_msg_bus_ivshmem_get_remote_as;
+    bdc->iommu_translate = virtio_msg_bus_ivshmem_iommu_translate;
 
     dc->realize = virtio_msg_bus_ivshmem_realize;
     device_class_set_props(dc, virtio_msg_bus_ivshmem_props);

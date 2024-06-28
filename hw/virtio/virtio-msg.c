@@ -218,6 +218,13 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *proxy,
     virtio_queue_notify(vdev, mp->event_avail.index);
 }
 
+static void virtio_msg_iommu_enable(VirtIOMSGProxy *proxy,
+                                    VirtIOMSG *msg,
+                                    VirtIOMSGPayload *mp)
+{
+    proxy->iommu_enabled = mp->iommu_enable.enable;
+}
+
 typedef void (*VirtIOMSGHandler)(VirtIOMSGProxy *proxy,
                                  VirtIOMSG *msg,
                                  VirtIOMSGPayload *mp);
@@ -233,6 +240,7 @@ static const VirtIOMSGHandler msg_handlers[] = {
     [VIRTIO_MSG_GET_VQUEUE] = virtio_msg_get_vqueue,
     [VIRTIO_MSG_SET_VQUEUE] = virtio_msg_set_vqueue,
     [VIRTIO_MSG_EVENT_AVAIL] = virtio_msg_event_avail,
+    [VIRTIO_MSG_IOMMU_ENABLE] = virtio_msg_iommu_enable,
 };
 
 static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
@@ -384,8 +392,6 @@ static const TypeInfo virtio_msg_info = {
     .class_init    = virtio_msg_class_init,
 };
 
-#define VIRTIO_MSG_PAGE_SIZE (4 * KiB)
-
 static IOMMUTLBEntry virtio_msg_iommu_translate(IOMMUMemoryRegion *iommu,
                                                 hwaddr addr,
                                                 IOMMUAccessFlags flags,
@@ -393,16 +399,36 @@ static IOMMUTLBEntry virtio_msg_iommu_translate(IOMMUMemoryRegion *iommu,
 {
     VirtIOMSGProxy *s = VIRTIO_MSG(container_of(iommu,
                                                 VirtIOMSGProxy, mr_iommu));
+    VirtIOMSG msg, msg_resp;
+    VirtIOMSGPayload *mp = &msg_resp.payload;
+    uint8_t prot;
 
     IOMMUTLBEntry ret = {
-        .iova = addr & ~(VIRTIO_MSG_PAGE_SIZE - 1),
-        .translated_addr = addr & ~(VIRTIO_MSG_PAGE_SIZE - 1),
-        .addr_mask = VIRTIO_MSG_PAGE_SIZE - 1,
+        .iova = addr & ~VIRTIO_MSG_IOMMU_PAGE_MASK,
+        .translated_addr = addr & ~VIRTIO_MSG_IOMMU_PAGE_MASK,
+        .addr_mask = VIRTIO_MSG_IOMMU_PAGE_MASK,
         .perm = IOMMU_RW,
         .target_as = s->bus_as,
     };
 
-    printf("%s: addr 0x%lx\n", __func__, addr);
+    if (!s->iommu_enabled) {
+        /* identity mapped.  */
+        return ret;
+    }
+
+    prot = flags & IOMMU_RO ? VIRTIO_MSG_IOMMU_PROT_READ : 0;
+    prot |= flags & IOMMU_WO ? VIRTIO_MSG_IOMMU_PROT_WRITE : 0;
+
+    virtio_msg_pack_iommu_translate(&msg, ret.iova, prot);
+    virtio_msg_bus_send(&s->msg_bus, &msg, &msg_resp);
+    virtio_msg_unpack_resp(&msg_resp);
+
+    ret.iova = mp->iommu_translate_resp.va;
+    ret.translated_addr = mp->iommu_translate_resp.pa;
+    prot = mp->iommu_translate_resp.prot;
+    ret.perm = IOMMU_ACCESS_FLAG(prot & VIRTIO_MSG_IOMMU_PROT_READ,
+                                 prot & VIRTIO_MSG_IOMMU_PROT_WRITE);
+
     return ret;
 }
 

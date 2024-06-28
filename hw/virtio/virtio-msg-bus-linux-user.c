@@ -10,6 +10,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "qapi/error.h"
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
@@ -32,6 +33,17 @@ virtio_msg_bus_linux_user_get_remote_as(VirtIOMSGBusDevice *bd)
         return NULL;
     }
     return &s->as;
+}
+
+static IOMMUTLBEntry
+virtio_msg_bus_linux_user_iommu_translate(VirtIOMSGBusDevice *bd,
+                                          uint64_t va,
+                                          uint8_t prot)
+{
+    IOMMUTLBEntry ret;
+
+    ret = virtio_msg_bus_pagemap_translate(bd, va, prot);
+    return ret;
 }
 
 static void virtio_msg_bus_linux_user_process(VirtIOMSGBusDevice *bd) {
@@ -190,6 +202,7 @@ static void virtio_msg_bus_linux_user_class_init(ObjectClass *klass, void *data)
     bdc->process = virtio_msg_bus_linux_user_process;
     bdc->send = virtio_msg_bus_linux_user_send;
     bdc->get_remote_as = virtio_msg_bus_linux_user_get_remote_as;
+    bdc->iommu_translate = virtio_msg_bus_linux_user_iommu_translate;
 
     dc->realize = virtio_msg_bus_linux_user_realize;
     device_class_set_props(dc, virtio_msg_bus_linux_user_props);

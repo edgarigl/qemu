@@ -90,24 +90,58 @@ static void vmb_event_conf(VirtIOMSGProxyDriver *vpd,
     virtio_notify_config(vdev);
 }
 
+static void vmb_iommu_translate(VirtIOMSGProxyDriver *vpd,
+                                VirtIOMSG *msg,
+                                VirtIOMSGPayload *mp)
+{
+    uint8_t prot = mp->iommu_translate.prot;
+    uint64_t va = mp->iommu_translate.va;
+    VirtIOMSG msg_resp;
+    IOMMUTLBEntry r;
+
+    /* TODO: Add translation.  */
+    r = virtio_msg_bus_iommu_translate(&vpd->bus, va, prot);
+    prot = r.perm & IOMMU_RO ? VIRTIO_MSG_IOMMU_PROT_READ : 0;
+    prot |= r.perm & IOMMU_WO ? VIRTIO_MSG_IOMMU_PROT_WRITE : 0;
+
+    virtio_msg_pack_iommu_translate_resp(&msg_resp,
+                                         r.iova, r.translated_addr,
+                                         prot);
+    virtio_msg_bus_send(&vpd->bus, &msg_resp, NULL);
+}
+
+/* FIXME: Avoid duplication.  */
+typedef void (*VirtIOMSGHandler)(VirtIOMSGProxyDriver *vpd,
+                                 VirtIOMSG *msg,
+                                 VirtIOMSGPayload *mp);
+
+static const VirtIOMSGHandler msg_handlers[] = {
+    [VIRTIO_MSG_EVENT_USED] = vmb_event_used,
+    [VIRTIO_MSG_EVENT_CONF] = vmb_event_conf,
+    [VIRTIO_MSG_IOMMU_TRANSLATE] = vmb_iommu_translate,
+};
+
 static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(bd->opaque);
+    VirtIOMSGHandler handler;
 
     //virtio_msg_print(msg);
     virtio_msg_unpack(msg);
 
-    switch (msg->id) {
-    case VIRTIO_MSG_EVENT_USED:
-        vmb_event_used(vpd, msg, &msg->payload);
-        break;
-    case VIRTIO_MSG_EVENT_CONF:
-        vmb_event_conf(vpd, msg, &msg->payload);
-        break;
-    default:
-        /* Ignore.  */
-        break;
+    assert((msg->type & VIRTIO_MSG_TYPE_RESPONSE) == 0);
+
+    if (msg->id > ARRAY_SIZE(msg_handlers)) {
+        return VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID;
     }
+
+    handler = msg_handlers[msg->id];
+    virtio_msg_unpack(msg);
+
+    if (handler) {
+        handler(vpd, msg, &msg->payload);
+    }
+
     return VIRTIO_MSG_NO_ERROR;
 }
 
@@ -241,6 +275,12 @@ static void virtio_msg_pd_reset_hold(Object *obj, ResetType type)
     /* Update host features.  */
     vdev->host_features = vmpd_get_features(vdev, vdev->host_features,
                                             &error_abort);
+
+    if (vpd->cfg.iommu_enable) {
+        virtio_msg_pack_iommu_enable(&msg, true);
+        virtio_msg_bus_send(&vpd->bus, &msg, NULL);
+    }
+
     virtio_msg_pd_probe_queues(vpd);
 }
 
@@ -276,6 +316,8 @@ static const VMStateDescription vmstate_virtio_msg_pd = {
 static Property virtio_msg_pd_properties[] = {
     DEFINE_PROP_UINT16("virtio-id", VirtIOMSGProxyDriver, cfg.virtio_id,
                        VIRTIO_ID_NET),
+    DEFINE_PROP_BOOL("iommu-enable", VirtIOMSGProxyDriver,
+                     cfg.iommu_enable, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
