@@ -87,7 +87,7 @@ void virtio_msg_bus_ooo_process(VirtIOMSGBusDevice *bd)
 {
     while (bd->ooo_queue.pos < bd->ooo_queue.num) {
         int pos = bd->ooo_queue.pos++;
-        bd->peer->receive(bd, &bd->ooo_queue.msg[pos]);
+        virtio_msg_bus_receive(bd, &bd->ooo_queue.msg[pos]);
     }
     bd->ooo_queue.num = 0;
     bd->ooo_queue.pos = 0;
@@ -110,7 +110,7 @@ void virtio_msg_bus_ooo_receive(VirtIOMSGBusDevice *bd,
             msg_resp->id == VIRTIO_MSG_EVENT_CONFIG) {
         virtio_msg_bus_ooo_enqueue(bd, msg_resp);
     } else {
-        bd->peer->receive(bd, msg_resp);
+        virtio_msg_bus_receive(bd, msg_resp);
     }
 }
 
