@@ -107,7 +107,7 @@ void virtio_msg_bus_ooo_receive(VirtIOMSGBusDevice *bd,
      */
     if (msg_resp->id == VIRTIO_MSG_EVENT_AVAIL ||
             msg_resp->id == VIRTIO_MSG_EVENT_USED ||
-            msg_resp->id == VIRTIO_MSG_EVENT_CONF) {
+            msg_resp->id == VIRTIO_MSG_EVENT_CONFIG) {
         virtio_msg_bus_ooo_enqueue(bd, msg_resp);
     } else {
         bd->peer->receive(bd, msg_resp);
