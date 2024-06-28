@@ -81,9 +81,9 @@ static void vmb_event_used(VirtIOMSGProxyDriver *vpd,
     virtio_notify_force(vdev, vq);
 }
 
-static void vmb_event_conf(VirtIOMSGProxyDriver *vpd,
-                           VirtIOMSG *msg,
-                           VirtIOMSGPayload *mp)
+static void vmb_event_config(VirtIOMSGProxyDriver *vpd,
+                             VirtIOMSG *msg,
+                             VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
 
@@ -117,7 +117,7 @@ typedef void (*VirtIOMSGHandler)(VirtIOMSGProxyDriver *vpd,
 
 static const VirtIOMSGHandler msg_handlers[] = {
     [VIRTIO_MSG_EVENT_USED] = vmb_event_used,
-    [VIRTIO_MSG_EVENT_CONF] = vmb_event_conf,
+    [VIRTIO_MSG_EVENT_CONFIG] = vmb_event_config,
     [VIRTIO_MSG_IOMMU_TRANSLATE] = vmb_iommu_translate,
 };
 
@@ -156,11 +156,11 @@ static uint64_t vmpd_get_features(VirtIODevice *vdev, uint64_t f, Error **errp)
     VirtIOMSG msg, msg_resp;
 
     if (virtio_msg_bus_connected(&vpd->bus)) {
-        virtio_msg_pack_get_device_feat(&msg, 0);
+        virtio_msg_pack_get_features(&msg, 0);
         virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
         virtio_msg_unpack_resp(&msg_resp);
 
-        f = msg_resp.payload.get_device_feat_resp.features;
+        f = msg_resp.payload.get_features_resp.features;
     }
 
     return f;
@@ -171,7 +171,7 @@ static void vmpd_set_features(VirtIODevice *vdev, uint64_t f)
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
 
-    virtio_msg_pack_set_device_feat(&msg, 0, f);
+    virtio_msg_pack_set_features(&msg, 0, f);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 }
 
@@ -217,11 +217,11 @@ static uint32_t virtio_msg_pd_read_config(VirtIODevice *vdev,
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
 
-    virtio_msg_pack_get_device_conf(&msg, size, addr);
+    virtio_msg_pack_get_config(&msg, size, addr);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
     virtio_msg_unpack_resp(&msg_resp);
 
-    return msg_resp.payload.get_device_conf_resp.data;
+    return msg_resp.payload.get_config_resp.data;
 }
 
 static void virtio_msg_pd_write_config(VirtIODevice *vdev,
@@ -230,7 +230,7 @@ static void virtio_msg_pd_write_config(VirtIODevice *vdev,
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
 
-    virtio_msg_pack_set_device_conf(&msg, size, addr, val);
+    virtio_msg_pack_set_config(&msg, size, addr, val);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 }
 

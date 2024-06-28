@@ -27,7 +27,7 @@ static void virtio_msg_device_info(VirtIOMSGProxy *proxy,
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
-static void virtio_msg_get_device_feat(VirtIOMSGProxy *proxy,
+static void virtio_msg_get_features(VirtIOMSGProxy *proxy,
                                        VirtIOMSG *msg,
                                        VirtIOMSGPayload *mp)
 {
@@ -43,19 +43,19 @@ static void virtio_msg_get_device_feat(VirtIOMSGProxy *proxy,
      */
     features = vdc->get_features(vdev, vdev->host_features, &error_abort);
 
-    virtio_msg_pack_get_device_feat_resp(&msg_resp, 0, features);
+    virtio_msg_pack_get_features_resp(&msg_resp, 0, features);
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
-static void virtio_msg_set_device_feat(VirtIOMSGProxy *proxy,
+static void virtio_msg_set_features(VirtIOMSGProxy *proxy,
                                        VirtIOMSG *msg,
                                        VirtIOMSGPayload *mp)
 {
     VirtIOMSG msg_resp;
 
-    proxy->guest_features = mp->set_device_feat.features;
+    proxy->guest_features = mp->set_features.features;
 
-    virtio_msg_pack_set_device_feat_resp(&msg_resp, 0, proxy->guest_features);
+    virtio_msg_pack_set_features_resp(&msg_resp, 0, proxy->guest_features);
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
@@ -106,18 +106,18 @@ static void virtio_msg_get_device_status(VirtIOMSGProxy *proxy,
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
-static void virtio_msg_get_device_conf(VirtIOMSGProxy *proxy,
+static void virtio_msg_get_config(VirtIOMSGProxy *proxy,
                                        VirtIOMSG *msg,
                                        VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
-    uint8_t size = mp->get_device_conf.size;
-    uint32_t offset = mp->get_device_conf.offset;
+    uint8_t size = mp->get_config.size;
+    uint32_t offset = mp->get_config.offset;
     uint64_t data;
     VirtIOMSG msg_resp;
 
     /* Add the 3rd byte of offset.  */
-    offset += mp->get_device_conf.offset_msb << 16;
+    offset += mp->get_config.offset_msb << 16;
 
     switch (size) {
     case 4:
@@ -134,22 +134,22 @@ static void virtio_msg_get_device_conf(VirtIOMSGProxy *proxy,
         break;
     }
 
-    virtio_msg_pack_get_device_conf_resp(&msg_resp, size, offset, data);
+    virtio_msg_pack_get_config_resp(&msg_resp, size, offset, data);
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
-static void virtio_msg_set_device_conf(VirtIOMSGProxy *proxy,
+static void virtio_msg_set_config(VirtIOMSGProxy *proxy,
                                        VirtIOMSG *msg,
                                        VirtIOMSGPayload *mp)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
-    uint8_t size = mp->set_device_conf.size;
-    uint32_t offset = mp->set_device_conf.offset;
-    uint64_t data = mp->set_device_conf.data;
+    uint8_t size = mp->set_config.size;
+    uint32_t offset = mp->set_config.offset;
+    uint64_t data = mp->set_config.data;
     VirtIOMSG msg_resp;
 
     /* Add the 3rd byte of offset.  */
-    offset += mp->set_device_conf.offset_msb << 16;
+    offset += mp->set_config.offset_msb << 16;
 
     switch (size) {
     case 4:
@@ -166,7 +166,7 @@ static void virtio_msg_set_device_conf(VirtIOMSGProxy *proxy,
         break;
     }
 
-    virtio_msg_pack_set_device_conf_resp(&msg_resp, size, offset, data);
+    virtio_msg_pack_set_config_resp(&msg_resp, size, offset, data);
     virtio_msg_bus_send(&proxy->msg_bus, &msg_resp, NULL);
 }
 
@@ -211,7 +211,7 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *proxy,
         VirtIOMSG msg;
 
         virtio_error(vdev, "Notification while driver not OK?");
-        virtio_msg_pack_event_conf(&msg);
+        virtio_msg_pack_event_config(&msg);
         virtio_msg_bus_send(&proxy->msg_bus, &msg, NULL);
         return;
     }
@@ -231,12 +231,12 @@ typedef void (*VirtIOMSGHandler)(VirtIOMSGProxy *proxy,
 
 static const VirtIOMSGHandler msg_handlers[] = {
     [VIRTIO_MSG_DEVICE_INFO] = virtio_msg_device_info,
-    [VIRTIO_MSG_GET_DEVICE_FEAT] = virtio_msg_get_device_feat,
-    [VIRTIO_MSG_SET_DEVICE_FEAT] = virtio_msg_set_device_feat,
+    [VIRTIO_MSG_GET_FEATURES] = virtio_msg_get_features,
+    [VIRTIO_MSG_SET_FEATURES] = virtio_msg_set_features,
     [VIRTIO_MSG_GET_DEVICE_STATUS] = virtio_msg_get_device_status,
     [VIRTIO_MSG_SET_DEVICE_STATUS] = virtio_msg_set_device_status,
-    [VIRTIO_MSG_GET_DEVICE_CONF] = virtio_msg_get_device_conf,
-    [VIRTIO_MSG_SET_DEVICE_CONF] = virtio_msg_set_device_conf,
+    [VIRTIO_MSG_GET_CONFIG] = virtio_msg_get_config,
+    [VIRTIO_MSG_SET_CONFIG] = virtio_msg_set_config,
     [VIRTIO_MSG_GET_VQUEUE] = virtio_msg_get_vqueue,
     [VIRTIO_MSG_SET_VQUEUE] = virtio_msg_set_vqueue,
     [VIRTIO_MSG_EVENT_AVAIL] = virtio_msg_event_avail,
