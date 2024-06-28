@@ -40,7 +40,13 @@ enum {
     VIRTIO_MSG_RESET_VQUEUE      = 0x10,
     VIRTIO_MSG_EVENT_AVAIL       = 0x11,
     VIRTIO_MSG_EVENT_USED        = 0x12,
-    VIRTIO_MSG_MAX = VIRTIO_MSG_EVENT_USED
+
+    /* Experimental. For setups without IOMMU's, e.g ivshmem */
+    VIRTIO_MSG_IOMMU_ENABLE      = 0x20,
+    VIRTIO_MSG_IOMMU_TRANSLATE   = 0x21,
+    VIRTIO_MSG_IOMMU_INVALIDATE  = 0x22,
+
+    VIRTIO_MSG_MAX = VIRTIO_MSG_IOMMU_INVALIDATE,
 };
 
 #define VIRTIO_MSG_MAX_SIZE 40
@@ -126,6 +132,24 @@ typedef struct VirtIOMSGPayload {
         struct {
             uint32_t index;
         } QEMU_PACKED event_used;
+
+        struct {
+            uint8_t enable;
+        } QEMU_PACKED iommu_enable;
+
+        struct {
+#define VIRTIO_MSG_IOMMU_PAGE_SIZE (4 * 1024)
+#define VIRTIO_MSG_IOMMU_PAGE_MASK (VIRTIO_MSG_IOMMU_PAGE_SIZE - 1)
+            uint64_t va;
+#define VIRTIO_MSG_IOMMU_PROT_READ  (1U << 0)
+#define VIRTIO_MSG_IOMMU_PROT_WRITE (1U << 1)
+            uint8_t prot;
+        } QEMU_PACKED iommu_translate;
+        struct {
+            uint64_t va;
+            uint64_t pa;
+            uint8_t prot;
+        } QEMU_PACKED iommu_translate_resp;
     };
 } QEMU_PACKED VirtIOMSGPayload;
 
@@ -207,6 +231,9 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
     case VIRTIO_MSG_EVENT_USED:
         LE_TO_CPU(pl->event_used.index);
         break;
+    case VIRTIO_MSG_IOMMU_TRANSLATE:
+        LE_TO_CPU(pl->iommu_translate.va);
+        break;
     default:
         break;
     } 
@@ -246,6 +273,10 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
     case VIRTIO_MSG_GET_VQUEUE:
         LE_TO_CPU(pl->get_vqueue_resp.index);
         LE_TO_CPU(pl->get_vqueue_resp.max_size);
+        break;
+    case VIRTIO_MSG_IOMMU_TRANSLATE:
+        LE_TO_CPU(pl->iommu_translate_resp.va);
+        LE_TO_CPU(pl->iommu_translate_resp.pa);
         break;
     default:
         break;
@@ -472,6 +503,40 @@ static inline void virtio_msg_pack_event_conf(VirtIOMSG *msg)
     virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_CONF, 0, 0);
 }
 
+static inline void virtio_msg_pack_iommu_enable(VirtIOMSG *msg,
+                                                bool enable)
+{
+    VirtIOMSGPayload *pl = &msg->payload;
+    virtio_msg_pack_header(msg, VIRTIO_MSG_IOMMU_ENABLE, 0, 0);
+
+    pl->iommu_enable.enable = enable;
+}
+
+static inline void virtio_msg_pack_iommu_translate(VirtIOMSG *msg,
+                                                   uint64_t va,
+                                                   uint8_t prot)
+{
+    VirtIOMSGPayload *pl = &msg->payload;
+    virtio_msg_pack_header(msg, VIRTIO_MSG_IOMMU_TRANSLATE, 0, 0);
+
+    pl->iommu_translate.va = cpu_to_le64(va);
+    pl->iommu_translate.prot = prot;
+}
+
+static inline void virtio_msg_pack_iommu_translate_resp(VirtIOMSG *msg,
+                                                        uint64_t va,
+                                                        uint64_t pa,
+                                                        uint8_t prot)
+{
+    VirtIOMSGPayload *pl = &msg->payload;
+    virtio_msg_pack_header(msg, VIRTIO_MSG_IOMMU_TRANSLATE,
+                           VIRTIO_MSG_TYPE_RESPONSE, 0);
+
+    pl->iommu_translate_resp.va = cpu_to_le64(va);
+    pl->iommu_translate_resp.pa = cpu_to_le64(pa);
+    pl->iommu_translate_resp.prot = prot;
+}
+
 /*
  * Return true if msg_resp is a response for msg_req.
  */
@@ -504,6 +569,8 @@ static inline const char *virtio_msg_id_to_str(unsigned int type)
         VIRTIO_MSG_TYPE2STR(RESET_VQUEUE),
         VIRTIO_MSG_TYPE2STR(EVENT_AVAIL),
         VIRTIO_MSG_TYPE2STR(EVENT_USED),
+        VIRTIO_MSG_TYPE2STR(IOMMU_TRANSLATE),
+        VIRTIO_MSG_TYPE2STR(IOMMU_INVALIDATE),
     };
 
     return type2str[type];

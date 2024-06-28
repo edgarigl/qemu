@@ -26,6 +26,7 @@ struct VirtIOMSGProxyDriver {
 
     struct {
         uint16_t virtio_id;
+        bool iommu_enable;
     } cfg;
 };
 #endif

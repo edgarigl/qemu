@@ -11,6 +11,7 @@
 #define QEMU_VIRTIO_MSG_BUS_H
 
 #include "qom/object.h"
+#include "sysemu/dma.h"
 #include "hw/qdev-core.h"
 #include "hw/virtio/virtio-msg-prot.h"
 
@@ -42,6 +43,10 @@ struct VirtIOMSGBusDeviceClass {
      * A bus device can construct a view into the guests address-space.
      */
     AddressSpace *(*get_remote_as)(VirtIOMSGBusDevice *bd);
+
+    /* SW-IOMMU.  */
+    IOMMUTLBEntry (*iommu_translate)(VirtIOMSGBusDevice *bd,
+                                     uint64_t va, uint8_t prot);
 };
 
 typedef struct VirtIOMSGBusDevice {
@@ -53,6 +58,9 @@ typedef struct VirtIOMSGBusDevice {
         int num;
         int pos;
     } ooo_queue;
+
+    /* SW IOMMUs.  */
+    int pagemap_fd;
 
     const VirtIOMSGBusPort *peer;
     void *opaque;
@@ -97,5 +105,25 @@ static inline AddressSpace *virtio_msg_bus_get_remote_as(BusState *bus)
         return bdc->get_remote_as(bd);
     }
     return NULL;
+}
+
+IOMMUTLBEntry virtio_msg_bus_pagemap_translate(VirtIOMSGBusDevice *bd,
+                                               uint64_t va,
+                                               uint8_t prot);
+
+static inline IOMMUTLBEntry
+virtio_msg_bus_iommu_translate(BusState *bus,
+                               uint64_t va, uint8_t prot)
+{
+    VirtIOMSGBusDeviceClass *bdc;
+    IOMMUTLBEntry dummy = {0};
+
+    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
+    bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
+
+    if (bdc->iommu_translate) {
+        return bdc->iommu_translate(bd, va, prot);
+    }
+    return dummy;
 }
 #endif
