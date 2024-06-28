@@ -8,7 +8,49 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
+#include "hw/virtio/pagemap.h"
 #include "hw/virtio/virtio-msg-bus.h"
+
+
+IOMMUTLBEntry virtio_msg_bus_pagemap_translate(VirtIOMSGBusDevice *bd,
+                                               uint64_t va,
+                                               uint8_t prot)
+{
+    IOMMUTLBEntry ret = {0};
+    hwaddr plen = VIRTIO_MSG_IOMMU_PAGE_SIZE;
+    void *p;
+
+    if (bd->pagemap_fd == -1) {
+        bd->pagemap_fd = pagemap_open_self();
+        if (bd->pagemap_fd == -1) {
+            return ret;
+        }
+    }
+
+    assert((va & VIRTIO_MSG_IOMMU_PAGE_MASK) == 0);
+
+    p = address_space_map(&address_space_memory, va, &plen,
+                          prot & VIRTIO_MSG_IOMMU_PROT_WRITE,
+                          MEMTXATTRS_UNSPECIFIED);
+
+    if (!p) {
+        return ret;
+    }
+
+    ret.iova = va;
+    ret.translated_addr = pagemap_virt_to_phys(p);
+    ret.perm = IOMMU_ACCESS_FLAG(prot & VIRTIO_MSG_IOMMU_PROT_READ,
+                                 prot & VIRTIO_MSG_IOMMU_PROT_WRITE);
+
+    address_space_unmap(&address_space_memory, p, plen,
+                        prot & VIRTIO_MSG_IOMMU_PROT_WRITE,
+                        0);
+
+//    printf("%s: %lx.%lx  ->  %lx\n", __func__, va, ret.iova, ret.translated_addr);
+    return ret;
+}
+
 
 bool virtio_msg_bus_connect(BusState *bus,
                             const VirtIOMSGBusPort *port,
@@ -97,6 +139,13 @@ int virtio_msg_bus_send(BusState *bus,
     return r;
 }
 
+static void virtio_msg_bus_device_realize(DeviceState *dev, Error **errp)
+{
+    VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(dev);
+
+    bd->pagemap_fd = -1;
+}
+
 static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
 {
     BusClass *bc = BUS_CLASS(klass);
@@ -118,7 +167,8 @@ static const TypeInfo virtio_msg_bus_info = {
 static void virtio_msg_bus_device_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *k = DEVICE_CLASS(klass);
-    //k->realize = virtio_msg_bus_device_realize;
+
+    k->realize = virtio_msg_bus_device_realize;
     k->bus_type = TYPE_VIRTIO_MSG_BUS;
 }
 
