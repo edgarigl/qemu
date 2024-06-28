@@ -60,8 +60,7 @@ static void virtio_msg_bus_linux_user_process(VirtIOMSGBusDevice *bd) {
     do {
         r = spsc_recv(q, &msg, sizeof msg);
         if (r) {
-            assert(bd->peer->receive);
-            bd->peer->receive(bd, &msg);
+            virtio_msg_bus_receive(bd, &msg);
         }
     } while (r);
 }
