@@ -47,6 +47,13 @@ struct VirtIOMSGBusDeviceClass {
 typedef struct VirtIOMSGBusDevice {
     DeviceState parent;
 
+    /* Out of order queue.  */
+    struct {
+        VirtIOMSG msg[128];
+        int num;
+        int pos;
+    } ooo_queue;
+
     const VirtIOMSGBusPort *peer;
     void *opaque;
 } VirtIOMSGBusDevice;
@@ -66,37 +73,18 @@ static inline bool virtio_msg_bus_connected(BusState *bus)
     return bd && bd->peer != NULL;
 }
 
+void virtio_msg_bus_ooo_receive(VirtIOMSGBusDevice *bd,
+                                VirtIOMSG *msg_req,
+                                VirtIOMSG *msg_resp);
+void virtio_msg_bus_ooo_process(VirtIOMSGBusDevice *bd);
+void virtio_msg_bus_process(VirtIOMSGBusDevice *bd);
+
 bool virtio_msg_bus_connect(BusState *bus,
                             const VirtIOMSGBusPort *port,
                             void *opaque);
 
-static inline void virtio_msg_bus_process(BusState *bus)
-{
-    VirtIOMSGBusDeviceClass *bdc;
-
-    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
-    bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
-
-    if (bdc->process) {
-        bdc->process(bd);
-    }
-}
-
-static inline int virtio_msg_bus_send(BusState *bus,
-                                      VirtIOMSG *msg_req,
-                                      VirtIOMSG *msg_resp)
-{
-    VirtIOMSGBusDeviceClass *bdc;
-    int r = VIRTIO_MSG_NO_ERROR;
-
-    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
-    bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
-
-    if (bdc->send) {
-        r = bdc->send(bd, msg_req, msg_resp);
-    }
-    return r;
-}
+int virtio_msg_bus_send(BusState *bus,
+                        VirtIOMSG *msg_req, VirtIOMSG *msg_resp);
 
 static inline AddressSpace *virtio_msg_bus_get_remote_as(BusState *bus)
 {

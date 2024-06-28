@@ -247,6 +247,7 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 
     handler = msg_handlers[msg->id];
     virtio_msg_unpack(msg);
+    assert((msg->type & VIRTIO_MSG_TYPE_RESPONSE) == 0);
 
     if (handler) {
         handler(proxy, msg, &msg->payload);
