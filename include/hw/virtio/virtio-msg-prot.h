@@ -26,18 +26,17 @@ enum {
     VIRTIO_MSG_CONNECT           = 0x01,
     VIRTIO_MSG_DISCONNECT        = 0x02,
     VIRTIO_MSG_DEVICE_INFO       = 0x03,
-    VIRTIO_MSG_GET_DEVICE_FEAT   = 0x04,
-    VIRTIO_MSG_SET_DEVICE_FEAT   = 0x05,
-    VIRTIO_MSG_GET_DEVICE_CONF   = 0x06,
-    VIRTIO_MSG_SET_DEVICE_CONF   = 0x07,
-    /* Driver conf 0x08, 0x09 unused.  */
-    VIRTIO_MSG_GET_CONF_GEN      = 0x0a,
-    VIRTIO_MSG_EVENT_CONF        = 0x0b,
-    VIRTIO_MSG_GET_DEVICE_STATUS = 0x0c,
-    VIRTIO_MSG_SET_DEVICE_STATUS = 0x0d,
-    VIRTIO_MSG_GET_VQUEUE        = 0x0e,
-    VIRTIO_MSG_SET_VQUEUE        = 0x0f,
-    VIRTIO_MSG_RESET_VQUEUE      = 0x10,
+    VIRTIO_MSG_GET_FEATURES      = 0x04,
+    VIRTIO_MSG_SET_FEATURES      = 0x05,
+    VIRTIO_MSG_GET_CONFIG        = 0x06,
+    VIRTIO_MSG_SET_CONFIG        = 0x07,
+    VIRTIO_MSG_GET_CONFIG_GEN    = 0x08,
+    VIRTIO_MSG_GET_DEVICE_STATUS = 0x09,
+    VIRTIO_MSG_SET_DEVICE_STATUS = 0x0a,
+    VIRTIO_MSG_GET_VQUEUE        = 0x0b,
+    VIRTIO_MSG_SET_VQUEUE        = 0x0c,
+    VIRTIO_MSG_RESET_VQUEUE      = 0x0d,
+    VIRTIO_MSG_EVENT_CONFIG      = 0x10,
     VIRTIO_MSG_EVENT_AVAIL       = 0x11,
     VIRTIO_MSG_EVENT_USED        = 0x12,
 
@@ -65,19 +64,19 @@ typedef struct VirtIOMSGPayload {
         } QEMU_PACKED get_device_info_resp;
         struct {
             uint32_t index;
-        } QEMU_PACKED get_device_feat;
+        } QEMU_PACKED get_features;
         struct {
             uint32_t index;
             uint64_t features;
-        } QEMU_PACKED get_device_feat_resp;
+        } QEMU_PACKED get_features_resp;
         struct {
             uint32_t index;
             uint64_t features;
-        } QEMU_PACKED set_device_feat;
+        } QEMU_PACKED set_features;
         struct {
             uint32_t index;
             uint64_t features;
-        } QEMU_PACKED set_device_feat_resp;
+        } QEMU_PACKED set_features_resp;
         struct {
             uint32_t status;
         } QEMU_PACKED get_device_status_resp;
@@ -88,28 +87,28 @@ typedef struct VirtIOMSGPayload {
             uint16_t offset;
             uint8_t offset_msb;
             uint8_t size;
-        } QEMU_PACKED get_device_conf;
+        } QEMU_PACKED get_config;
         struct {
             uint16_t offset;
             uint8_t offset_msb;
             uint8_t size;
             uint64_t data;
-        } QEMU_PACKED get_device_conf_resp;
+        } QEMU_PACKED get_config_resp;
         struct {
             uint16_t offset;
             uint8_t offset_msb;
             uint8_t size;
             uint64_t data;
-        } QEMU_PACKED set_device_conf;
+        } QEMU_PACKED set_config;
         struct {
             uint16_t offset;
             uint8_t offset_msb;
             uint8_t size;
             uint64_t data;
-        } QEMU_PACKED set_device_conf_resp;
+        } QEMU_PACKED set_config_resp;
         struct {
             uint32_t generation;
-        } QEMU_PACKED get_conf_gen_resp;
+        } QEMU_PACKED get_config_gen_resp;
         struct {
             uint32_t index;
         } QEMU_PACKED get_vqueue;
@@ -133,6 +132,8 @@ typedef struct VirtIOMSGPayload {
             uint32_t index;
         } QEMU_PACKED event_used;
 
+
+        /* Experimental Soft IOMMU.  */
         struct {
             uint8_t enable;
         } QEMU_PACKED iommu_enable;
@@ -194,24 +195,24 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
     LE_TO_CPU(msg->dev_id);
 
     switch (msg->type) {
-    case VIRTIO_MSG_GET_DEVICE_FEAT:
-        LE_TO_CPU(pl->get_device_feat.index);
+    case VIRTIO_MSG_GET_FEATURES:
+        LE_TO_CPU(pl->get_features.index);
         break;
-    case VIRTIO_MSG_SET_DEVICE_FEAT:
-        LE_TO_CPU(pl->set_device_feat.index);
-        LE_TO_CPU(pl->set_device_feat.features);
+    case VIRTIO_MSG_SET_FEATURES:
+        LE_TO_CPU(pl->set_features.index);
+        LE_TO_CPU(pl->set_features.features);
         break;
     case VIRTIO_MSG_SET_DEVICE_STATUS:
         LE_TO_CPU(pl->set_device_status.status);
         break;
-    case VIRTIO_MSG_GET_DEVICE_CONF:
-        LE_TO_CPU(pl->get_device_conf.size);
-        LE_TO_CPU(pl->get_device_conf.offset);
+    case VIRTIO_MSG_GET_CONFIG:
+        LE_TO_CPU(pl->get_config.size);
+        LE_TO_CPU(pl->get_config.offset);
         break;
-    case VIRTIO_MSG_SET_DEVICE_CONF:
-        LE_TO_CPU(pl->set_device_conf.size);
-        LE_TO_CPU(pl->set_device_conf.offset);
-        LE_TO_CPU(pl->set_device_conf.data);
+    case VIRTIO_MSG_SET_CONFIG:
+        LE_TO_CPU(pl->set_config.size);
+        LE_TO_CPU(pl->set_config.offset);
+        LE_TO_CPU(pl->set_config.data);
         break;
     case VIRTIO_MSG_GET_VQUEUE:
         LE_TO_CPU(pl->get_vqueue.index);
@@ -258,17 +259,17 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
         LE_TO_CPU(pl->get_device_info_resp.device_id);
         LE_TO_CPU(pl->get_device_info_resp.vendor_id);
         break;
-    case VIRTIO_MSG_GET_DEVICE_FEAT:
-        LE_TO_CPU(pl->get_device_feat_resp.index);
-        LE_TO_CPU(pl->get_device_feat_resp.features);
+    case VIRTIO_MSG_GET_FEATURES:
+        LE_TO_CPU(pl->get_features_resp.index);
+        LE_TO_CPU(pl->get_features_resp.features);
         break;
     case VIRTIO_MSG_GET_DEVICE_STATUS:
         LE_TO_CPU(pl->get_device_status_resp.status);
         break;
-    case VIRTIO_MSG_GET_DEVICE_CONF:
-        LE_TO_CPU(pl->get_device_conf_resp.size);
-        LE_TO_CPU(pl->get_device_conf_resp.offset);
-        LE_TO_CPU(pl->get_device_conf_resp.data);
+    case VIRTIO_MSG_GET_CONFIG:
+        LE_TO_CPU(pl->get_config_resp.size);
+        LE_TO_CPU(pl->get_config_resp.offset);
+        LE_TO_CPU(pl->get_config_resp.data);
         break;
     case VIRTIO_MSG_GET_VQUEUE:
         LE_TO_CPU(pl->get_vqueue_resp.index);
@@ -315,48 +316,48 @@ static inline void virtio_msg_pack_get_device_info_resp(VirtIOMSG *msg,
     pl->get_device_info_resp.vendor_id = cpu_to_le32(vendor_id);
 }
 
-static inline void virtio_msg_pack_get_device_feat(VirtIOMSG *msg,
-                                                   uint32_t index)
+static inline void virtio_msg_pack_get_features(VirtIOMSG *msg,
+                                                uint32_t index)
 {
     VirtIOMSGPayload *pl = &msg->payload;
-    virtio_msg_pack_header(msg, VIRTIO_MSG_GET_DEVICE_FEAT, 0, 0);
+    virtio_msg_pack_header(msg, VIRTIO_MSG_GET_FEATURES, 0, 0);
 
-    pl->get_device_feat.index = cpu_to_le32(index);
+    pl->get_features.index = cpu_to_le32(index);
 }
 
-static inline void virtio_msg_pack_get_device_feat_resp(VirtIOMSG *msg,
-                                                        uint32_t index,
-                                                        uint64_t f)
+static inline void virtio_msg_pack_get_features_resp(VirtIOMSG *msg,
+                                                     uint32_t index,
+                                                     uint64_t f)
 {
     VirtIOMSGPayload *pl = &msg->payload;
-    virtio_msg_pack_header(msg, VIRTIO_MSG_GET_DEVICE_FEAT,
+    virtio_msg_pack_header(msg, VIRTIO_MSG_GET_FEATURES,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->get_device_feat_resp.index = cpu_to_le32(index);
-    pl->get_device_feat_resp.features = cpu_to_le64(f);
+    pl->get_features_resp.index = cpu_to_le32(index);
+    pl->get_features_resp.features = cpu_to_le64(f);
 }
 
-static inline void virtio_msg_pack_set_device_feat(VirtIOMSG *msg,
-                                                   uint32_t index,
-                                                   uint64_t f)
+static inline void virtio_msg_pack_set_features(VirtIOMSG *msg,
+                                                uint32_t index,
+                                                uint64_t f)
 {
     VirtIOMSGPayload *pl = &msg->payload;
-    virtio_msg_pack_header(msg, VIRTIO_MSG_SET_DEVICE_FEAT, 0, 0);
+    virtio_msg_pack_header(msg, VIRTIO_MSG_SET_FEATURES, 0, 0);
 
-    pl->set_device_feat.index = cpu_to_le32(index);
-    pl->set_device_feat.features = cpu_to_le64(f);
+    pl->set_features.index = cpu_to_le32(index);
+    pl->set_features.features = cpu_to_le64(f);
 }
 
-static inline void virtio_msg_pack_set_device_feat_resp(VirtIOMSG *msg,
-                                                        uint32_t index,
-                                                        uint64_t f)
+static inline void virtio_msg_pack_set_features_resp(VirtIOMSG *msg,
+                                                     uint32_t index,
+                                                     uint64_t f)
 {
     VirtIOMSGPayload *pl = &msg->payload;
-    virtio_msg_pack_header(msg, VIRTIO_MSG_SET_DEVICE_FEAT,
+    virtio_msg_pack_header(msg, VIRTIO_MSG_SET_FEATURES,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->set_device_feat_resp.index = cpu_to_le32(index);
-    pl->set_device_feat_resp.features = cpu_to_le64(f);
+    pl->set_features_resp.index = cpu_to_le32(index);
+    pl->set_features_resp.features = cpu_to_le64(f);
 }
 
 static inline void virtio_msg_pack_set_device_status(VirtIOMSG *msg,
@@ -383,60 +384,60 @@ static inline void virtio_msg_pack_get_device_status_resp(VirtIOMSG *msg,
     pl->get_device_status_resp.status = cpu_to_le32(status);
 }
 
-static inline void virtio_msg_pack_get_device_conf(VirtIOMSG *msg,
-                                                   uint8_t size,
-                                                   uint32_t offset)
+static inline void virtio_msg_pack_get_config(VirtIOMSG *msg,
+                                              uint8_t size,
+                                              uint32_t offset)
 {
     VirtIOMSGPayload *pl = &msg->payload;
-    virtio_msg_pack_header(msg, VIRTIO_MSG_GET_DEVICE_CONF, 0, 0);
+    virtio_msg_pack_header(msg, VIRTIO_MSG_GET_CONFIG, 0, 0);
 
-    pl->get_device_conf.offset = cpu_to_le16(offset);
-    pl->get_device_conf.offset_msb = offset >> 16;
-    pl->get_device_conf.size = size;
+    pl->get_config.offset = cpu_to_le16(offset);
+    pl->get_config.offset_msb = offset >> 16;
+    pl->get_config.size = size;
 }
 
-static inline void virtio_msg_pack_get_device_conf_resp(VirtIOMSG *msg,
+static inline void virtio_msg_pack_get_config_resp(VirtIOMSG *msg,
                                                         uint8_t size,
                                                         uint32_t offset,
                                                         uint64_t data)
 {
     VirtIOMSGPayload *pl = &msg->payload;
-    virtio_msg_pack_header(msg, VIRTIO_MSG_GET_DEVICE_CONF,
+    virtio_msg_pack_header(msg, VIRTIO_MSG_GET_CONFIG,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->get_device_conf_resp.offset = cpu_to_le16(offset);
-    pl->get_device_conf_resp.offset_msb = offset >> 16;
-    pl->get_device_conf_resp.size = size;
-    pl->get_device_conf_resp.data = cpu_to_le64(data);
+    pl->get_config_resp.offset = cpu_to_le16(offset);
+    pl->get_config_resp.offset_msb = offset >> 16;
+    pl->get_config_resp.size = size;
+    pl->get_config_resp.data = cpu_to_le64(data);
 }
 
-static inline void virtio_msg_pack_set_device_conf(VirtIOMSG *msg,
+static inline void virtio_msg_pack_set_config(VirtIOMSG *msg,
                                                    uint8_t size,
                                                    uint32_t offset,
                                                    uint64_t data)
 {
     VirtIOMSGPayload *pl = &msg->payload;
-    virtio_msg_pack_header(msg, VIRTIO_MSG_SET_DEVICE_CONF, 0, 0);
+    virtio_msg_pack_header(msg, VIRTIO_MSG_SET_CONFIG, 0, 0);
 
-    pl->set_device_conf.offset = cpu_to_le16(offset);
-    pl->set_device_conf.offset_msb = offset >> 16;
-    pl->set_device_conf.size = size;
-    pl->set_device_conf.data = cpu_to_le64(data);
+    pl->set_config.offset = cpu_to_le16(offset);
+    pl->set_config.offset_msb = offset >> 16;
+    pl->set_config.size = size;
+    pl->set_config.data = cpu_to_le64(data);
 }
 
-static inline void virtio_msg_pack_set_device_conf_resp(VirtIOMSG *msg,
-                                                        uint8_t size,
-                                                        uint32_t offset,
-                                                        uint64_t data)
+static inline void virtio_msg_pack_set_config_resp(VirtIOMSG *msg,
+                                                   uint8_t size,
+                                                   uint32_t offset,
+                                                   uint64_t data)
 {
     VirtIOMSGPayload *pl = &msg->payload;
-    virtio_msg_pack_header(msg, VIRTIO_MSG_SET_DEVICE_CONF,
+    virtio_msg_pack_header(msg, VIRTIO_MSG_SET_CONFIG,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->set_device_conf_resp.offset = cpu_to_le16(offset);
-    pl->set_device_conf_resp.offset_msb = offset >> 16;
-    pl->set_device_conf_resp.size = size;
-    pl->set_device_conf_resp.data = cpu_to_le64(data);
+    pl->set_config_resp.offset = cpu_to_le16(offset);
+    pl->set_config_resp.offset_msb = offset >> 16;
+    pl->set_config_resp.size = size;
+    pl->set_config_resp.data = cpu_to_le64(data);
 }
 
 static inline void virtio_msg_pack_get_vqueue(VirtIOMSG *msg,
@@ -498,9 +499,9 @@ static inline void virtio_msg_pack_event_used(VirtIOMSG *msg, uint32_t index)
     pl->event_used.index = cpu_to_le32(index);
 }
 
-static inline void virtio_msg_pack_event_conf(VirtIOMSG *msg)
+static inline void virtio_msg_pack_event_config(VirtIOMSG *msg)
 {
-    virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_CONF, 0, 0);
+    virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_CONFIG, 0, 0);
 }
 
 static inline void virtio_msg_pack_iommu_enable(VirtIOMSG *msg,
@@ -556,17 +557,17 @@ static inline const char *virtio_msg_id_to_str(unsigned int type)
         VIRTIO_MSG_TYPE2STR(CONNECT),
         VIRTIO_MSG_TYPE2STR(DISCONNECT),
         VIRTIO_MSG_TYPE2STR(DEVICE_INFO),
-        VIRTIO_MSG_TYPE2STR(GET_DEVICE_FEAT),
-        VIRTIO_MSG_TYPE2STR(SET_DEVICE_FEAT),
-        VIRTIO_MSG_TYPE2STR(GET_DEVICE_CONF),
-        VIRTIO_MSG_TYPE2STR(SET_DEVICE_CONF),
-        VIRTIO_MSG_TYPE2STR(GET_CONF_GEN),
-        VIRTIO_MSG_TYPE2STR(EVENT_CONF),
+        VIRTIO_MSG_TYPE2STR(GET_FEATURES),
+        VIRTIO_MSG_TYPE2STR(SET_FEATURES),
+        VIRTIO_MSG_TYPE2STR(GET_CONFIG),
+        VIRTIO_MSG_TYPE2STR(SET_CONFIG),
+        VIRTIO_MSG_TYPE2STR(GET_CONFIG_GEN),
         VIRTIO_MSG_TYPE2STR(GET_DEVICE_STATUS),
         VIRTIO_MSG_TYPE2STR(SET_DEVICE_STATUS),
         VIRTIO_MSG_TYPE2STR(GET_VQUEUE),
         VIRTIO_MSG_TYPE2STR(SET_VQUEUE),
         VIRTIO_MSG_TYPE2STR(RESET_VQUEUE),
+        VIRTIO_MSG_TYPE2STR(EVENT_CONFIG),
         VIRTIO_MSG_TYPE2STR(EVENT_AVAIL),
         VIRTIO_MSG_TYPE2STR(EVENT_USED),
         VIRTIO_MSG_TYPE2STR(IOMMU_TRANSLATE),
