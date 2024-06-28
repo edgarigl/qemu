@@ -91,6 +91,12 @@ bool virtio_msg_bus_connect(BusState *bus,
                             const VirtIOMSGBusPort *port,
                             void *opaque);
 
+static inline void
+virtio_msg_bus_receive(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
+{
+    bd->peer->receive(bd, msg);
+}
+
 int virtio_msg_bus_send(BusState *bus,
                         VirtIOMSG *msg_req, VirtIOMSG *msg_resp);
 
