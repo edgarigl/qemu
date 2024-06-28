@@ -14,14 +14,20 @@ implementation of a proxy that translates between existing transport
 At a high level the virtio-msg spec is split into the message transport and
 the lower level message bus. Different implementations of msg busses are
 expected, e.g FF-A, direct hw (vfio?), Linux user-space, Xen and others.
+
 Currently we have a PoC of a Linux userspace bus that allows communication
-between QEMU's running on the same host.
+between QEMU's running on the same host. We also have a vfio based bus
+driver that works over two ivshmem devices in separate QEMU instances.
 
 The msg-bus abstraction is implemented here:
   hw/virtio/virtio-msg-bus.c
 
 The linux-user message-bus implementation here:
   virtio-msg-bus-linux-user.c
+  include/hw/virtio/spsc_queue.h
+
+The ivshmem message-bus implementation here:
+  virtio-msg-bus-ivshmem.c
   include/hw/virtio/spsc_queue.h
 
 The virtio-msg protocol packetizer/decoder here:
@@ -36,8 +42,8 @@ The proxy device that translates from mmio/pci to msg:
 The virtio-msg backend machine:
   hw/virtio/virtio-msg-machine.c
 
-Running
--------
+Running Linux-user using two QEMU instances
+-------------------------------------------
 
 To run this example you first need to run the virtio-msg machine and
 secondly then the virt machine with Linux.
@@ -83,5 +89,4 @@ To use virtio-mmio, replace the -device virtio-msg-proxy-driver-pci with:
 
    -device virtio-msg-proxy-driver,iommu_platform=on,virtio-id=0x1      \
    -global virtio-mmio.force-legacy=false                               \
-
 
