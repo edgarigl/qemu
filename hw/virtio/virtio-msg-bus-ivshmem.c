@@ -79,6 +79,7 @@ static void virtio_msg_bus_ivshmem_process(VirtIOMSGBusDevice *bd) {
 static void ivshmem_intx_interrupt(void *opaque)
 {
     VirtIOMSGBusIVSHMEM *s = VIRTIO_MSG_BUS_IVSHMEM(opaque);
+    VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(opaque);
 
     if (!event_notifier_test_and_clear(&s->notifier)) {
         return;
@@ -86,7 +87,7 @@ static void ivshmem_intx_interrupt(void *opaque)
 
     /* ACK the interrupt.  */
     ivshmem_read32(s->msg.doorbell + IVD_BAR0_INTR_STATUS);
-    virtio_msg_bus_ivshmem_process(opaque);
+    virtio_msg_bus_process(bd);
     qemu_vfio_pci_unmask_irq(s->msg.dev, VFIO_PCI_INTX_IRQ_INDEX);
 }
 
@@ -111,24 +112,19 @@ static int virtio_msg_bus_ivshmem_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_re
     if (msg_resp) {
         bool r = false;
 
-        for (i = 0; !r && i < 100; i++){
+        for (i = 0; !r && i < 1024; i++){
             r = spsc_recv(q_rx, msg_resp, sizeof *msg_resp);
 
             if (!r) {
                 /* No message available, keep going with some delay.  */
-                usleep(i);
+                if (i > 128) {
+                    usleep(i / 128);
+                }
             }
 
-            if (r && (msg_resp->id != msg_req->id ||
-                      (msg_resp->type & VIRTIO_MSG_TYPE_RESPONSE) == 0)) {
-                /*
-                 * We've got a message but it's not the response we're
-                 * expecting. Forward it to the receiver logic.
-                 *
-                 * This should only happen for notifications.
-                 */
-                assert(bd->peer->receive);
-                bd->peer->receive(bd, msg_resp);
+            if (r && !virtio_msg_is_resp(msg_req, msg_resp)) {
+                /* Let the virtio-msg stack handle this.  */
+                virtio_msg_bus_ooo_receive(bd, msg_req, msg_resp);
                 /* Keep going.  */
                 r = 0;
             }

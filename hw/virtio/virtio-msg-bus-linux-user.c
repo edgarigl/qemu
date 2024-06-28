@@ -54,7 +54,8 @@ static void virtio_msg_bus_linux_user_process(VirtIOMSGBusDevice *bd) {
     } while (r);
 }
 
-static int virtio_msg_bus_linux_user_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req,
+static int virtio_msg_bus_linux_user_send(VirtIOMSGBusDevice *bd,
+                                          VirtIOMSG *msg_req,
                                           VirtIOMSG *msg_resp)
 {
     VirtIOMSGBusLinuxUser *s = VIRTIO_MSG_BUS_LINUX_USER(bd);
@@ -75,24 +76,19 @@ static int virtio_msg_bus_linux_user_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg
     if (msg_resp) {
         bool r = false;
 
-        for (i = 0; !r && i < 40; i++){
+        for (i = 0; !r && i < 1024; i++){
             r = spsc_recv(q_rx, msg_resp, sizeof *msg_resp);
 
             if (!r) {
                 /* No message available, keep going with some delay.  */
-                usleep(i);
+                if (i > 128) {
+                    usleep(i / 128);
+                }
             }
 
-            if (r && (msg_resp->id != msg_req->id ||
-                      (msg_resp->type & VIRTIO_MSG_TYPE_RESPONSE) == 0)) {
-                /*
-                 * We've got a message but it's not the response we're
-                 * expecting. Forward it to the receiver logic.
-                 *
-                 * This should only happen for notifications.
-                 */
-                assert(bd->peer->receive);
-                bd->peer->receive(bd, msg_resp);
+            if (r && !virtio_msg_is_resp(msg_req, msg_resp)) {
+                /* Let the virtio-msg stack handle this.  */
+                virtio_msg_bus_ooo_receive(bd, msg_req, msg_resp);
                 /* Keep going.  */
                 r = 0;
             }
@@ -117,7 +113,7 @@ static void virtio_msg_bus_linux_user_receive(void *opaque,
 {
     VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(opaque);
 
-    virtio_msg_bus_linux_user_process(bd);
+    virtio_msg_bus_process(bd);
 }
 
 static void virtio_msg_bus_linux_user_realize(DeviceState *dev, Error **errp)

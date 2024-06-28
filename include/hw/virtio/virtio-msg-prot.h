@@ -472,6 +472,18 @@ static inline void virtio_msg_pack_event_conf(VirtIOMSG *msg)
     virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_CONF, 0, 0);
 }
 
+/*
+ * Return true if msg_resp is a response for msg_req.
+ */
+static inline bool virtio_msg_is_resp(VirtIOMSG *msg_req, VirtIOMSG *msg_resp)
+{
+    if (msg_resp->id == msg_req->id &&
+        msg_resp->type & VIRTIO_MSG_TYPE_RESPONSE) {
+        return true;
+    }
+    return false;
+}
+
 static inline const char *virtio_msg_id_to_str(unsigned int type)
 {
 #define VIRTIO_MSG_TYPE2STR(x) [ VIRTIO_MSG_ ## x ] = stringify(x)
