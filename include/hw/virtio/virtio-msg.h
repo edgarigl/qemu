@@ -25,6 +25,8 @@ struct VirtIOMSGProxy {
     /* virtio-msg-bus.  */
     BusState msg_bus;
 
+    bool iommu_enabled;
+
     /* Fields only used for non-legacy (v2) devices */
     uint64_t guest_features;
 };
