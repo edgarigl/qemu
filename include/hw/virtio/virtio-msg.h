@@ -1,3 +1,12 @@
+/*
+ * Virtio MSG bindings
+ *
+ * Copyright (c) 2024 Advanced Micro Devices, Inc.
+ * Written by Edgar E. Iglesias <edgar.iglesias@amd.com>.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
 #ifndef HW_VIRTIO_MSG_PROXY_BACKEND_H
 #define HW_VIRTIO_MSG_PROXY_BACKEND_H
 
