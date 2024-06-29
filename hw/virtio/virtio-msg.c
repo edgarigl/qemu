@@ -1,3 +1,12 @@
+/*
+ * Virtio MSG bindings
+ *
+ * Copyright (c) 2024 Advanced Micro Devices, Inc.
+ * Written by Edgar E. Iglesias <edgar.iglesias@amd.com>.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "sysemu/dma.h"
