@@ -176,6 +176,50 @@ typedef struct VirtIOMSG {
 }
 
 /**
+ * virtio_msg_unpack_resp: Unpacks a wire virtio message responses into
+ *                         a host version
+ * @msg: the virtio message to unpack
+ *
+ * See virtio_msg_unpack().
+ */
+static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
+{
+    VirtIOMSGPayload *pl = &msg->payload;
+
+    LE_TO_CPU(msg->dev_id);
+
+    switch (msg->type) {
+    case VIRTIO_MSG_DEVICE_INFO:
+        LE_TO_CPU(pl->get_device_info_resp.device_version);
+        LE_TO_CPU(pl->get_device_info_resp.device_id);
+        LE_TO_CPU(pl->get_device_info_resp.vendor_id);
+        break;
+    case VIRTIO_MSG_GET_FEATURES:
+        LE_TO_CPU(pl->get_features_resp.index);
+        LE_TO_CPU(pl->get_features_resp.features);
+        break;
+    case VIRTIO_MSG_GET_DEVICE_STATUS:
+        LE_TO_CPU(pl->get_device_status_resp.status);
+        break;
+    case VIRTIO_MSG_GET_CONFIG:
+        LE_TO_CPU(pl->get_config_resp.size);
+        LE_TO_CPU(pl->get_config_resp.offset);
+        LE_TO_CPU(pl->get_config_resp.data);
+        break;
+    case VIRTIO_MSG_GET_VQUEUE:
+        LE_TO_CPU(pl->get_vqueue_resp.index);
+        LE_TO_CPU(pl->get_vqueue_resp.max_size);
+        break;
+    case VIRTIO_MSG_IOMMU_TRANSLATE:
+        LE_TO_CPU(pl->iommu_translate_resp.va);
+        LE_TO_CPU(pl->iommu_translate_resp.pa);
+        break;
+    default:
+        break;
+    }
+}
+
+/**
  * virtio_msg_unpack: Unpacks a wire virtio message into a host version
  * @msg: the virtio message to unpack
  *
@@ -191,6 +235,11 @@ typedef struct VirtIOMSG {
  */
 static inline void virtio_msg_unpack(VirtIOMSG *msg) {
     VirtIOMSGPayload *pl = &msg->payload;
+
+    if (msg->type & VIRTIO_MSG_TYPE_RESPONSE) {
+        virtio_msg_unpack_resp(msg);
+        return;
+    }
 
     LE_TO_CPU(msg->dev_id);
 
@@ -238,50 +287,6 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
     default:
         break;
     } 
-}
-
-/**
- * virtio_msg_unpack_resp: Unpacks a wire virtio message responses into
- *                         a host version
- * @msg: the virtio message to unpack
- *
- * See virtio_msg_unpack().
- */
-static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
-{
-    VirtIOMSGPayload *pl = &msg->payload;
-
-    LE_TO_CPU(msg->dev_id);
-
-    switch (msg->type) {
-    case VIRTIO_MSG_DEVICE_INFO:
-        LE_TO_CPU(pl->get_device_info_resp.device_version);
-        LE_TO_CPU(pl->get_device_info_resp.device_id);
-        LE_TO_CPU(pl->get_device_info_resp.vendor_id);
-        break;
-    case VIRTIO_MSG_GET_FEATURES:
-        LE_TO_CPU(pl->get_features_resp.index);
-        LE_TO_CPU(pl->get_features_resp.features);
-        break;
-    case VIRTIO_MSG_GET_DEVICE_STATUS:
-        LE_TO_CPU(pl->get_device_status_resp.status);
-        break;
-    case VIRTIO_MSG_GET_CONFIG:
-        LE_TO_CPU(pl->get_config_resp.size);
-        LE_TO_CPU(pl->get_config_resp.offset);
-        LE_TO_CPU(pl->get_config_resp.data);
-        break;
-    case VIRTIO_MSG_GET_VQUEUE:
-        LE_TO_CPU(pl->get_vqueue_resp.index);
-        LE_TO_CPU(pl->get_vqueue_resp.max_size);
-        break;
-    case VIRTIO_MSG_IOMMU_TRANSLATE:
-        LE_TO_CPU(pl->iommu_translate_resp.va);
-        LE_TO_CPU(pl->iommu_translate_resp.pa);
-        break;
-    default:
-        break;
-    }
 }
 
 static inline void virtio_msg_pack_header(VirtIOMSG *msg,
