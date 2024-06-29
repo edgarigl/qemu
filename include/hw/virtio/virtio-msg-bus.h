@@ -94,6 +94,7 @@ bool virtio_msg_bus_connect(BusState *bus,
 static inline void
 virtio_msg_bus_receive(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 {
+    virtio_msg_unpack(msg);
     bd->peer->receive(bd, msg);
 }
 
