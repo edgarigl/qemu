@@ -20,7 +20,7 @@
 
 #include "standard-headers/linux/virtio_ids.h"
 
-static void virtio_msg_pd_handle_output(VirtIODevice *vdev, VirtQueue *vq)
+static void vmpd_handle_output(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     uint32_t index = virtio_get_queue_index(vq);
@@ -30,7 +30,7 @@ static void virtio_msg_pd_handle_output(VirtIODevice *vdev, VirtQueue *vq)
     virtio_msg_bus_send(&vpd->bus, &msg, NULL);
 }
 
-static bool virtio_msg_pd_probe_queue(VirtIOMSGProxyDriver *vpd, int i)
+static bool vmpd_probe_queue(VirtIOMSGProxyDriver *vpd, int i)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
     VirtIOMSG msg, msg_resp;
@@ -39,15 +39,14 @@ static bool virtio_msg_pd_probe_queue(VirtIOMSGProxyDriver *vpd, int i)
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 
     if (msg_resp.get_vqueue_resp.max_size) {
-        printf("%s: VQ add %d\n", __func__, i);
         virtio_add_queue(vdev, msg_resp.get_vqueue_resp.max_size,
-                         virtio_msg_pd_handle_output);
+                         vmpd_handle_output);
     }
 
     return msg_resp.get_vqueue_resp.max_size != 0;
 }
 
-static void virtio_msg_pd_probe_queues(VirtIOMSGProxyDriver *vpd)
+static void vmpd_probe_queues(VirtIOMSGProxyDriver *vpd)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
     int i;
@@ -57,19 +56,18 @@ static void virtio_msg_pd_probe_queues(VirtIOMSGProxyDriver *vpd)
         if (!virtio_queue_get_num(vdev, i)) {
             break;
         }
-        printf("%s: VQ Remove %d\n", __func__, i);
         virtio_del_queue(vdev, i);
     }
 
     /* And start re-adding active queue's from the peer.  */
     for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
-        if (!virtio_msg_pd_probe_queue(vpd, i)) {
+        if (!vmpd_probe_queue(vpd, i)) {
             break;
         }
     }
 }
 
-static void vmb_event_used(VirtIOMSGProxyDriver *vpd,
+static void vmpd_event_used(VirtIOMSGProxyDriver *vpd,
                            VirtIOMSG *msg)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
@@ -79,7 +77,7 @@ static void vmb_event_used(VirtIOMSGProxyDriver *vpd,
     virtio_notify_force(vdev, vq);
 }
 
-static void vmb_event_config(VirtIOMSGProxyDriver *vpd,
+static void vmpd_event_config(VirtIOMSGProxyDriver *vpd,
                              VirtIOMSG *msg)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
@@ -87,7 +85,7 @@ static void vmb_event_config(VirtIOMSGProxyDriver *vpd,
     virtio_notify_config(vdev);
 }
 
-static void vmb_iommu_translate(VirtIOMSGProxyDriver *vpd,
+static void vmpd_iommu_translate(VirtIOMSGProxyDriver *vpd,
                                 VirtIOMSG *msg)
 {
     uint8_t prot = msg->iommu_translate.prot;
@@ -111,12 +109,12 @@ typedef void (*VirtIOMSGHandler)(VirtIOMSGProxyDriver *vpd,
                                  VirtIOMSG *msg);
 
 static const VirtIOMSGHandler msg_handlers[] = {
-    [VIRTIO_MSG_EVENT_USED] = vmb_event_used,
-    [VIRTIO_MSG_EVENT_CONFIG] = vmb_event_config,
-    [VIRTIO_MSG_IOMMU_TRANSLATE] = vmb_iommu_translate,
+    [VIRTIO_MSG_EVENT_USED] = vmpd_event_used,
+    [VIRTIO_MSG_EVENT_CONFIG] = vmpd_event_config,
+    [VIRTIO_MSG_IOMMU_TRANSLATE] = vmpd_iommu_translate,
 };
 
-static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
+static int vmpd_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(bd->opaque);
     VirtIOMSGHandler handler;
@@ -136,8 +134,8 @@ static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     return VIRTIO_MSG_NO_ERROR;
 }
 
-static const VirtIOMSGBusPort vmb_port = {
-    .receive = vmb_receive_msg,
+static const VirtIOMSGBusPort vmpd_port = {
+    .receive = vmpd_receive_msg,
     .is_driver = true
 };
 
@@ -165,7 +163,7 @@ static void vmpd_set_features(VirtIODevice *vdev, uint64_t f)
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 }
 
-static void virtio_msg_pd_set_status(VirtIODevice *vdev, uint8_t status)
+static void vmpd_set_status(VirtIODevice *vdev, uint8_t status)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
@@ -188,7 +186,7 @@ static void virtio_msg_pd_set_status(VirtIODevice *vdev, uint8_t status)
      * negotiation (see virtio-net mq support for an example).
      */
     if (status & VIRTIO_CONFIG_S_FEATURES_OK) {
-        virtio_msg_pd_probe_queues(vpd);
+        vmpd_probe_queues(vpd);
     }
 
     virtio_msg_pack_set_device_status(&msg, status);
@@ -200,7 +198,7 @@ static void virtio_msg_pd_set_status(VirtIODevice *vdev, uint8_t status)
     vdev->status = msg_resp.get_device_status_resp.status;
 }
 
-static uint32_t virtio_msg_pd_read_config(VirtIODevice *vdev,
+static uint32_t vmpd_read_config(VirtIODevice *vdev,
                                           int size, uint32_t addr)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
@@ -212,7 +210,7 @@ static uint32_t virtio_msg_pd_read_config(VirtIODevice *vdev,
     return msg_resp.get_config_resp.data;
 }
 
-static void virtio_msg_pd_write_config(VirtIODevice *vdev,
+static void vmpd_write_config(VirtIODevice *vdev,
                                       int size, uint32_t addr, uint32_t val)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
@@ -222,7 +220,7 @@ static void virtio_msg_pd_write_config(VirtIODevice *vdev,
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 }
 
-static void virtio_msg_pd_queue_enable(VirtIODevice *vdev, uint32_t n)
+static void vmpd_queue_enable(VirtIODevice *vdev, uint32_t n)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg;
@@ -238,13 +236,13 @@ static void virtio_msg_pd_queue_enable(VirtIODevice *vdev, uint32_t n)
     virtio_msg_bus_send(&vpd->bus, &msg, NULL);
 }
 
-static void virtio_msg_pd_reset_hold(Object *obj, ResetType type)
+static void vmpd_reset_hold(Object *obj, ResetType type)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(obj);
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
     VirtIOMSG msg, msg_resp;
 
-    if (!virtio_msg_bus_connect(&vpd->bus, &vmb_port, vpd)) {
+    if (!virtio_msg_bus_connect(&vpd->bus, &vmpd_port, vpd)) {
         error_report("virtio-msg-proxy: Failed to connect!");
         exit(EXIT_FAILURE);
     }
@@ -268,10 +266,10 @@ static void virtio_msg_pd_reset_hold(Object *obj, ResetType type)
         virtio_msg_bus_send(&vpd->bus, &msg, NULL);
     }
 
-    virtio_msg_pd_probe_queues(vpd);
+    vmpd_probe_queues(vpd);
 }
 
-static void virtio_msg_pd_device_realize(DeviceState *dev, Error **errp)
+static void vmpd_device_realize(DeviceState *dev, Error **errp)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(dev);
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
@@ -282,7 +280,7 @@ static void virtio_msg_pd_device_realize(DeviceState *dev, Error **errp)
     virtio_init(vdev, vpd->cfg.virtio_id, 0);
 }
 
-static void virtio_msg_pd_device_unrealize(DeviceState *dev)
+static void vmpd_device_unrealize(DeviceState *dev)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
 
@@ -300,7 +298,7 @@ static const VMStateDescription vmstate_virtio_msg_pd = {
     },
 };
 
-static Property virtio_msg_pd_properties[] = {
+static Property vmpd_properties[] = {
     DEFINE_PROP_UINT16("virtio-id", VirtIOMSGProxyDriver, cfg.virtio_id,
                        VIRTIO_ID_NET),
     DEFINE_PROP_BOOL("iommu-enable", VirtIOMSGProxyDriver,
@@ -308,38 +306,38 @@ static Property virtio_msg_pd_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
-static void virtio_msg_pd_class_init(ObjectClass *klass, void *data)
+static void vmpd_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
-    device_class_set_props(dc, virtio_msg_pd_properties);
+    device_class_set_props(dc, vmpd_properties);
     dc->vmsd = &vmstate_virtio_msg_pd;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 
-    rc->phases.hold  = virtio_msg_pd_reset_hold;
+    rc->phases.hold  = vmpd_reset_hold;
 
-    vdc->realize = virtio_msg_pd_device_realize;
-    vdc->unrealize = virtio_msg_pd_device_unrealize;
+    vdc->realize = vmpd_device_realize;
+    vdc->unrealize = vmpd_device_unrealize;
     vdc->get_features = vmpd_get_features;
     vdc->set_features = vmpd_set_features;
-    vdc->set_status = virtio_msg_pd_set_status;
-    vdc->read_config = virtio_msg_pd_read_config;
-    vdc->write_config = virtio_msg_pd_write_config;
-    vdc->queue_enable = virtio_msg_pd_queue_enable;
+    vdc->set_status = vmpd_set_status;
+    vdc->read_config = vmpd_read_config;
+    vdc->write_config = vmpd_write_config;
+    vdc->queue_enable = vmpd_queue_enable;
 }
 
-static const TypeInfo virtio_msg_pd_info = {
+static const TypeInfo vmpd_info = {
     .name = TYPE_VIRTIO_MSG_PROXY_DRIVER,
     .parent = TYPE_VIRTIO_DEVICE,
     .instance_size = sizeof(VirtIOMSGProxyDriver),
-    .class_init = virtio_msg_pd_class_init,
+    .class_init = vmpd_class_init,
 };
 
 static void virtio_register_types(void)
 {
-    type_register_static(&virtio_msg_pd_info);
+    type_register_static(&vmpd_info);
 }
 
 type_init(virtio_register_types)
