@@ -53,9 +53,13 @@ enum {
 #define VIRTIO_MSG_TYPE_RESPONSE  (1 << 0)
 #define VIRTIO_MSG_TYPE_BUS       (1 << 1)
 
-typedef struct VirtIOMSGPayload {
+typedef struct VirtIOMSG {
+    uint8_t type;
+    uint8_t id;
+    uint16_t dev_id;
+
     union {
-        uint8_t u8[36];
+        uint8_t payload_u8[36];
 
         struct {
             uint32_t device_version;
@@ -152,14 +156,6 @@ typedef struct VirtIOMSGPayload {
             uint8_t prot;
         } QEMU_PACKED iommu_translate_resp;
     };
-} QEMU_PACKED VirtIOMSGPayload;
-
-typedef struct VirtIOMSG {
-    uint8_t type;
-    uint8_t id;
-    uint16_t dev_id;
-
-    VirtIOMSGPayload payload;
 } QEMU_PACKED VirtIOMSG;
 
 #define LE_TO_CPU(v)                                        \
@@ -184,35 +180,33 @@ typedef struct VirtIOMSG {
  */
 static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
-
     LE_TO_CPU(msg->dev_id);
 
     switch (msg->type) {
     case VIRTIO_MSG_DEVICE_INFO:
-        LE_TO_CPU(pl->get_device_info_resp.device_version);
-        LE_TO_CPU(pl->get_device_info_resp.device_id);
-        LE_TO_CPU(pl->get_device_info_resp.vendor_id);
+        LE_TO_CPU(msg->get_device_info_resp.device_version);
+        LE_TO_CPU(msg->get_device_info_resp.device_id);
+        LE_TO_CPU(msg->get_device_info_resp.vendor_id);
         break;
     case VIRTIO_MSG_GET_FEATURES:
-        LE_TO_CPU(pl->get_features_resp.index);
-        LE_TO_CPU(pl->get_features_resp.features);
+        LE_TO_CPU(msg->get_features_resp.index);
+        LE_TO_CPU(msg->get_features_resp.features);
         break;
     case VIRTIO_MSG_GET_DEVICE_STATUS:
-        LE_TO_CPU(pl->get_device_status_resp.status);
+        LE_TO_CPU(msg->get_device_status_resp.status);
         break;
     case VIRTIO_MSG_GET_CONFIG:
-        LE_TO_CPU(pl->get_config_resp.size);
-        LE_TO_CPU(pl->get_config_resp.offset);
-        LE_TO_CPU(pl->get_config_resp.data);
+        LE_TO_CPU(msg->get_config_resp.size);
+        LE_TO_CPU(msg->get_config_resp.offset);
+        LE_TO_CPU(msg->get_config_resp.data);
         break;
     case VIRTIO_MSG_GET_VQUEUE:
-        LE_TO_CPU(pl->get_vqueue_resp.index);
-        LE_TO_CPU(pl->get_vqueue_resp.max_size);
+        LE_TO_CPU(msg->get_vqueue_resp.index);
+        LE_TO_CPU(msg->get_vqueue_resp.max_size);
         break;
     case VIRTIO_MSG_IOMMU_TRANSLATE:
-        LE_TO_CPU(pl->iommu_translate_resp.va);
-        LE_TO_CPU(pl->iommu_translate_resp.pa);
+        LE_TO_CPU(msg->iommu_translate_resp.va);
+        LE_TO_CPU(msg->iommu_translate_resp.pa);
         break;
     default:
         break;
@@ -234,8 +228,6 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
  * hosts.
  */
 static inline void virtio_msg_unpack(VirtIOMSG *msg) {
-    VirtIOMSGPayload *pl = &msg->payload;
-
     if (msg->type & VIRTIO_MSG_TYPE_RESPONSE) {
         virtio_msg_unpack_resp(msg);
         return;
@@ -245,44 +237,44 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
 
     switch (msg->type) {
     case VIRTIO_MSG_GET_FEATURES:
-        LE_TO_CPU(pl->get_features.index);
+        LE_TO_CPU(msg->get_features.index);
         break;
     case VIRTIO_MSG_SET_FEATURES:
-        LE_TO_CPU(pl->set_features.index);
-        LE_TO_CPU(pl->set_features.features);
+        LE_TO_CPU(msg->set_features.index);
+        LE_TO_CPU(msg->set_features.features);
         break;
     case VIRTIO_MSG_SET_DEVICE_STATUS:
-        LE_TO_CPU(pl->set_device_status.status);
+        LE_TO_CPU(msg->set_device_status.status);
         break;
     case VIRTIO_MSG_GET_CONFIG:
-        LE_TO_CPU(pl->get_config.size);
-        LE_TO_CPU(pl->get_config.offset);
+        LE_TO_CPU(msg->get_config.size);
+        LE_TO_CPU(msg->get_config.offset);
         break;
     case VIRTIO_MSG_SET_CONFIG:
-        LE_TO_CPU(pl->set_config.size);
-        LE_TO_CPU(pl->set_config.offset);
-        LE_TO_CPU(pl->set_config.data);
+        LE_TO_CPU(msg->set_config.size);
+        LE_TO_CPU(msg->set_config.offset);
+        LE_TO_CPU(msg->set_config.data);
         break;
     case VIRTIO_MSG_GET_VQUEUE:
-        LE_TO_CPU(pl->get_vqueue.index);
+        LE_TO_CPU(msg->get_vqueue.index);
         break;
     case VIRTIO_MSG_SET_VQUEUE:
-        LE_TO_CPU(pl->set_vqueue.index);
-        LE_TO_CPU(pl->set_vqueue.size);
-        LE_TO_CPU(pl->set_vqueue.descriptor_addr);
-        LE_TO_CPU(pl->set_vqueue.driver_addr);
-        LE_TO_CPU(pl->set_vqueue.device_addr);
+        LE_TO_CPU(msg->set_vqueue.index);
+        LE_TO_CPU(msg->set_vqueue.size);
+        LE_TO_CPU(msg->set_vqueue.descriptor_addr);
+        LE_TO_CPU(msg->set_vqueue.driver_addr);
+        LE_TO_CPU(msg->set_vqueue.device_addr);
         break;
     case VIRTIO_MSG_EVENT_AVAIL:
-        LE_TO_CPU(pl->event_avail.index);
-        LE_TO_CPU(pl->event_avail.next_offset);
-        LE_TO_CPU(pl->event_avail.next_wrap);
+        LE_TO_CPU(msg->event_avail.index);
+        LE_TO_CPU(msg->event_avail.next_offset);
+        LE_TO_CPU(msg->event_avail.next_wrap);
         break;
     case VIRTIO_MSG_EVENT_USED:
-        LE_TO_CPU(pl->event_used.index);
+        LE_TO_CPU(msg->event_used.index);
         break;
     case VIRTIO_MSG_IOMMU_TRANSLATE:
-        LE_TO_CPU(pl->iommu_translate.va);
+        LE_TO_CPU(msg->iommu_translate.va);
         break;
     default:
         break;
@@ -299,7 +291,7 @@ static inline void virtio_msg_pack_header(VirtIOMSG *msg,
     msg->dev_id = cpu_to_le16(dev_id); /* dest demux? */
 
     /* Keep things predictable.  */
-    memset(msg->payload.u8, 0, sizeof msg->payload.u8);
+    memset(msg->payload_u8, 0, sizeof msg->payload_u8);
 }
 
 static inline void virtio_msg_pack_get_device_info(VirtIOMSG *msg)
@@ -312,66 +304,60 @@ static inline void virtio_msg_pack_get_device_info_resp(VirtIOMSG *msg,
                                                    uint32_t dev_id,
                                                    uint32_t vendor_id)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_DEVICE_INFO,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->get_device_info_resp.device_version = cpu_to_le32(dev_version);
-    pl->get_device_info_resp.device_id = cpu_to_le32(dev_id);
-    pl->get_device_info_resp.vendor_id = cpu_to_le32(vendor_id);
+    msg->get_device_info_resp.device_version = cpu_to_le32(dev_version);
+    msg->get_device_info_resp.device_id = cpu_to_le32(dev_id);
+    msg->get_device_info_resp.vendor_id = cpu_to_le32(vendor_id);
 }
 
 static inline void virtio_msg_pack_get_features(VirtIOMSG *msg,
                                                 uint32_t index)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_FEATURES, 0, 0);
 
-    pl->get_features.index = cpu_to_le32(index);
+    msg->get_features.index = cpu_to_le32(index);
 }
 
 static inline void virtio_msg_pack_get_features_resp(VirtIOMSG *msg,
                                                      uint32_t index,
                                                      uint64_t f)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_FEATURES,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->get_features_resp.index = cpu_to_le32(index);
-    pl->get_features_resp.features = cpu_to_le64(f);
+    msg->get_features_resp.index = cpu_to_le32(index);
+    msg->get_features_resp.features = cpu_to_le64(f);
 }
 
 static inline void virtio_msg_pack_set_features(VirtIOMSG *msg,
                                                 uint32_t index,
                                                 uint64_t f)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_SET_FEATURES, 0, 0);
 
-    pl->set_features.index = cpu_to_le32(index);
-    pl->set_features.features = cpu_to_le64(f);
+    msg->set_features.index = cpu_to_le32(index);
+    msg->set_features.features = cpu_to_le64(f);
 }
 
 static inline void virtio_msg_pack_set_features_resp(VirtIOMSG *msg,
                                                      uint32_t index,
                                                      uint64_t f)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_SET_FEATURES,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->set_features_resp.index = cpu_to_le32(index);
-    pl->set_features_resp.features = cpu_to_le64(f);
+    msg->set_features_resp.index = cpu_to_le32(index);
+    msg->set_features_resp.features = cpu_to_le64(f);
 }
 
 static inline void virtio_msg_pack_set_device_status(VirtIOMSG *msg,
                                                      uint32_t status)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_SET_DEVICE_STATUS, 0, 0);
 
-    pl->set_device_status.status = cpu_to_le32(status);
+    msg->set_device_status.status = cpu_to_le32(status);
 }
 
 static inline void virtio_msg_pack_get_device_status(VirtIOMSG *msg)
@@ -382,23 +368,21 @@ static inline void virtio_msg_pack_get_device_status(VirtIOMSG *msg)
 static inline void virtio_msg_pack_get_device_status_resp(VirtIOMSG *msg,
                                                           uint32_t status)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_DEVICE_STATUS,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->get_device_status_resp.status = cpu_to_le32(status);
+    msg->get_device_status_resp.status = cpu_to_le32(status);
 }
 
 static inline void virtio_msg_pack_get_config(VirtIOMSG *msg,
                                               uint8_t size,
                                               uint32_t offset)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_CONFIG, 0, 0);
 
-    pl->get_config.offset = cpu_to_le16(offset);
-    pl->get_config.offset_msb = offset >> 16;
-    pl->get_config.size = size;
+    msg->get_config.offset = cpu_to_le16(offset);
+    msg->get_config.offset_msb = offset >> 16;
+    msg->get_config.size = size;
 }
 
 static inline void virtio_msg_pack_get_config_resp(VirtIOMSG *msg,
@@ -406,14 +390,13 @@ static inline void virtio_msg_pack_get_config_resp(VirtIOMSG *msg,
                                                         uint32_t offset,
                                                         uint64_t data)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_CONFIG,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->get_config_resp.offset = cpu_to_le16(offset);
-    pl->get_config_resp.offset_msb = offset >> 16;
-    pl->get_config_resp.size = size;
-    pl->get_config_resp.data = cpu_to_le64(data);
+    msg->get_config_resp.offset = cpu_to_le16(offset);
+    msg->get_config_resp.offset_msb = offset >> 16;
+    msg->get_config_resp.size = size;
+    msg->get_config_resp.data = cpu_to_le64(data);
 }
 
 static inline void virtio_msg_pack_set_config(VirtIOMSG *msg,
@@ -421,13 +404,12 @@ static inline void virtio_msg_pack_set_config(VirtIOMSG *msg,
                                                    uint32_t offset,
                                                    uint64_t data)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_SET_CONFIG, 0, 0);
 
-    pl->set_config.offset = cpu_to_le16(offset);
-    pl->set_config.offset_msb = offset >> 16;
-    pl->set_config.size = size;
-    pl->set_config.data = cpu_to_le64(data);
+    msg->set_config.offset = cpu_to_le16(offset);
+    msg->set_config.offset_msb = offset >> 16;
+    msg->set_config.size = size;
+    msg->set_config.data = cpu_to_le64(data);
 }
 
 static inline void virtio_msg_pack_set_config_resp(VirtIOMSG *msg,
@@ -435,35 +417,32 @@ static inline void virtio_msg_pack_set_config_resp(VirtIOMSG *msg,
                                                    uint32_t offset,
                                                    uint64_t data)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_SET_CONFIG,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->set_config_resp.offset = cpu_to_le16(offset);
-    pl->set_config_resp.offset_msb = offset >> 16;
-    pl->set_config_resp.size = size;
-    pl->set_config_resp.data = cpu_to_le64(data);
+    msg->set_config_resp.offset = cpu_to_le16(offset);
+    msg->set_config_resp.offset_msb = offset >> 16;
+    msg->set_config_resp.size = size;
+    msg->set_config_resp.data = cpu_to_le64(data);
 }
 
 static inline void virtio_msg_pack_get_vqueue(VirtIOMSG *msg,
                                               uint32_t index)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_VQUEUE, 0, 0);
 
-    pl->get_vqueue.index = cpu_to_le32(index);
+    msg->get_vqueue.index = cpu_to_le32(index);
 }
 
 static inline void virtio_msg_pack_get_vqueue_resp(VirtIOMSG *msg,
                                                    uint32_t index,
                                                    uint32_t max_size)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_VQUEUE,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->get_vqueue_resp.index = cpu_to_le32(index);
-    pl->get_vqueue_resp.max_size = cpu_to_le32(max_size);
+    msg->get_vqueue_resp.index = cpu_to_le32(index);
+    msg->get_vqueue_resp.max_size = cpu_to_le32(max_size);
 }
 
 static inline void virtio_msg_pack_set_vqueue(VirtIOMSG *msg,
@@ -473,14 +452,13 @@ static inline void virtio_msg_pack_set_vqueue(VirtIOMSG *msg,
                                               uint64_t driver_addr,
                                               uint64_t device_addr)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_SET_VQUEUE, 0, 0);
 
-    pl->set_vqueue.index = cpu_to_le32(index);
-    pl->set_vqueue.size = cpu_to_le32(size);
-    pl->set_vqueue.descriptor_addr = cpu_to_le64(descriptor_addr);
-    pl->set_vqueue.driver_addr = cpu_to_le64(driver_addr);
-    pl->set_vqueue.device_addr = cpu_to_le64(device_addr);
+    msg->set_vqueue.index = cpu_to_le32(index);
+    msg->set_vqueue.size = cpu_to_le32(size);
+    msg->set_vqueue.descriptor_addr = cpu_to_le64(descriptor_addr);
+    msg->set_vqueue.driver_addr = cpu_to_le64(driver_addr);
+    msg->set_vqueue.device_addr = cpu_to_le64(device_addr);
 }
 
 static inline void virtio_msg_pack_event_avail(VirtIOMSG *msg,
@@ -488,20 +466,18 @@ static inline void virtio_msg_pack_event_avail(VirtIOMSG *msg,
                                                uint64_t next_offset,
                                                uint64_t next_wrap)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_AVAIL, 0, 0);
 
-    pl->event_avail.index = cpu_to_le32(index);
-    pl->event_avail.next_offset = cpu_to_le64(next_offset);
-    pl->event_avail.next_wrap = cpu_to_le64(next_wrap);
+    msg->event_avail.index = cpu_to_le32(index);
+    msg->event_avail.next_offset = cpu_to_le64(next_offset);
+    msg->event_avail.next_wrap = cpu_to_le64(next_wrap);
 }
 
 static inline void virtio_msg_pack_event_used(VirtIOMSG *msg, uint32_t index)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_USED, 0, 0);
 
-    pl->event_used.index = cpu_to_le32(index);
+    msg->event_used.index = cpu_to_le32(index);
 }
 
 static inline void virtio_msg_pack_event_config(VirtIOMSG *msg)
@@ -512,21 +488,19 @@ static inline void virtio_msg_pack_event_config(VirtIOMSG *msg)
 static inline void virtio_msg_pack_iommu_enable(VirtIOMSG *msg,
                                                 bool enable)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_IOMMU_ENABLE, 0, 0);
 
-    pl->iommu_enable.enable = enable;
+    msg->iommu_enable.enable = enable;
 }
 
 static inline void virtio_msg_pack_iommu_translate(VirtIOMSG *msg,
                                                    uint64_t va,
                                                    uint8_t prot)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_IOMMU_TRANSLATE, 0, 0);
 
-    pl->iommu_translate.va = cpu_to_le64(va);
-    pl->iommu_translate.prot = prot;
+    msg->iommu_translate.va = cpu_to_le64(va);
+    msg->iommu_translate.prot = prot;
 }
 
 static inline void virtio_msg_pack_iommu_translate_resp(VirtIOMSG *msg,
@@ -534,13 +508,12 @@ static inline void virtio_msg_pack_iommu_translate_resp(VirtIOMSG *msg,
                                                         uint64_t pa,
                                                         uint8_t prot)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     virtio_msg_pack_header(msg, VIRTIO_MSG_IOMMU_TRANSLATE,
                            VIRTIO_MSG_TYPE_RESPONSE, 0);
 
-    pl->iommu_translate_resp.va = cpu_to_le64(va);
-    pl->iommu_translate_resp.pa = cpu_to_le64(pa);
-    pl->iommu_translate_resp.prot = prot;
+    msg->iommu_translate_resp.va = cpu_to_le64(va);
+    msg->iommu_translate_resp.pa = cpu_to_le64(pa);
+    msg->iommu_translate_resp.prot = prot;
 }
 
 /*
@@ -610,7 +583,6 @@ static inline void virtio_msg_print_status(uint32_t status)
 
 static inline void virtio_msg_print(VirtIOMSG *msg)
 {
-    VirtIOMSGPayload *pl = &msg->payload;
     bool resp = msg->type & VIRTIO_MSG_TYPE_RESPONSE;
     int i;
 
@@ -620,7 +592,7 @@ static inline void virtio_msg_print(VirtIOMSG *msg)
            msg->type, msg->dev_id);
 
     for (i = 0; i < 32; i++) {
-        printf("%2.2x ", msg->payload.u8[i]);
+        printf("%2.2x ", msg->payload_u8[i]);
         if (((i + 1) %  16) == 0) {
             printf("\n");
         }
@@ -629,11 +601,11 @@ static inline void virtio_msg_print(VirtIOMSG *msg)
     switch (msg->id) {
     case VIRTIO_MSG_GET_DEVICE_STATUS:
         if (resp) {
-            virtio_msg_print_status(pl->get_device_status_resp.status);
+            virtio_msg_print_status(msg->get_device_status_resp.status);
         }
         break;
     case VIRTIO_MSG_SET_DEVICE_STATUS:
-        virtio_msg_print_status(pl->set_device_status.status);
+        virtio_msg_print_status(msg->set_device_status.status);
         break;
     }
     printf("\n");
