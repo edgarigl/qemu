@@ -62,7 +62,7 @@ remove any existing queue's.
         -chardev socket,id=chr0,path=linux-user.socket,server=on \
         -serial mon:stdio -display none \
         -device virtio-msg-bus-linux-user,name=linux-user,chardev=chr0 \
-        -device virtio-net-device,netdev=net0 \
+        -device virtio-net-device,netdev=net0,iommu_platform=on \
         -netdev user,id=net0 \
         -object filter-dump,id=f0,netdev=net0,file=net.pcap
 
