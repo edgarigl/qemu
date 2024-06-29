@@ -127,8 +127,6 @@ static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     VirtIOMSGHandler handler;
 
     //virtio_msg_print(msg);
-    virtio_msg_unpack(msg);
-
     assert((msg->type & VIRTIO_MSG_TYPE_RESPONSE) == 0);
 
     if (msg->id > ARRAY_SIZE(msg_handlers)) {
@@ -136,8 +134,6 @@ static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     }
 
     handler = msg_handlers[msg->id];
-    virtio_msg_unpack(msg);
-
     if (handler) {
         handler(vpd, msg, &msg->payload);
     }
