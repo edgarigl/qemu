@@ -420,7 +420,6 @@ static IOMMUTLBEntry virtio_msg_iommu_translate(IOMMUMemoryRegion *iommu,
 
     virtio_msg_pack_iommu_translate(&msg, ret.iova, prot);
     virtio_msg_bus_send(&s->msg_bus, &msg, &msg_resp);
-    virtio_msg_unpack_resp(&msg_resp);
 
     ret.iova = mp->iommu_translate_resp.va;
     ret.translated_addr = mp->iommu_translate_resp.pa;
