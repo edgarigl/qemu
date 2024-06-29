@@ -101,13 +101,24 @@ static int virtio_msg_bus_linux_user_send(VirtIOMSGBusDevice *bd,
                 /* Let the virtio-msg stack handle this.  */
                 virtio_msg_bus_ooo_receive(bd, msg_req, msg_resp);
                 /* Keep going.  */
-                r = 0;
+                r = false;
             }
         }
         if (!r) {
+            /*
+             * FIXME: Devices/backends need to be able to recover from
+             * errors like this. Think a QEMU instance serving multiple
+             * guests via multiple virtio-msg devs. Can't allow one of
+             * them to bring down the entire QEMU.
+             */
             printf("ERROR: %s: timed out!!\n", __func__);
             abort();
         }
+
+        /*
+         * We've got our response. Unpack it and return back to the caller.
+         */
+        virtio_msg_unpack(msg_resp);
     }
 
     return VIRTIO_MSG_NO_ERROR;
