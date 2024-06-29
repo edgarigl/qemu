@@ -37,7 +37,6 @@ static bool virtio_msg_pd_probe_queue(VirtIOMSGProxyDriver *vpd, int i)
 
     virtio_msg_pack_get_vqueue(&msg, i);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
-    virtio_msg_unpack_resp(&msg_resp);
 
     if (msg_resp.payload.get_vqueue_resp.max_size) {
         printf("%s: VQ add %d\n", __func__, i);
@@ -154,7 +153,6 @@ static uint64_t vmpd_get_features(VirtIODevice *vdev, uint64_t f, Error **errp)
     if (virtio_msg_bus_connected(&vpd->bus)) {
         virtio_msg_pack_get_features(&msg, 0);
         virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
-        virtio_msg_unpack_resp(&msg_resp);
 
         f = msg_resp.payload.get_features_resp.features;
     }
@@ -202,7 +200,6 @@ static void virtio_msg_pd_set_status(VirtIODevice *vdev, uint8_t status)
 
     virtio_msg_pack_get_device_status(&msg);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
-    virtio_msg_unpack_resp(&msg_resp);
 
     vdev->status = msg_resp.payload.get_device_status_resp.status;
 }
@@ -215,7 +212,6 @@ static uint32_t virtio_msg_pd_read_config(VirtIODevice *vdev,
 
     virtio_msg_pack_get_config(&msg, size, addr);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
-    virtio_msg_unpack_resp(&msg_resp);
 
     return msg_resp.payload.get_config_resp.data;
 }
@@ -259,7 +255,6 @@ static void virtio_msg_pd_reset_hold(Object *obj, ResetType type)
 
     virtio_msg_pack_get_device_info(&msg);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
-    virtio_msg_unpack_resp(&msg_resp);
 
     if (vpd->cfg.virtio_id != msg_resp.payload.get_device_info_resp.device_id) {
         error_report("virtio-msg-proxy: Device-id missmatch! %x != %x",
