@@ -38,13 +38,13 @@ static bool virtio_msg_pd_probe_queue(VirtIOMSGProxyDriver *vpd, int i)
     virtio_msg_pack_get_vqueue(&msg, i);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 
-    if (msg_resp.payload.get_vqueue_resp.max_size) {
+    if (msg_resp.get_vqueue_resp.max_size) {
         printf("%s: VQ add %d\n", __func__, i);
-        virtio_add_queue(vdev, msg_resp.payload.get_vqueue_resp.max_size,
+        virtio_add_queue(vdev, msg_resp.get_vqueue_resp.max_size,
                          virtio_msg_pd_handle_output);
     }
 
-    return msg_resp.payload.get_vqueue_resp.max_size != 0;
+    return msg_resp.get_vqueue_resp.max_size != 0;
 }
 
 static void virtio_msg_pd_probe_queues(VirtIOMSGProxyDriver *vpd)
@@ -70,19 +70,17 @@ static void virtio_msg_pd_probe_queues(VirtIOMSGProxyDriver *vpd)
 }
 
 static void vmb_event_used(VirtIOMSGProxyDriver *vpd,
-                           VirtIOMSG *msg,
-                           VirtIOMSGPayload *mp)
+                           VirtIOMSG *msg)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
     VirtQueue *vq;
 
-    vq = virtio_get_queue(vdev, mp->event_used.index);
+    vq = virtio_get_queue(vdev, msg->event_used.index);
     virtio_notify_force(vdev, vq);
 }
 
 static void vmb_event_config(VirtIOMSGProxyDriver *vpd,
-                             VirtIOMSG *msg,
-                             VirtIOMSGPayload *mp)
+                             VirtIOMSG *msg)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
 
@@ -90,11 +88,10 @@ static void vmb_event_config(VirtIOMSGProxyDriver *vpd,
 }
 
 static void vmb_iommu_translate(VirtIOMSGProxyDriver *vpd,
-                                VirtIOMSG *msg,
-                                VirtIOMSGPayload *mp)
+                                VirtIOMSG *msg)
 {
-    uint8_t prot = mp->iommu_translate.prot;
-    uint64_t va = mp->iommu_translate.va;
+    uint8_t prot = msg->iommu_translate.prot;
+    uint64_t va = msg->iommu_translate.va;
     VirtIOMSG msg_resp;
     IOMMUTLBEntry r;
 
@@ -111,8 +108,7 @@ static void vmb_iommu_translate(VirtIOMSGProxyDriver *vpd,
 
 /* FIXME: Avoid duplication.  */
 typedef void (*VirtIOMSGHandler)(VirtIOMSGProxyDriver *vpd,
-                                 VirtIOMSG *msg,
-                                 VirtIOMSGPayload *mp);
+                                 VirtIOMSG *msg);
 
 static const VirtIOMSGHandler msg_handlers[] = {
     [VIRTIO_MSG_EVENT_USED] = vmb_event_used,
@@ -134,7 +130,7 @@ static int vmb_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 
     handler = msg_handlers[msg->id];
     if (handler) {
-        handler(vpd, msg, &msg->payload);
+        handler(vpd, msg);
     }
 
     return VIRTIO_MSG_NO_ERROR;
@@ -154,7 +150,7 @@ static uint64_t vmpd_get_features(VirtIODevice *vdev, uint64_t f, Error **errp)
         virtio_msg_pack_get_features(&msg, 0);
         virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 
-        f = msg_resp.payload.get_features_resp.features;
+        f = msg_resp.get_features_resp.features;
     }
 
     return f;
@@ -201,7 +197,7 @@ static void virtio_msg_pd_set_status(VirtIODevice *vdev, uint8_t status)
     virtio_msg_pack_get_device_status(&msg);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 
-    vdev->status = msg_resp.payload.get_device_status_resp.status;
+    vdev->status = msg_resp.get_device_status_resp.status;
 }
 
 static uint32_t virtio_msg_pd_read_config(VirtIODevice *vdev,
@@ -213,7 +209,7 @@ static uint32_t virtio_msg_pd_read_config(VirtIODevice *vdev,
     virtio_msg_pack_get_config(&msg, size, addr);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 
-    return msg_resp.payload.get_config_resp.data;
+    return msg_resp.get_config_resp.data;
 }
 
 static void virtio_msg_pd_write_config(VirtIODevice *vdev,
@@ -256,9 +252,9 @@ static void virtio_msg_pd_reset_hold(Object *obj, ResetType type)
     virtio_msg_pack_get_device_info(&msg);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 
-    if (vpd->cfg.virtio_id != msg_resp.payload.get_device_info_resp.device_id) {
+    if (vpd->cfg.virtio_id != msg_resp.get_device_info_resp.device_id) {
         error_report("virtio-msg-proxy: Device-id missmatch! %x != %x",
-                     msg_resp.payload.get_device_info_resp.device_id,
+                     msg_resp.get_device_info_resp.device_id,
                      vpd->cfg.virtio_id);
         exit(EXIT_FAILURE);
     }
