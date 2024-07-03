@@ -93,7 +93,6 @@ static void vmpd_iommu_translate(VirtIOMSGProxyDriver *vpd,
     VirtIOMSG msg_resp;
     IOMMUTLBEntry r;
 
-    /* TODO: Add translation.  */
     r = virtio_msg_bus_iommu_translate(&vpd->bus, va, prot);
     prot = r.perm & IOMMU_RO ? VIRTIO_MSG_IOMMU_PROT_READ : 0;
     prot |= r.perm & IOMMU_WO ? VIRTIO_MSG_IOMMU_PROT_WRITE : 0;
