@@ -24,6 +24,7 @@ IOMMUTLBEntry virtio_msg_bus_pagemap_translate(VirtIOMSGBusDevice *bd,
     if (bd->pagemap_fd == -1) {
         bd->pagemap_fd = pagemap_open_self();
         if (bd->pagemap_fd == -1) {
+            printf("failed to open /proc/self/pagemap!\n");
             return ret;
         }
     }
@@ -39,7 +40,7 @@ IOMMUTLBEntry virtio_msg_bus_pagemap_translate(VirtIOMSGBusDevice *bd,
     }
 
     ret.iova = va;
-    ret.translated_addr = pagemap_virt_to_phys(p);
+    ret.translated_addr = pagemap_virt_to_phys_fd(bd->pagemap_fd, p);
     ret.perm = IOMMU_ACCESS_FLAG(prot & VIRTIO_MSG_IOMMU_PROT_READ,
                                  prot & VIRTIO_MSG_IOMMU_PROT_WRITE);
 
