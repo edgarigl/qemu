@@ -162,8 +162,14 @@ static int virtio_msg_bus_ivshmem_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_re
 static void virtio_msg_bus_ivshmem_realize(DeviceState *dev, Error **errp)
 {
     VirtIOMSGBusIVSHMEM *s = VIRTIO_MSG_BUS_IVSHMEM(dev);
+    VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_GET_CLASS(dev);
     uint64_t mem_size;
     int ret;
+
+    bdc->parent_realize(dev, errp);
+    if (*errp) {
+        return;
+    }
 
     if (s->cfg.dev == NULL) {
         error_setg(errp, "property 'dev' not specified.");
@@ -263,7 +269,8 @@ static void virtio_msg_bus_ivshmem_class_init(ObjectClass *klass, void *data)
     bdc->get_remote_as = virtio_msg_bus_ivshmem_get_remote_as;
     bdc->iommu_translate = virtio_msg_bus_ivshmem_iommu_translate;
 
-    dc->realize = virtio_msg_bus_ivshmem_realize;
+    device_class_set_parent_realize(dc, virtio_msg_bus_ivshmem_realize,
+                                    &bdc->parent_realize);
     device_class_set_props(dc, virtio_msg_bus_ivshmem_props);
 }
 

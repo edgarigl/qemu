@@ -141,9 +141,15 @@ static void virtio_msg_bus_linux_user_receive(void *opaque,
 static void virtio_msg_bus_linux_user_realize(DeviceState *dev, Error **errp)
 {
     VirtIOMSGBusLinuxUser *s = VIRTIO_MSG_BUS_LINUX_USER(dev);
+    VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_GET_CLASS(dev);
     g_autofree char *name_driver = NULL;
     g_autofree char *name_device = NULL;
     uint64_t mem_size;
+
+    bdc->parent_realize(dev, errp);
+    if (*errp) {
+        return;
+    }
 
     if (s->cfg.name == NULL) {
         error_setg(errp, "property 'name' not specified.");
@@ -214,7 +220,8 @@ static void virtio_msg_bus_linux_user_class_init(ObjectClass *klass, void *data)
     bdc->get_remote_as = virtio_msg_bus_linux_user_get_remote_as;
     bdc->iommu_translate = virtio_msg_bus_linux_user_iommu_translate;
 
-    dc->realize = virtio_msg_bus_linux_user_realize;
+    device_class_set_parent_realize(dc, virtio_msg_bus_linux_user_realize,
+                                    &bdc->parent_realize);
     device_class_set_props(dc, virtio_msg_bus_linux_user_props);
 }
 
