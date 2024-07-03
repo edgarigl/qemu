@@ -54,7 +54,7 @@ static inline int pagemap_open_self(void) {
 }
 
 // Translate a given virtual ptr into its physical address.
-static inline uint64_t pagemap_virt_to_phys(void* ptr) {
+static inline uint64_t pagemap_virt_to_phys_fd(int fd, void* ptr) {
     uint64_t va = (uintptr_t)ptr;
     uint64_t pagemap;
     uint64_t offset;
@@ -62,19 +62,12 @@ static inline uint64_t pagemap_virt_to_phys(void* ptr) {
     uint64_t pa;
     int pagesize;
     ssize_t r;
-    int fd;
-
-    fd = pagemap_open_self();
-    if (fd < 0) {
-        return PAGEMAP_FAILED;
-    }
 
     pagesize = getpagesize();
     offset = va % pagesize;
     vfn = va / pagesize;
     r = pread(fd, &pagemap, sizeof pagemap, 8 * vfn);
     assert(r == sizeof pagemap);
-    close(fd);
 
     if (!(pagemap & PAGEMAP_PAGE_PRESENT)) {
         return PAGEMAP_FAILED;
@@ -86,6 +79,21 @@ static inline uint64_t pagemap_virt_to_phys(void* ptr) {
     }
 
     pa |= offset;
+    return pa;
+}
+
+// Translate a given virtual ptr into its physical address.
+static inline uint64_t pagemap_virt_to_phys(void* ptr) {
+    uint64_t pa;
+    int fd;
+
+    fd = pagemap_open_self();
+    if (fd < 0) {
+        return PAGEMAP_FAILED;
+    }
+
+    pa = pagemap_virt_to_phys_fd(fd, ptr);
+    close(fd);
     return pa;
 }
 #endif
