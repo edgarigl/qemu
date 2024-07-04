@@ -35,8 +35,6 @@ struct VirtIOMSGBusDeviceClass {
 
     DeviceRealize parent_realize;
 
-    void (*connect)(VirtIOMSGBusDevice *bd, const VirtIOMSGBusPort *port,
-                    void *opaque);
     void (*process)(VirtIOMSGBusDevice *bd);
     int (*send)(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req,
                 VirtIOMSG *msg_resp);
