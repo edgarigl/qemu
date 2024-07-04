@@ -196,9 +196,12 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
         LE_TO_CPU(msg->get_device_status_resp.status);
         break;
     case VIRTIO_MSG_GET_CONFIG:
-        LE_TO_CPU(msg->get_config_resp.size);
         LE_TO_CPU(msg->get_config_resp.offset);
         LE_TO_CPU(msg->get_config_resp.data);
+        break;
+    case VIRTIO_MSG_SET_CONFIG:
+        LE_TO_CPU(msg->set_config_resp.offset);
+        LE_TO_CPU(msg->set_config_resp.data);
         break;
     case VIRTIO_MSG_GET_VQUEUE:
         LE_TO_CPU(msg->get_vqueue_resp.index);
@@ -247,11 +250,9 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
         LE_TO_CPU(msg->set_device_status.status);
         break;
     case VIRTIO_MSG_GET_CONFIG:
-        LE_TO_CPU(msg->get_config.size);
         LE_TO_CPU(msg->get_config.offset);
         break;
     case VIRTIO_MSG_SET_CONFIG:
-        LE_TO_CPU(msg->set_config.size);
         LE_TO_CPU(msg->set_config.offset);
         LE_TO_CPU(msg->set_config.data);
         break;
