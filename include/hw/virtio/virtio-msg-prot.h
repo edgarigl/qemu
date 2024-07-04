@@ -182,7 +182,7 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
 {
     LE_TO_CPU(msg->dev_id);
 
-    switch (msg->type) {
+    switch (msg->id) {
     case VIRTIO_MSG_DEVICE_INFO:
         LE_TO_CPU(msg->get_device_info_resp.device_version);
         LE_TO_CPU(msg->get_device_info_resp.device_id);
@@ -238,7 +238,7 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
 
     LE_TO_CPU(msg->dev_id);
 
-    switch (msg->type) {
+    switch (msg->id) {
     case VIRTIO_MSG_GET_FEATURES:
         LE_TO_CPU(msg->get_features.index);
         break;
