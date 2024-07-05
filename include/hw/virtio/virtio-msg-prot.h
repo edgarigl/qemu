@@ -128,6 +128,13 @@ typedef struct VirtIOMSG {
             uint64_t device_addr;
         } QEMU_PACKED set_vqueue;
         struct {
+            uint32_t status;
+            uint16_t config_offset;
+            uint8_t config_offset_msb;
+            uint8_t config_size;
+            uint8_t config_value[16];
+        } QEMU_PACKED event_config;
+        struct {
             uint32_t index;
             uint64_t next_offset;
             uint64_t next_wrap;
@@ -265,6 +272,10 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
         LE_TO_CPU(msg->set_vqueue.descriptor_addr);
         LE_TO_CPU(msg->set_vqueue.driver_addr);
         LE_TO_CPU(msg->set_vqueue.device_addr);
+        break;
+    case VIRTIO_MSG_EVENT_CONFIG:
+        LE_TO_CPU(msg->event_config.status);
+        LE_TO_CPU(msg->event_config.config_offset);
         break;
     case VIRTIO_MSG_EVENT_AVAIL:
         LE_TO_CPU(msg->event_avail.index);
@@ -481,9 +492,22 @@ static inline void virtio_msg_pack_event_used(VirtIOMSG *msg, uint32_t index)
     msg->event_used.index = cpu_to_le32(index);
 }
 
-static inline void virtio_msg_pack_event_config(VirtIOMSG *msg)
+static inline void virtio_msg_pack_event_config(VirtIOMSG *msg,
+                                                uint32_t status,
+                                                uint32_t offset,
+                                                uint8_t size,
+                                                uint8_t *value)
 {
     virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_CONFIG, 0, 0);
+
+    msg->event_config.status = cpu_to_le32(status);
+    msg->event_config.config_offset = cpu_to_le16(offset & 0xffff);
+    msg->event_config.config_offset_msb = offset >> 24;
+    msg->event_config.config_size = size;
+
+    if (size > 0) {
+        memcpy(&msg->event_config.config_value[0], value, size);
+    }
 }
 
 static inline void virtio_msg_pack_iommu_enable(VirtIOMSG *msg,

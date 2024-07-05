@@ -210,7 +210,8 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *s,
         VirtIOMSG msg_ev;
 
         virtio_error(vdev, "Notification while driver not OK?");
-        virtio_msg_pack_event_config(&msg_ev);
+        virtio_msg_pack_event_config(&msg_ev, vdev->status,
+                                     0, 0, NULL);
         virtio_msg_bus_send(&s->msg_bus, &msg_ev, NULL);
         return;
     }
@@ -276,6 +277,20 @@ static void virtio_msg_notify_queue(DeviceState *opaque, uint16_t index)
     }
 
     virtio_msg_pack_event_used(&msg, index);
+    virtio_msg_bus_send(&s->msg_bus, &msg, NULL);
+}
+
+static void virtio_msg_notify(DeviceState *opaque, uint16_t vector)
+{
+    VirtIOMSGProxy *s = VIRTIO_MSG(opaque);
+    VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
+    VirtIOMSG msg;
+
+    if (!vdev || !virtio_msg_bus_connected(&s->msg_bus)) {
+        return;
+    }
+
+    virtio_msg_pack_event_config(&msg, vdev->status, 0, 0, NULL);
     virtio_msg_bus_send(&s->msg_bus, &msg, NULL);
 }
 
@@ -445,6 +460,7 @@ static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
     VirtioBusClass *k = VIRTIO_BUS_CLASS(klass);
 
     k->notify_queue = virtio_msg_notify_queue;
+    k->notify = virtio_msg_notify;
     k->save_extra_state = virtio_msg_save_extra_state;
     k->load_extra_state = virtio_msg_load_extra_state;
     k->has_extra_state = virtio_msg_has_extra_state;
