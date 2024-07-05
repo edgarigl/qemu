@@ -35,7 +35,19 @@ struct VirtIOMSGBusDeviceClass {
 
     DeviceRealize parent_realize;
 
+    /*
+     * Ask the bus to receive and process all messages that
+     * are readily available. The bus will call the registered
+     * VirtIOMSGBusPort.receive() function for each message.
+     *
+     * Will return immediately if no messages are available.
+     */
     void (*process)(VirtIOMSGBusDevice *bd);
+
+    /*
+     * Called by the transport to send a message and optionally
+     * wait for a response.
+     */
     int (*send)(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req,
                 VirtIOMSG *msg_resp);
 
@@ -44,7 +56,13 @@ struct VirtIOMSGBusDeviceClass {
      */
     AddressSpace *(*get_remote_as)(VirtIOMSGBusDevice *bd);
 
-    /* SW-IOMMU.  */
+    /*
+     * Software-IOMMU.
+     *
+     * Allow the bus to provide platform or bus-specific per 4K
+     * page address translations. Used for communication with
+     * backends that don't sit behind IOMMU's.
+     */
     IOMMUTLBEntry (*iommu_translate)(VirtIOMSGBusDevice *bd,
                                      uint64_t va, uint8_t prot);
 };
