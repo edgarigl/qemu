@@ -82,6 +82,7 @@ static void vmpd_event_config(VirtIOMSGProxyDriver *vpd,
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
 
+    vdev->status = msg->event_config.status;
     virtio_notify_config(vdev);
 }
 
