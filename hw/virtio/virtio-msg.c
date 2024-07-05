@@ -286,7 +286,7 @@ static void virtio_msg_notify(DeviceState *opaque, uint16_t vector)
     VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
     VirtIOMSG msg;
 
-    if (!vdev || !virtio_msg_bus_connected(&s->msg_bus)) {
+    if (!virtio_msg_bus_connected(&s->msg_bus)) {
         return;
     }
 
