@@ -548,4 +548,23 @@ static inline int xendevicemodel_set_irq_level(xendevicemodel_handle *dmod,
 #define GUEST_RAM1_SIZE   0xfe00000000ULL
 #endif
 
+/* Experimental.  */
+#ifndef XENMEM_gfn2mfn
+int xc_domain_gfn2mfn(xc_interface *xch,
+                  uint32_t domid,
+                  uint64_t gfn,
+                  uint64_t *mfn,
+                  xenmem_access_t *access);
+
+#define XENMEM_gfn2mfn                40
+struct xen_gfn2mfn {
+    domid_t domid;
+    xen_pfn_t gfn;
+    uint64_t mfn;
+    uint8_t access;
+};
+typedef struct xen_gfn2mfn xen_gfn2mfn_t;
+DEFINE_XEN_GUEST_HANDLE(xen_gfn2mfn_t);
+#endif
+
 #endif /* QEMU_HW_XEN_NATIVE_H */

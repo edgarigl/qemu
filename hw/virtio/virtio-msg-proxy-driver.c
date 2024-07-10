@@ -240,6 +240,7 @@ static void vmpd_reset_hold(Object *obj, ResetType type)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(obj);
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
+    VirtIOMSGBusDevice *bd;
     VirtIOMSG msg, msg_resp;
 
     if (!virtio_msg_bus_connect(&vpd->bus, &vmpd_port, vpd)) {
@@ -261,7 +262,9 @@ static void vmpd_reset_hold(Object *obj, ResetType type)
     vdev->host_features = vmpd_get_features(vdev, vdev->host_features,
                                             &error_abort);
 
-    if (vpd->cfg.iommu_enable) {
+    bd = virtio_msg_bus_get_device(&vpd->bus);
+
+    if (bd->iommu_translate) {
         virtio_msg_pack_iommu_enable(&msg, true);
         virtio_msg_bus_send(&vpd->bus, &msg, NULL);
     }
