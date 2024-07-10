@@ -55,20 +55,13 @@ struct VirtIOMSGBusDeviceClass {
      * A bus device can construct a view into the guests address-space.
      */
     AddressSpace *(*get_remote_as)(VirtIOMSGBusDevice *bd);
-
-    /*
-     * Software-IOMMU.
-     *
-     * Allow the bus to provide platform or bus-specific per 4K
-     * page address translations. Used for communication with
-     * backends that don't sit behind IOMMU's.
-     */
-    IOMMUTLBEntry (*iommu_translate)(VirtIOMSGBusDevice *bd,
-                                     uint64_t va, uint8_t prot);
 };
 
 typedef struct VirtIOMSGBusDevice {
     DeviceState parent;
+
+    IOMMUTLBEntry (*iommu_translate)(VirtIOMSGBusDevice *bd,
+                                     uint64_t va, uint8_t prot);
 
     /* Out of order queue.  */
     struct {
@@ -132,6 +125,10 @@ static inline AddressSpace *virtio_msg_bus_get_remote_as(BusState *bus)
     return NULL;
 }
 
+IOMMUTLBEntry virtio_msg_bus_xen_translate(VirtIOMSGBusDevice *bd,
+                                           uint64_t va,
+                                           uint8_t prot);
+
 IOMMUTLBEntry virtio_msg_bus_pagemap_translate(VirtIOMSGBusDevice *bd,
                                                uint64_t va,
                                                uint8_t prot);
@@ -140,14 +137,11 @@ static inline IOMMUTLBEntry
 virtio_msg_bus_iommu_translate(BusState *bus,
                                uint64_t va, uint8_t prot)
 {
-    VirtIOMSGBusDeviceClass *bdc;
+    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
     IOMMUTLBEntry dummy = {0};
 
-    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
-    bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
-
-    if (bdc->iommu_translate) {
-        return bdc->iommu_translate(bd, va, prot);
+    if (bd->iommu_translate) {
+        return bd->iommu_translate(bd, va, prot);
     }
     return dummy;
 }
