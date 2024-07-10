@@ -404,6 +404,28 @@ struct xenstore_backend_ops libxenstore_backend_ops = {
     .transaction_end = libxenstore_transaction_end,
 };
 
+int xc_domain_gfn2mfn(xc_interface *xch,
+                      uint32_t domid,
+                      uint64_t gfn,
+                      uint64_t *mfn,
+                      xenmem_access_t *access)
+{
+    struct xen_gfn2mfn xatp = {
+        .domid = domid,
+        .gfn = gfn,
+        .mfn = 0,
+        .access = 0,
+    };
+    int r;
+
+    r = xc_memory_op(xch, XENMEM_gfn2mfn, &xatp, sizeof(xatp));
+    if (r == 0) {
+        *mfn = xatp.mfn;
+        *access = xatp.access;
+    }
+    return r;
+}
+
 void setup_xen_backend_ops(void)
 {
 #if CONFIG_XEN_CTRL_INTERFACE_VERSION >= 40800
