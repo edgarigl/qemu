@@ -56,17 +56,6 @@ static AddressSpace *virtio_msg_bus_ivshmem_get_remote_as(VirtIOMSGBusDevice *bd
     return &s->as;
 }
 
-static IOMMUTLBEntry
-virtio_msg_bus_ivshmem_iommu_translate(VirtIOMSGBusDevice *bd,
-                                          uint64_t va,
-                                          uint8_t prot)
-{
-    IOMMUTLBEntry ret;
-
-    ret = virtio_msg_bus_pagemap_translate(bd, va, prot);
-    return ret;
-}
-
 static void virtio_msg_bus_ivshmem_process(VirtIOMSGBusDevice *bd) {
     VirtIOMSGBusIVSHMEM *s = VIRTIO_MSG_BUS_IVSHMEM(bd);
     spsc_queue *q;
@@ -162,6 +151,7 @@ static int virtio_msg_bus_ivshmem_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_re
 static void virtio_msg_bus_ivshmem_realize(DeviceState *dev, Error **errp)
 {
     VirtIOMSGBusIVSHMEM *s = VIRTIO_MSG_BUS_IVSHMEM(dev);
+    VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(dev);
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_GET_CLASS(dev);
     uint64_t mem_size;
     int ret;
@@ -180,6 +170,14 @@ static void virtio_msg_bus_ivshmem_realize(DeviceState *dev, Error **errp)
     if (ret) {
         error_setg(errp, "Failed to init event notifier");
         return;
+    }
+
+    if (s->cfg.iommu) {
+        if (!strcmp(s->cfg.iommu, "xen-gfn2mfn")) {
+            bd->iommu_translate = virtio_msg_bus_xen_translate;
+        } else if (!strcmp(s->cfg.iommu, "pagemap")) {
+            bd->iommu_translate = virtio_msg_bus_pagemap_translate;
+        }
     }
 
     s->msg.dev = qemu_vfio_open_pci(s->cfg.dev, &error_fatal);
@@ -256,6 +254,7 @@ static Property virtio_msg_bus_ivshmem_props[] = {
                        cfg.mem_low_size, 0),
     DEFINE_PROP_UINT64("mem-hole", VirtIOMSGBusIVSHMEM,
                        cfg.mem_hole, 0),
+    DEFINE_PROP_STRING("iommu", VirtIOMSGBusIVSHMEM, cfg.iommu),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -267,7 +266,6 @@ static void virtio_msg_bus_ivshmem_class_init(ObjectClass *klass, void *data)
     bdc->process = virtio_msg_bus_ivshmem_process;
     bdc->send = virtio_msg_bus_ivshmem_send;
     bdc->get_remote_as = virtio_msg_bus_ivshmem_get_remote_as;
-    bdc->iommu_translate = virtio_msg_bus_ivshmem_iommu_translate;
 
     device_class_set_parent_realize(dc, virtio_msg_bus_ivshmem_realize,
                                     &bdc->parent_realize);

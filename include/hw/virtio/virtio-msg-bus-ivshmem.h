@@ -56,7 +56,7 @@ typedef struct VirtIOMSGBusIVSHMEM {
         uint64_t mem_offset;
         uint64_t mem_low_size;
         uint64_t mem_hole;
-
+        char *iommu;
     } cfg;
 } VirtIOMSGBusIVSHMEM;
 
