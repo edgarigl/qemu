@@ -12,6 +12,47 @@
 #include "hw/virtio/pagemap.h"
 #include "hw/virtio/virtio-msg-bus.h"
 
+#ifdef CONFIG_XEN
+#include "hw/xen/xen_native.h"
+#endif
+
+IOMMUTLBEntry virtio_msg_bus_xen_translate(VirtIOMSGBusDevice *bd,
+                                           uint64_t va,
+                                           uint8_t prot)
+{
+    IOMMUTLBEntry ret = {0};
+#ifdef CONFIG_XEN
+    hwaddr plen = VIRTIO_MSG_IOMMU_PAGE_SIZE;
+    xenmem_access_t access;
+    uint64_t mfn;
+    void *p;
+    int r;
+
+    assert((va & VIRTIO_MSG_IOMMU_PAGE_MASK) == 0);
+
+    p = address_space_map(&address_space_memory, va, &plen,
+                          prot & VIRTIO_MSG_IOMMU_PROT_WRITE,
+                          MEMTXATTRS_UNSPECIFIED);
+
+    if (!p) {
+        return ret;
+    }
+
+    ret.iova = va;
+    r = xc_domain_gfn2mfn(xen_xc, xen_domid,
+                          va >> XC_PAGE_SHIFT, &mfn, &access);
+    assert(r == 0);
+    ret.translated_addr = mfn << XC_PAGE_SHIFT;
+    ret.perm = IOMMU_ACCESS_FLAG(1, 1);
+
+    address_space_unmap(&address_space_memory, p, plen,
+                        prot & VIRTIO_MSG_IOMMU_PROT_WRITE,
+                        0);
+
+//    printf("%s: %lx.%lx  ->  %lx\n", __func__, va, ret.iova, ret.translated_addr);
+#endif
+    return ret;
+}
 
 IOMMUTLBEntry virtio_msg_bus_pagemap_translate(VirtIOMSGBusDevice *bd,
                                                uint64_t va,
