@@ -95,7 +95,7 @@ Running Virtio-MSG over the IVSHMEM msg-bus using two QEMU instances
 --------------------------------------------------------------------
 
 We'll run two outer QEMU instances that emulate our HW. These will
-use a memory backend on shared files for the machine system memory.
+use a memory backend of shared files for the machine system memory.
 In addition to that, the same memory backend will be used for
 IVSHMEM devices on each QEMU instance. This will allow both
 instances to access all of each others system memory via the IVSHMEM
@@ -124,6 +124,9 @@ A and B.
 You'll need to change some paths in the script to match your environment.
 QEMU points to your build of QEMU from the edgar/virtio-msg branch.
 XEN points to your build of Xen from the edgar/virtio-msg branch.
+
+https://github.com/edgarigl/xen/tree/edgar/virtio-msg
+
 KERNEL points to a build of a Linux kernel (upstream)
 UBOOT points to a build of U-boot from upstream
 DTB points to a device-tree file for the QEMU virt machine.
