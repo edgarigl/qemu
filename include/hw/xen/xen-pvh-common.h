@@ -30,16 +30,24 @@ typedef struct XenPVHCommonState {
     } ram;
 
     struct {
+        GPEXHost gpex;
+        MemoryRegion mmio_alias;
+        MemoryRegion mmio_high_alias;
+    } pci;
+
+    struct {
         uint64_t ram_size;
         uint32_t max_cpus;
         uint32_t virtio_mmio_num;
         uint32_t virtio_mmio_irq_base;
+        uint32_t pci_intx_irq_base;
         struct {
             uint64_t base;
             uint64_t size;
         } ram_low, ram_high,
           virtio_mmio,
-          tpm;
+          tpm,
+          ecam, mmio, mmio_high;
     } cfg;
 } XenPVHCommonState;
 #endif

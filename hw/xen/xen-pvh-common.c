@@ -120,6 +120,59 @@ static void xen_enable_tpm(XenPVHCommonState *s)
 }
 #endif
 
+static void xen_set_pci_intx_irq(void *opaque, int irq, int level)
+{
+    if (xen_set_pci_intx_level(xen_domid, 0, 0, 0, irq, level)) {
+        error_report("xendevicemodel_set_pci_intx_level failed");
+    }
+}
+
+static inline void xenpvh_gpex_init(XenPVHCommonState *s,
+                                    MemoryRegion *sysmem,
+                                    hwaddr ecam_base, hwaddr ecam_size,
+                                    hwaddr mmio_base, hwaddr mmio_size,
+                                    hwaddr mmio_high_base,
+                                    hwaddr mmio_high_size,
+                                    int intx_irq_base)
+{
+    MemoryRegion *ecam_reg;
+    MemoryRegion *mmio_reg;
+    DeviceState *dev;
+    int i;
+
+    object_initialize_child(OBJECT(s), "gpex", &s->pci.gpex,
+                            TYPE_GPEX_HOST);
+    dev = DEVICE(&s->pci.gpex);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+
+    ecam_reg = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
+    memory_region_add_subregion(sysmem, ecam_base, ecam_reg);
+
+    mmio_reg = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 1);
+
+    if (mmio_size) {
+        memory_region_init_alias(&s->pci.mmio_alias, OBJECT(dev), "pcie-mmio",
+                                 mmio_reg, mmio_base, mmio_size);
+        memory_region_add_subregion(sysmem, mmio_base, &s->pci.mmio_alias);
+    }
+
+    if (mmio_high_size) {
+        memory_region_init_alias(&s->pci.mmio_high_alias, OBJECT(dev),
+                "pcie-mmio-high",
+                mmio_reg, mmio_high_base, mmio_high_size);
+        memory_region_add_subregion(sysmem, mmio_high_base,
+                &s->pci.mmio_high_alias);
+    }
+
+    for (i = 0; i < GPEX_NUM_IRQS; i++) {
+        qemu_irq irq = qemu_allocate_irq(xen_set_pci_intx_irq, s, i);
+
+        sysbus_connect_irq(SYS_BUS_DEVICE(dev), i, irq);
+        gpex_set_irq_num(GPEX_HOST(dev), i, intx_irq_base + i);
+        xen_set_pci_link_route(i, intx_irq_base + i);
+    }
+}
+
 static void xen_pvh_realize(DeviceState *dev, Error **errp)
 {
     XenPVHCommonState *s = XEN_PVH_COMMON(dev);
@@ -152,6 +205,14 @@ static void xen_pvh_realize(DeviceState *dev, Error **errp)
         warn_report("tpm-base-addr is not provided. TPM will not be enabled");
     }
 #endif
+
+    if (s->cfg.ecam.size) {
+        xenpvh_gpex_init(s, sysmem,
+                         s->cfg.ecam.base, s->cfg.ecam.size,
+                         s->cfg.mmio.base, s->cfg.mmio.size,
+                         s->cfg.mmio_high.base, s->cfg.mmio_high.size,
+                         s->cfg.pci_intx_irq_base);
+    }
 }
 
 #define DEFINE_PROP_MEMMAP(n, f) \
@@ -165,10 +226,15 @@ static Property xen_pvh_properties[] = {
     DEFINE_PROP_MEMMAP("ram-high", ram_high),
     DEFINE_PROP_MEMMAP("virtio-mmio", virtio_mmio),
     DEFINE_PROP_MEMMAP("tpm", tpm),
+    DEFINE_PROP_MEMMAP("pci-ecam", ecam),
+    DEFINE_PROP_MEMMAP("pci-mmio", mmio),
+    DEFINE_PROP_MEMMAP("pci-mmio-high", mmio_high),
     DEFINE_PROP_UINT32("virtio-mmio-num", XenPVHCommonState,
                        cfg.virtio_mmio_num, 0),
     DEFINE_PROP_UINT32("virtio-mmio-irq-base", XenPVHCommonState,
                        cfg.virtio_mmio_irq_base, 0),
+    DEFINE_PROP_UINT32("pci-intx-irq-base", XenPVHCommonState,
+                       cfg.pci_intx_irq_base, 0),
     DEFINE_PROP_END_OF_LIST()
 };
 
