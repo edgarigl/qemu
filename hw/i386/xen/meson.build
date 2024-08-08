@@ -1,5 +1,6 @@
 i386_ss.add(when: 'CONFIG_XEN', if_true: files(
   'xen-hvm.c',
+  'xen-pvh.c',
   'xen_apic.c',
   'xen_pvdevice.c',
 ))
