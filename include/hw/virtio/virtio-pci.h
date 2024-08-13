@@ -168,6 +168,10 @@ struct VirtIOPCIProxy {
     VirtIOIRQFD *vector_irqfd;
     int nvqs_with_notifiers;
     VirtioBusState bus;
+
+    VirtIODevice *notify_vdev;
+    QEMUBH *notify_bh;
+    uint16_t notify_vq;
 };
 
 static inline bool virtio_pci_modern(VirtIOPCIProxy *proxy)

@@ -380,6 +380,20 @@ static void virtio_pci_stop_ioeventfd(VirtIOPCIProxy *proxy)
     virtio_bus_stop_ioeventfd(&proxy->bus);
 }
 
+static void virtio_pci_sched_notify(VirtIOPCIProxy *proxy,
+                                    VirtIODevice *vdev,
+                                    uint16_t vq_idx)
+{
+#if 0
+    virtio_queue_notify(vdev, vq_idx);
+#else
+    assert(proxy->notify_vdev == NULL);
+    proxy->notify_vdev = vdev;
+    proxy->notify_vq = vq_idx;
+    qemu_bh_schedule(proxy->notify_bh);
+#endif
+}
+
 static void virtio_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 {
     VirtIOPCIProxy *proxy = opaque;
@@ -415,7 +429,8 @@ static void virtio_ioport_write(void *opaque, uint32_t addr, uint32_t val)
 
                 virtio_queue_set_shadow_avail_idx(vq, val >> 16);
             }
-            virtio_queue_notify(vdev, vq_idx);
+            //virtio_queue_notify(vdev, vq_idx);
+            virtio_pci_sched_notify(proxy, vdev, vq_idx);
         }
         break;
     case VIRTIO_PCI_STATUS:
@@ -1710,7 +1725,8 @@ static void virtio_pci_notify_write(void *opaque, hwaddr addr,
 
     if (vdev != NULL && queue < VIRTIO_QUEUE_MAX) {
         trace_virtio_pci_notify_write(addr, val, size);
-        virtio_queue_notify(vdev, queue);
+        //virtio_queue_notify(vdev, queue);
+        virtio_pci_sched_notify(proxy, vdev, queue);
     }
 }
 
@@ -1724,7 +1740,8 @@ static void virtio_pci_notify_write_pio(void *opaque, hwaddr addr,
 
     if (vdev != NULL && queue < VIRTIO_QUEUE_MAX) {
         trace_virtio_pci_notify_write_pio(addr, val, size);
-        virtio_queue_notify(vdev, queue);
+        //virtio_queue_notify(vdev, queue);
+        virtio_pci_sched_notify(proxy, vdev, queue);
     }
 }
 
@@ -1798,6 +1815,16 @@ static void virtio_pci_device_write(void *opaque, hwaddr addr,
         virtio_config_modern_writel(vdev, addr, val);
         break;
     }
+}
+
+static void virtio_pci_notify_bh(void *opaque)
+{
+    VirtIOPCIProxy *proxy = opaque;
+    VirtIODevice *vdev = proxy->notify_vdev;
+
+    assert(vdev);
+    proxy->notify_vdev = NULL;
+    virtio_queue_notify(vdev, proxy->notify_vq);
 }
 
 static void virtio_pci_modern_regions_init(VirtIOPCIProxy *proxy,
@@ -2255,6 +2282,9 @@ static void virtio_pci_realize(PCIDevice *pci_dev, Error **errp)
     if (k->realize) {
         k->realize(proxy, errp);
     }
+
+    proxy->notify_bh = virtio_bh_new_guarded(DEVICE(pci_dev),
+                                             virtio_pci_notify_bh, proxy);
 }
 
 static void virtio_pci_exit(PCIDevice *pci_dev)
