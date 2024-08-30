@@ -17,6 +17,10 @@ specific_virtio_ss.add(files('virtio-msg-bus-ivshmem.c'))
 specific_virtio_ss.add(files('virtio-msg-proxy-driver.c'))
 specific_virtio_ss.add(files('virtio-msg.c'))
 
+specific_virtio_ss.add(when: ['CONFIG_XEN', xen], if_true: files(
+    'virtio-msg-bus-xen.c',
+))
+
 system_virtio_ss.add(when: 'CONFIG_VIRTIO_PCI', if_true: files('virtio-msg-proxy-driver-pci.c'))
 
 if have_vhost
