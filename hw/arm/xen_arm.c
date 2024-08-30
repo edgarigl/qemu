@@ -36,6 +36,9 @@
 #include "hw/xen/arch_hvm.h"
 #include "trace.h"
 
+#include "hw/xen/xen-bus.h"
+#include "hw/virtio/virtio-msg.h"
+
 #define TYPE_XEN_ARM  MACHINE_TYPE_NAME("xenpvh")
 OBJECT_DECLARE_SIMPLE_TYPE(XenArmState, XEN_ARM)
 
@@ -55,6 +58,7 @@ struct XenArmState {
     MachineState parent;
 
     XenIOState *state;
+    VirtIOMSGProxy backends[4];
 
     struct {
         uint64_t tpm_base_addr;
@@ -81,11 +85,23 @@ static void xen_set_irq(void *opaque, int irq, int level)
     }
 }
 
+static void xen_create_virtio_msg_devices(XenArmState *s)
+{
+    int i;
+
+    /* FIXME: Why is this backend a Sysbus dev?  */
+    for (i = 0; i < ARRAY_SIZE(s->backends); i++) {
+        object_initialize_child(OBJECT(s), "backend[*]", &s->backends[i],
+                                TYPE_VIRTIO_MSG);
+        sysbus_realize(SYS_BUS_DEVICE(&s->backends[i]), &error_fatal);
+    }
+}
+
 static void xen_create_virtio_mmio_devices(XenArmState *xam)
 {
     int i;
 
-    for (i = 0; i < NR_VIRTIO_MMIO_DEVICES; i++) {
+    for (i = NR_VIRTIO_MMIO_DEVICES - 1; i >= 0; i--) {
         hwaddr base = GUEST_VIRTIO_MMIO_BASE + i * VIRTIO_MMIO_DEV_SIZE;
         qemu_irq irq = qemu_allocate_irq(xen_set_irq, NULL,
                                          GUEST_VIRTIO_MMIO_SPI_FIRST + i);
@@ -192,7 +208,10 @@ static void xen_arm_init(MachineState *machine)
 
     xen_register_ioreq(xam->state, machine->smp.cpus, &xen_memory_listener);
 
-    xen_create_virtio_mmio_devices(xam);
+    if (0)
+        xen_create_virtio_mmio_devices(xam);
+    if (1)
+        xen_create_virtio_msg_devices(xam);
 
 #ifdef CONFIG_TPM
     if (xam->cfg.tpm_base_addr) {
