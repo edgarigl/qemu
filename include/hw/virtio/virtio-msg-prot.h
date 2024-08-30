@@ -225,6 +225,9 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
         LE_TO_CPU(msg->set_config_resp.offset);
         LE_TO_CPU(msg->set_config_resp.data);
         break;
+    case VIRTIO_MSG_GET_CONFIG_GEN:
+        LE_TO_CPU(msg->get_config_gen_resp.generation);
+        break;
     case VIRTIO_MSG_GET_VQUEUE:
         LE_TO_CPU(msg->get_vqueue_resp.index);
         LE_TO_CPU(msg->get_vqueue_resp.max_size);
@@ -451,6 +454,20 @@ static inline void virtio_msg_pack_set_config_resp(VirtIOMSG *msg,
     msg->set_config_resp.offset_msb = offset >> 16;
     msg->set_config_resp.size = size;
     msg->set_config_resp.data = cpu_to_le64(data);
+}
+
+static inline void virtio_msg_pack_get_config_gen(VirtIOMSG *msg)
+{
+    virtio_msg_pack_header(msg, VIRTIO_MSG_GET_CONFIG_GEN, 0, 0);
+}
+
+static inline void virtio_msg_pack_get_config_gen_resp(VirtIOMSG *msg,
+                                                       uint32_t gen)
+{
+    virtio_msg_pack_header(msg, VIRTIO_MSG_GET_CONFIG_GEN,
+                           VIRTIO_MSG_TYPE_RESPONSE, 0);
+
+    msg->get_config_gen_resp.generation = cpu_to_le32(gen);
 }
 
 static inline void virtio_msg_pack_get_vqueue(VirtIOMSG *msg,
