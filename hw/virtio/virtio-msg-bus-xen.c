@@ -22,8 +22,6 @@
 
 #include <xengnttab.h>
 
-#define TYPE_VIRTIO_MSG_BUS_XEN_DEVICE "virtio-msg-bus-xen-dev"
-
 static xengnttab_handle *xen_region_gnttabdev;
 
 static void virtio_msg_bus_xen_send_notify(VirtIOMSGBusXen *s)
