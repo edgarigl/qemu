@@ -375,22 +375,7 @@ static AddressSpace *virtio_msg_get_dma_as(DeviceState *d)
 {
     VirtIOMSGProxy *s = VIRTIO_MSG(d);
 
-    /*
-     * Grant mappings don't work with IOMMU enabled but we really only need
-     * to enabled the iommu for virtio-msg across hypervisor instances where
-     * grant mappings don't make sense anyway.
-     *
-     * When iommu_enabled is on, performance drops significantly (~x10).
-     */
-    if (s->iommu_enabled) {
-        return &s->dma_as;
-    } else if (s->bus_as) {
-        /* If the bus provieds an AS, use it.  */
-        return s->bus_as;
-    } else {
-        /* Otherwise fall back to the default address space.  */
-        return &address_space_memory;
-    }
+    return &s->dma_as;
 }
 
 static Property virtio_msg_properties[] = {
