@@ -664,6 +664,13 @@ static inline void virtio_msg_print(VirtIOMSG *msg)
     case VIRTIO_MSG_SET_DEVICE_STATUS:
         virtio_msg_print_status(msg->set_device_status.status);
         break;
+    case VIRTIO_MSG_SET_VQUEUE:
+        printf("set-vqueue: index=%d size=%d desc-addr=%lx driver-addr=%lx device-addr=%lx\n",
+                msg->set_vqueue.index, msg->set_vqueue.size,
+                msg->set_vqueue.descriptor_addr,
+                msg->set_vqueue.driver_addr,
+                msg->set_vqueue.device_addr);
+        break;
     }
     printf("\n");
 }
