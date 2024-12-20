@@ -44,6 +44,7 @@ typedef struct VirtIOMSGBusVEK280HexCam {
 
         /* Memmap.  */
         uint32_t *doorbell;
+        uint32_t *cfg_bram;
         void *driver;
         void *device;
         void *host;
