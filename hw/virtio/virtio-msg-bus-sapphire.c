@@ -208,6 +208,10 @@ static void virtio_msg_bus_sapphire_realize(DeviceState *dev, Error **errp)
                                             PROT_READ | PROT_WRITE,
                                             &error_fatal);
 
+    s->msg.cfg_bram = qemu_vfio_pci_map_bar(s->msg.dev, 1, 0x4000, 4 * KiB,
+                                            PROT_READ | PROT_WRITE,
+                                            &error_fatal);
+
     if (0) {
         qemu_vfio_pci_init_irq(s->msg.dev, &s->notifier,
                 VFIO_PCI_INTX_IRQ_INDEX, &error_fatal);
@@ -237,13 +241,18 @@ static void virtio_msg_bus_sapphire_realize(DeviceState *dev, Error **errp)
                                          spsc_capacity(4 * KiB), s->msg.device);
 
     printf("map spsc queues\n");
-    if (xen_enabled() || 1) {
+    if (1) {
         iova = pagemap_virt_to_phys(s->msg.driver);
     } else {
         qemu_vfio_dma_map(s->msg.dev, s->msg.driver, 8 * 1024, false,
                 &iova, &error_warn);
     }
     printf("spsc va=%p iova=%lx\n", s->msg.driver, iova);
+    s->msg.cfg_bram[1] = iova;
+    s->msg.cfg_bram[2] = iova >> 32;
+    smp_wmb();
+    s->msg.cfg_bram[0] = 1;
+    smp_wmb();
 
     timer_init_ns(&s->timer, QEMU_CLOCK_REALTIME, sapphire_timer_tick, s);
     timer_mod_ns(&s->timer,

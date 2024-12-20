@@ -38,6 +38,7 @@ typedef struct VirtIOMSGBusSapphire {
 
         /* Memmap.  */
         uint8_t *doorbell;
+        uint32_t *cfg_bram;
         void *driver;
         void *device;
         void *ram;
