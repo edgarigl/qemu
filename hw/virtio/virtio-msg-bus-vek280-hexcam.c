@@ -268,13 +268,35 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
     // Linux/KVM
     //s->msg.driver = s->msg.host + 0x810c0000ULL;
 
-    // Xen, changes every time.
-    s->msg.driver = s->msg.host + s->cfg.spsc_base;
-    s->msg.device = s->msg.driver + 4 * 1024;
-
     s->msg.doorbell = mmap(0, 4 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
                            s->msg.fd_devmem, 0x20180000000ULL);
     assert(s->msg.doorbell != MAP_FAILED);
+
+    s->msg.cfg_bram = mmap(0, 8 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
+                           s->msg.fd_devmem, 0x020200004000ULL);
+    assert(s->msg.cfg_bram != MAP_FAILED);
+
+    /* Wait for queue setup. */
+    printf("Wait for queue\n");
+    do {
+        usleep(100);
+    } while (s->msg.cfg_bram[0] == 0);
+    printf("cfg-bram: %x %x %x\n",
+            s->msg.cfg_bram[0],
+            s->msg.cfg_bram[1],
+            s->msg.cfg_bram[2]);
+    smp_rmb();
+    s->cfg.spsc_base = s->msg.cfg_bram[2];
+    s->cfg.spsc_base <<= 32;
+    s->cfg.spsc_base |= s->msg.cfg_bram[1];
+    smp_mb();
+    s->msg.cfg_bram[0] = 0;
+
+    printf("Found queue at %lx\n", s->cfg.spsc_base);
+
+    // Xen, changes every time.
+    s->msg.driver = s->msg.host + s->cfg.spsc_base;
+    s->msg.device = s->msg.driver + 4 * 1024;
 
     virtio_msg_bus_vek280_send_notify(s);
 
