@@ -469,7 +469,7 @@ static int qemu_vfio_init_pci(QEMUVFIOState *s, const char *device,
     }
 
     /* Enable bus master only if the device is behind an IOMMU. */
-    if (has_iommu) {
+    if (has_iommu || 1) {
         ret = qemu_vfio_pci_read_config(s, &pci_cmd, sizeof(pci_cmd),
                                         PCI_COMMAND);
         if (ret) {
