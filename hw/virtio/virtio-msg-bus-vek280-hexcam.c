@@ -244,7 +244,7 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
 #else
     memory_region_init_ram_from_fd(&s->mr_host, OBJECT(s), "mr-host",
                                      s->cfg.mem_size,
-                                     RAM_SHARED,
+                                     RAM_SHARED | RAM_NORESERVE,
                                      s->msg.fd,
                                      0,
                                      &error_abort);
