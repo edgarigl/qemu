@@ -16,9 +16,28 @@
 #include "hw/xen/xen_native.h"
 #endif
 
-IOMMUTLBEntry virtio_msg_bus_xen_translate(VirtIOMSGBusDevice *bd,
-                                           uint64_t va,
-                                           uint8_t prot)
+#include <linux/types.h>
+#include <linux/ioctl.h>
+#include <sys/ioctl.h>
+
+#define IOCTL_VIRT2GFN \
+_IOC(_IOC_READ|_IOC_WRITE, 'G', 5, sizeof(struct ioctl_xen_virt2gfn))
+struct ioctl_xen_virt2gfn {
+    /* Number of pages to map */
+    __u32 count;
+    /* padding.  */
+    __u32 padding;
+
+    /* Variable array with virt address to convert to gfns.  */
+    union {
+        __u64 addr[1];
+        __DECLARE_FLEX_ARRAY(__u64, addr_flex);
+    };
+};
+
+IOMMUTLBEntry virtio_msg_bus_xen_gfn2mfn_translate(VirtIOMSGBusDevice *bd,
+                                                   uint64_t va,
+                                                   uint8_t prot)
 {
     IOMMUTLBEntry ret = {0};
 #ifdef CONFIG_XEN
@@ -48,9 +67,59 @@ IOMMUTLBEntry virtio_msg_bus_xen_translate(VirtIOMSGBusDevice *bd,
     address_space_unmap(&address_space_memory, p, plen,
                         prot & VIRTIO_MSG_IOMMU_PROT_WRITE,
                         0);
-
 //    printf("%s: %lx.%lx  ->  %lx\n", __func__, va, ret.iova, ret.translated_addr);
 #endif
+    return ret;
+}
+
+IOMMUTLBEntry virtio_msg_bus_xen_virt2gfn_translate(VirtIOMSGBusDevice *bd,
+                                                    uint64_t va,
+                                                    uint8_t prot)
+{
+    struct ioctl_xen_virt2gfn op = {0};
+    IOMMUTLBEntry ret = {0};
+    hwaddr plen = VIRTIO_MSG_IOMMU_PAGE_SIZE;
+    void *p;
+    int rc;
+
+    if (bd->pagemap_fd == -1) {
+        bd->pagemap_fd = open("/dev/xen/xv2g", O_RDWR);
+        if (bd->pagemap_fd == -1) {
+            printf("failed to open /dev/xen/x2vg!\n");
+            return ret;
+        }
+    }
+
+    assert((va & VIRTIO_MSG_IOMMU_PAGE_MASK) == 0);
+
+    /* The assumption here is that the memory we're trying to access has
+     * already previously been mapped via address_space_map().
+     * So we're taking a second ref just to get hold of p.
+     * But the underlying mapping is expected to live beyond this translation.
+     */
+    p = address_space_map(&address_space_memory, va, &plen,
+                          prot & VIRTIO_MSG_IOMMU_PROT_WRITE,
+                          MEMTXATTRS_UNSPECIFIED);
+
+    if (!p) {
+        return ret;
+    }
+
+    ret.iova = va;
+    op.count = 1;
+    op.addr[0] = (uintptr_t) p;
+    rc = ioctl(bd->pagemap_fd, IOCTL_VIRT2GFN, (uintptr_t) &op);
+    assert(rc == 0);
+    ret.translated_addr = op.addr[0];
+    ret.perm = IOMMU_ACCESS_FLAG(prot & VIRTIO_MSG_IOMMU_PROT_READ,
+                                 prot & VIRTIO_MSG_IOMMU_PROT_WRITE);
+
+    address_space_unmap(&address_space_memory, p, plen,
+                        prot & VIRTIO_MSG_IOMMU_PROT_WRITE,
+                        0);
+
+//    printf("%s: %p %lx.%lx  ->  %lx\n", __func__,
+//           p, va, ret.iova, ret.translated_addr);
     return ret;
 }
 

@@ -194,7 +194,9 @@ static void virtio_msg_bus_sapphire_realize(DeviceState *dev, Error **errp)
 
     if (s->cfg.iommu) {
         if (!strcmp(s->cfg.iommu, "xen-gfn2mfn")) {
-            bd->iommu_translate = virtio_msg_bus_xen_translate;
+            bd->iommu_translate = virtio_msg_bus_xen_gfn2mfn_translate;
+        } else if (!strcmp(s->cfg.iommu, "xen-virt2gfn")) {
+            bd->iommu_translate = virtio_msg_bus_xen_virt2gfn_translate;
         } else if (!strcmp(s->cfg.iommu, "linux-proc-pagemap")) {
             bd->iommu_translate = virtio_msg_bus_pagemap_translate;
         }

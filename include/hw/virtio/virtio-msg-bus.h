@@ -125,9 +125,13 @@ static inline AddressSpace *virtio_msg_bus_get_remote_as(BusState *bus)
     return NULL;
 }
 
-IOMMUTLBEntry virtio_msg_bus_xen_translate(VirtIOMSGBusDevice *bd,
-                                           uint64_t va,
-                                           uint8_t prot);
+IOMMUTLBEntry virtio_msg_bus_xen_gfn2mfn_translate(VirtIOMSGBusDevice *bd,
+                                                   uint64_t va,
+                                                   uint8_t prot);
+
+IOMMUTLBEntry virtio_msg_bus_xen_virt2gfn_translate(VirtIOMSGBusDevice *bd,
+                                                    uint64_t va,
+                                                    uint8_t prot);
 
 IOMMUTLBEntry virtio_msg_bus_pagemap_translate(VirtIOMSGBusDevice *bd,
                                                uint64_t va,
