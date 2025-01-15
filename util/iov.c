@@ -21,6 +21,48 @@
 #include "qemu/sockets.h"
 #include "qemu/cutils.h"
 
+/* memPcpy version for fully aligned copies.  */
+static void *iov_fully_aligned32_mempcpy(void *d, const void *s, size_t n)
+{
+        uint32_t *d32 = d;
+        const uint32_t *s32 = s;
+
+        while (n) {
+                *d32 = *s32;
+                d32++;
+                s32++;
+                n -= 4;
+        }
+        return d32;
+}
+
+void *iov_memcpy(void *d, const void *s, size_t n)
+{
+        char l;
+        unsigned char *bd = d;
+        const unsigned char *bs = s;
+        uintptr_t pd = (unsigned long) d;
+        uintptr_t ps = (unsigned long) s;
+
+        if ((pd & 3) == 0 && (ps & 3) == 0) {
+                size_t n_aligned = n & ~3;
+
+                bd = iov_fully_aligned32_mempcpy(d, s, n_aligned);
+                if ((n & 3) == 0)
+                        return d;
+
+                /* Fix up the last chunk.  */
+                bs += n_aligned;
+                n -= n_aligned;
+        }
+
+        while (n--) {
+                l = *bs++;
+                *bd++ = l;
+        }
+        return d;
+}
+
 size_t iov_from_buf_full(const struct iovec *iov, unsigned int iov_cnt,
                          size_t offset, const void *buf, size_t bytes)
 {
@@ -29,7 +71,7 @@ size_t iov_from_buf_full(const struct iovec *iov, unsigned int iov_cnt,
     for (i = 0, done = 0; (offset || done < bytes) && i < iov_cnt; i++) {
         if (offset < iov[i].iov_len) {
             size_t len = MIN(iov[i].iov_len - offset, bytes - done);
-            memcpy(iov[i].iov_base + offset, buf + done, len);
+            iov_memcpy(iov[i].iov_base + offset, buf + done, len);
             done += len;
             offset = 0;
         } else {
@@ -48,7 +90,7 @@ size_t iov_to_buf_full(const struct iovec *iov, const unsigned int iov_cnt,
     for (i = 0, done = 0; (offset || done < bytes) && i < iov_cnt; i++) {
         if (offset < iov[i].iov_len) {
             size_t len = MIN(iov[i].iov_len - offset, bytes - done);
-            memcpy(buf + done, iov[i].iov_base + offset, len);
+            iov_memcpy(buf + done, iov[i].iov_base + offset, len);
             done += len;
             offset = 0;
         } else {
