@@ -21,6 +21,8 @@
  */
 size_t iov_size(const struct iovec *iov, const unsigned int iov_cnt);
 
+void *iov_memcpy(void *dest, const void *src, size_t n);
+
 /**
  * Copy from single continuous buffer to scatter-gather vector of buffers
  * (iovec) and back like memcpy() between two continuous memory regions.
@@ -44,7 +46,7 @@ iov_from_buf(const struct iovec *iov, unsigned int iov_cnt,
 {
     if (__builtin_constant_p(bytes) && iov_cnt &&
         offset <= iov[0].iov_len && bytes <= iov[0].iov_len - offset) {
-        memcpy(iov[0].iov_base + offset, buf, bytes);
+        iov_memcpy(iov[0].iov_base + offset, buf, bytes);
         return bytes;
     } else {
         return iov_from_buf_full(iov, iov_cnt, offset, buf, bytes);
@@ -57,7 +59,7 @@ iov_to_buf(const struct iovec *iov, const unsigned int iov_cnt,
 {
     if (__builtin_constant_p(bytes) && iov_cnt &&
         offset <= iov[0].iov_len && bytes <= iov[0].iov_len - offset) {
-        memcpy(buf, iov[0].iov_base + offset, bytes);
+        iov_memcpy(buf, iov[0].iov_base + offset, bytes);
         return bytes;
     } else {
         return iov_to_buf_full(iov, iov_cnt, offset, buf, bytes);
