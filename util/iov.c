@@ -21,6 +21,25 @@
 #include "qemu/sockets.h"
 #include "qemu/cutils.h"
 
+/*
+ * IO friendly memcpy.
+ *
+ * TODO: Figure out what's going wrong with the Aarch64 memcpy onto
+ * Non-Cacheable Normal memory mappings.
+ * Optimize this to use 16, 32 and possibly 64bit accesses.
+ */
+void *iov_memcpy(void *dest, const void *src, size_t n)
+{
+    uint8_t *s8 = (void *) src;
+    uint8_t *d8 = dest;
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+       d8[i] = s8[i];
+    }
+    return dest;
+}
+
 size_t iov_from_buf_full(const struct iovec *iov, unsigned int iov_cnt,
                          size_t offset, const void *buf, size_t bytes)
 {
@@ -29,7 +48,7 @@ size_t iov_from_buf_full(const struct iovec *iov, unsigned int iov_cnt,
     for (i = 0, done = 0; (offset || done < bytes) && i < iov_cnt; i++) {
         if (offset < iov[i].iov_len) {
             size_t len = MIN(iov[i].iov_len - offset, bytes - done);
-            memcpy(iov[i].iov_base + offset, buf + done, len);
+            iov_memcpy(iov[i].iov_base + offset, buf + done, len);
             done += len;
             offset = 0;
         } else {
@@ -48,7 +67,7 @@ size_t iov_to_buf_full(const struct iovec *iov, const unsigned int iov_cnt,
     for (i = 0, done = 0; (offset || done < bytes) && i < iov_cnt; i++) {
         if (offset < iov[i].iov_len) {
             size_t len = MIN(iov[i].iov_len - offset, bytes - done);
-            memcpy(buf + done, iov[i].iov_base + offset, len);
+            iov_memcpy(buf + done, iov[i].iov_base + offset, len);
             done += len;
             offset = 0;
         } else {
