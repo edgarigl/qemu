@@ -72,6 +72,7 @@ typedef struct VirtIOMSGBusDevice {
 
     /* SW IOMMUs.  */
     int pagemap_fd;
+    int virt2gfn_fd;
 
     const VirtIOMSGBusPort *peer;
     void *opaque;
