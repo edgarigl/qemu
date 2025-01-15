@@ -82,9 +82,9 @@ IOMMUTLBEntry virtio_msg_bus_xen_virt2gfn_translate(VirtIOMSGBusDevice *bd,
     void *p;
     int rc;
 
-    if (bd->pagemap_fd == -1) {
-        bd->pagemap_fd = open("/dev/xen/xv2g", O_RDWR);
-        if (bd->pagemap_fd == -1) {
+    if (bd->virt2gfn_fd == -1) {
+        bd->virt2gfn_fd = open("/dev/xen/xv2g", O_RDWR);
+        if (bd->virt2gfn_fd == -1) {
             printf("failed to open /dev/xen/x2vg!\n");
             return ret;
         }
@@ -108,15 +108,33 @@ IOMMUTLBEntry virtio_msg_bus_xen_virt2gfn_translate(VirtIOMSGBusDevice *bd,
     ret.iova = va;
     op.count = 1;
     op.addr[0] = (uintptr_t) p;
-    rc = ioctl(bd->pagemap_fd, IOCTL_VIRT2GFN, (uintptr_t) &op);
+    rc = ioctl(bd->virt2gfn_fd, IOCTL_VIRT2GFN, (uintptr_t) &op);
     assert(rc == 0);
     ret.translated_addr = op.addr[0];
     ret.perm = IOMMU_ACCESS_FLAG(prot & VIRTIO_MSG_IOMMU_PROT_READ,
                                  prot & VIRTIO_MSG_IOMMU_PROT_WRITE);
 
-    address_space_unmap(&address_space_memory, p, plen,
-                        prot & VIRTIO_MSG_IOMMU_PROT_WRITE,
-                        0);
+#if 0
+    IOMMUTLBEntry ret2 = {0};
+
+    if (bd->pagemap_fd == -1) {
+        bd->pagemap_fd = pagemap_open_self();
+        if (bd->pagemap_fd == -1) {
+            printf("failed to open /proc/self/pagemap!\n");
+            return ret;
+        }
+    }
+
+    ret2.iova = va;
+    ret2.translated_addr = pagemap_virt_to_phys_fd(bd->pagemap_fd, p);
+    ret2.perm = IOMMU_ACCESS_FLAG(prot & VIRTIO_MSG_IOMMU_PROT_READ,
+                                 prot & VIRTIO_MSG_IOMMU_PROT_WRITE);
+
+    if (ret.translated_addr != ret2.translated_addr) {
+        printf("%s: iommu missmatch va %lx %lx != %lx\n", __func__,
+                va, ret.translated_addr, ret2.translated_addr);
+    }
+#endif
 
 //    printf("%s: %p %lx.%lx  ->  %lx\n", __func__,
 //           p, va, ret.iova, ret.translated_addr);
@@ -247,6 +265,7 @@ static void virtio_msg_bus_device_realize(DeviceState *dev, Error **errp)
     VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(dev);
 
     bd->pagemap_fd = -1;
+    bd->virt2gfn_fd = -1;
 }
 
 static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
