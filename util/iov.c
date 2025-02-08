@@ -22,23 +22,46 @@
 #include "qemu/sockets.h"
 #include "qemu/cutils.h"
 
-/*
- * IO friendly memcpy.
- *
- * TODO: Figure out what's going wrong with the Aarch64 memcpy onto
- * Non-Cacheable Normal memory mappings.
- * Optimize this to use 16, 32 and possibly 64bit accesses.
- */
-void *iov_memcpy(void *dest, const void *src, size_t n)
+/* memPcpy version for fully aligned copies.  */
+void *iov_fully_aligned32_mempcpy(void *d, const void *s, size_t n)
 {
-    uint8_t *s8 = (void *) src;
-    uint8_t *d8 = dest;
-    size_t i;
+        uint32_t *d32 = d;
+        const uint32_t *s32 = s;
 
-    for (i = 0; i < n; i++) {
-       d8[i] = s8[i];
-    }
-    return dest;
+        while (n) {
+                *d32 = *s32;
+                d32++;
+                s32++;
+                n -= 4;
+        }
+        return d32;
+}
+
+void *iov_memcpy(void *d, const void *s, size_t n)
+{
+        char l;
+        unsigned char *bd = d;
+        const unsigned char *bs = s;
+        uintptr_t pd = (unsigned long) d;
+        uintptr_t ps = (unsigned long) s;
+
+        if ((pd & 3) == 0 && (ps & 3) == 0) {
+                size_t n_aligned = n & ~3;
+
+                bd = iov_fully_aligned32_mempcpy(d, s, n_aligned);
+                if ((n & 3) == 0)
+                        return d;
+
+                /* Fix up the last chunk.  */
+                bs += n_aligned;
+                n -= n_aligned;
+        }
+
+        while (n--) {
+                l = *bs++;
+                *bd++ = l;
+        }
+        return d;
 }
 
 size_t iov_from_buf_full(const struct iovec *iov, unsigned int iov_cnt,
