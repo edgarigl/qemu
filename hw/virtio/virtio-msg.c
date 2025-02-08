@@ -350,7 +350,7 @@ static bool virtio_msg_has_extra_state(DeviceState *opaque)
     return true;
 }
 
-static void virtio_msg_reset_hold(Object *obj, ResetType type)
+static void virtio_msg_reset_hold(Object *obj)
 {
     VirtIOMSGProxy *s = VIRTIO_MSG(obj);
     bool r;

@@ -236,7 +236,7 @@ static void vmpd_queue_enable(VirtIODevice *vdev, uint32_t n)
     virtio_msg_bus_send(&vpd->bus, &msg, NULL);
 }
 
-static void vmpd_reset_hold(Object *obj, ResetType type)
+static void vmpd_reset_hold(Object *obj)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(obj);
     VirtIODevice *vdev = VIRTIO_DEVICE(vpd);
