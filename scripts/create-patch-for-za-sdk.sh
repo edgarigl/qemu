@@ -1,10 +1,8 @@
 #!/bin/sh
 #
-# Script to create patches for Zero ASIC's yocto SDK.
+# Script to create patches for virtio-msg-demo
 #
 
-# Diff switchboard/cpp/ with root commit.
-git -C switchboard/ diff --src-prefix=a/switchboard/ --dst-prefix=b/switchboard/ 17e98111fa1445e2422d8121d59c6b3b4d8545dd -- cpp/
-
-git diff --submodule=log v7.2.0
+echo "Upstream-Status: Inappropriate work in progress"
+git diff v8.2.7
 
