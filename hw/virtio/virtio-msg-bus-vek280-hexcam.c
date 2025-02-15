@@ -106,13 +106,18 @@ static void vek280_interrupt(void *opaque)
 {
     VirtIOMSGBusVEK280HexCam *s = VIRTIO_MSG_BUS_VEK280_HEXCAM(opaque);
     VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(opaque);
-    vek280_mask_interrupt(s, true);
+    uint32_t r;
+//    vek280_mask_interrupt(s, true);
 
-    /* ACK the interrupt.  */
-    virtio_msg_bus_process(bd);
-    vek280_mask_interrupt(s, false);
-    /* avoid race. */
-    virtio_msg_bus_process(bd);
+    do {
+        /* ACK the interrupt.  */
+        vek280_write32(s->msg.irq, 0x0);
+        smp_mb();
+        virtio_msg_bus_process(bd);
+        r = vek280_read32(s->msg.irq);
+    } while (r & 1);
+
+//    vek280_mask_interrupt(s, false);
 }
 
 static int virtio_msg_bus_vek280_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req,
@@ -275,6 +280,10 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
     s->msg.cfg_bram = mmap(0, 8 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
                            s->msg.fd_devmem, 0x020200004000ULL);
     assert(s->msg.cfg_bram != MAP_FAILED);
+
+    s->msg.irq = mmap(0, 4 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
+                           s->msg.fd_devmem, 0x020200050000ULL);
+    assert(s->msg.irq != MAP_FAILED);
 
     /* Wait for queue setup. */
     printf("Wait for queue\n");
