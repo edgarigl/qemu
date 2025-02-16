@@ -55,10 +55,8 @@ static inline uint64_t vek280_read64(void *p) {
 
 static void virtio_msg_bus_vek280_send_notify(VirtIOMSGBusVEK280HexCam *s)
 {
-    vek280_write32(s->msg.doorbell, 0x1);
-    usleep(10);
     vek280_write32(s->msg.doorbell, 0x0);
-    usleep(10);
+    vek280_write32(s->msg.doorbell, 0x1);
 }
 
 static AddressSpace *virtio_msg_bus_vek280_get_remote_as(VirtIOMSGBusDevice *bd)
