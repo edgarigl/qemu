@@ -54,11 +54,8 @@ static inline uint32_t sapphire_read32(void *p) {
 
 static void virtio_msg_bus_sapphire_send_notify(VirtIOMSGBusSapphire *s)
 {
-    /* Issue a pulse.  */
+    /* Raise the level IRQ  */
     sapphire_write32(s->msg.doorbell + BAR2_DOORBELL,  1);
-    usleep(10);
-    sapphire_write32(s->msg.doorbell + BAR2_DOORBELL,  0);
-    usleep(10);
 }
 
 static void virtio_msg_bus_sapphire_process(VirtIOMSGBusDevice *bd) {
@@ -90,8 +87,8 @@ static void sapphire_intx_interrupt(void *opaque)
     }
 
     /* ACK the interrupt.  */
-    virtio_msg_bus_process(bd);
     qemu_vfio_pci_unmask_irq(s->msg.dev, VFIO_PCI_INTX_IRQ_INDEX);
+    virtio_msg_bus_process(bd);
 }
 
 static void sapphire_timer_tick(void *opaque)
