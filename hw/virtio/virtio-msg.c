@@ -382,8 +382,16 @@ static void virtio_msg_pre_plugged(DeviceState *d, Error **errp)
 static AddressSpace *virtio_msg_get_dma_as(DeviceState *d)
 {
     VirtIOMSGProxy *s = VIRTIO_MSG(d);
+    AddressSpace *as;
 
-    return &s->dma_as;
+    if (s->iommu_enabled) {
+        as = &s->dma_as;
+    } else {
+        as = virtio_msg_bus_get_remote_as(&s->msg_bus);
+    }
+
+    g_assert(as);
+    return as;
 }
 
 static Property virtio_msg_properties[] = {
