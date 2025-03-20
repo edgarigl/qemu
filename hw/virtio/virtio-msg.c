@@ -26,11 +26,19 @@ static void virtio_msg_device_info(VirtIOMSGProxy *s,
                                    VirtIOMSG *msg)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
+    uint32_t device_id = 0;
     VirtIOMSG msg_resp;
+
+    if (vdev) {
+        device_id = vdev->device_id;
+    } else {
+        printf("%s: No virtio device on bus %s!\n",
+                __func__, BUS(&s->bus)->name);
+    }
 
     virtio_msg_pack_get_device_info_resp(&msg_resp,
                                          VIRTIO_MSG_DEVICE_VERSION,
-                                         vdev->device_id,
+                                         device_id,
                                          VIRTIO_MSG_VENDOR_ID);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
