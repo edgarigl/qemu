@@ -22,7 +22,7 @@
 
 #ifdef CONFIG_XEN
 #include "hw/xen/xen_native.h"
-#include "sysemu/xen.h"
+#include "system/xen.h"
 #endif
 
 #include <sys/mman.h>
@@ -258,12 +258,11 @@ static void virtio_msg_bus_sapphire_realize(DeviceState *dev, Error **errp)
     mlockall(MCL_CURRENT | MCL_FUTURE);
 }
 
-static Property virtio_msg_bus_sapphire_props[] = {
+static const Property virtio_msg_bus_sapphire_props[] = {
     DEFINE_PROP_STRING("dev", VirtIOMSGBusSapphire, cfg.dev),
     DEFINE_PROP_BOOL("reset-queues", VirtIOMSGBusSapphire,
                      cfg.reset_queues, false),
     DEFINE_PROP_STRING("iommu", VirtIOMSGBusSapphire, cfg.iommu),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void virtio_msg_bus_sapphire_class_init(ObjectClass *klass, void *data)

@@ -11,7 +11,7 @@
 #define QEMU_VIRTIO_MSG_BUS_H
 
 #include "qom/object.h"
-#include "sysemu/dma.h"
+#include "system/dma.h"
 #include "hw/qdev-core.h"
 #include "hw/virtio/virtio-msg-prot.h"
 

@@ -301,12 +301,11 @@ static const VMStateDescription vmstate_virtio_msg_pd = {
     },
 };
 
-static Property vmpd_properties[] = {
+static const Property vmpd_properties[] = {
     DEFINE_PROP_UINT16("virtio-id", VirtIOMSGProxyDriver, cfg.virtio_id,
                        VIRTIO_ID_NET),
     DEFINE_PROP_BOOL("iommu-enable", VirtIOMSGProxyDriver,
                      cfg.iommu_enable, false),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void vmpd_class_init(ObjectClass *klass, void *data)
