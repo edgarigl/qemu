@@ -9,7 +9,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
-#include "sysemu/dma.h"
 #include "qapi/error.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
@@ -434,10 +433,6 @@ static AddressSpace *virtio_msg_get_dma_as(DeviceState *d)
     return as;
 }
 
-static Property virtio_msg_properties[] = {
-    DEFINE_PROP_END_OF_LIST(),
-};
-
 static void virtio_msg_realize(DeviceState *d, Error **errp)
 {
     VirtIOMSGProxy *s = VIRTIO_MSG(d);
@@ -463,7 +458,6 @@ static void virtio_msg_class_init(ObjectClass *klass, void *data)
     rc->phases.hold  = virtio_msg_reset_hold;
 
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
-    device_class_set_props(dc, virtio_msg_properties);
 }
 
 static const TypeInfo virtio_msg_info = {
