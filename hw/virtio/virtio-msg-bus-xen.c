@@ -218,10 +218,9 @@ static void virtio_msg_bus_xen_realize(DeviceState *dev, Error **errp)
     printf("%s: DONE\n", __func__);
 }
 
-static Property virtio_msg_bus_xen_props[] = {
+static const Property virtio_msg_bus_xen_props[] = {
     DEFINE_PROP_UINT64("shm-base", VirtIOMSGBusXen, cfg.shm_base, UINT64_MAX),
     DEFINE_PROP_UINT16("port", VirtIOMSGBusXen, cfg.port, 0),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void virtio_msg_bus_xen_class_init(ObjectClass *klass, void *data)

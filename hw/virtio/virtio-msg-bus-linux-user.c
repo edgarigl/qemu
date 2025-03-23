@@ -186,7 +186,7 @@ static void virtio_msg_bus_linux_user_realize(DeviceState *dev, Error **errp)
     address_space_init(&s->as, MEMORY_REGION(&s->mr), "msg-bus-as");
 }
 
-static Property virtio_msg_bus_linux_user_props[] = {
+static const Property virtio_msg_bus_linux_user_props[] = {
     DEFINE_PROP_STRING("name", VirtIOMSGBusLinuxUser, cfg.name),
     DEFINE_PROP_LINK("memdev", VirtIOMSGBusLinuxUser, cfg.memdev,
                      TYPE_MEMORY_BACKEND, HostMemoryBackend *),
@@ -196,7 +196,6 @@ static Property virtio_msg_bus_linux_user_props[] = {
     DEFINE_PROP_UINT64("mem-hole", VirtIOMSGBusLinuxUser,
                        cfg.mem_hole, 0),
     DEFINE_PROP_CHR("chardev", VirtIOMSGBusLinuxUser, cfg.chr),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void virtio_msg_bus_linux_user_class_init(ObjectClass *klass, void *data)

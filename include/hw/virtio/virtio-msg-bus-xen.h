@@ -13,7 +13,6 @@
 #include "qom/object.h"
 #include "chardev/char.h"
 #include "chardev/char-fe.h"
-#include "sysemu/hostmem.h"
 #include "hw/virtio/virtio-msg-bus.h"
 #include "hw/virtio/spsc_queue.h"
 

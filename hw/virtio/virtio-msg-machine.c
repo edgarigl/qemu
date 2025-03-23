@@ -3,7 +3,6 @@
 #include "exec/memory.h"
 #include "qapi/error.h"
 #include "hw/qdev-core.h"
-#include "sysemu/dma.h"
 #include "hw/virtio/virtio-msg-machine.h"
 
 static void virtio_msg_machine_init(MachineState *machine)

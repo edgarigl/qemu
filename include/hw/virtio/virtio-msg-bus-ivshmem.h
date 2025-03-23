@@ -12,7 +12,7 @@
 
 #include "qom/object.h"
 #include "qemu/vfio-helpers.h"
-#include "sysemu/hostmem.h"
+#include "system/hostmem.h"
 #include "hw/virtio/virtio-msg-bus.h"
 #include "hw/virtio/spsc_queue.h"
 

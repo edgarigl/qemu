@@ -335,7 +335,7 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
     usleep(10);
 }
 
-static Property virtio_msg_bus_vek280_props[] = {
+static const Property virtio_msg_bus_vek280_props[] = {
     DEFINE_PROP_STRING("dev", VirtIOMSGBusVEK280HexCam, cfg.dev),
     DEFINE_PROP_UINT64("spsc-base", VirtIOMSGBusVEK280HexCam, cfg.spsc_base,
                        UINT64_MAX),
@@ -346,7 +346,6 @@ static Property virtio_msg_bus_vek280_props[] = {
     DEFINE_PROP_BOOL("reset-queues", VirtIOMSGBusVEK280HexCam,
                      cfg.reset_queues, false),
     DEFINE_PROP_STRING("iommu", VirtIOMSGBusVEK280HexCam, cfg.iommu),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void virtio_msg_bus_vek280_class_init(ObjectClass *klass, void *data)

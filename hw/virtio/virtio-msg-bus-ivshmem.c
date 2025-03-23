@@ -242,7 +242,7 @@ static void virtio_msg_bus_ivshmem_realize(DeviceState *dev, Error **errp)
     address_space_init(&s->as, MEMORY_REGION(&s->mr), "msg-bus-as");
 }
 
-static Property virtio_msg_bus_ivshmem_props[] = {
+static const Property virtio_msg_bus_ivshmem_props[] = {
     DEFINE_PROP_STRING("dev", VirtIOMSGBusIVSHMEM, cfg.dev),
     DEFINE_PROP_UINT32("remote-vmid", VirtIOMSGBusIVSHMEM, cfg.remote_vmid, 0),
     DEFINE_PROP_BOOL("reset-queues", VirtIOMSGBusIVSHMEM,
@@ -255,7 +255,6 @@ static Property virtio_msg_bus_ivshmem_props[] = {
     DEFINE_PROP_UINT64("mem-hole", VirtIOMSGBusIVSHMEM,
                        cfg.mem_hole, 0),
     DEFINE_PROP_STRING("iommu", VirtIOMSGBusIVSHMEM, cfg.iommu),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void virtio_msg_bus_ivshmem_class_init(ObjectClass *klass, void *data)
