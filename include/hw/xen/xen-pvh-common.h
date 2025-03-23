@@ -14,6 +14,7 @@
 #include "hw/boards.h"
 #include "hw/pci-host/gpex.h"
 #include "hw/xen/xen-hvm-common.h"
+#include "hw/virtio/virtio-msg.h"
 
 #define TYPE_XEN_PVH_MACHINE MACHINE_TYPE_NAME("xen-pvh-base")
 OBJECT_DECLARE_TYPE(XenPVHMachineState, XenPVHMachineClass,
@@ -53,6 +54,7 @@ struct XenPVHMachineClass {
     bool has_pci;
     bool has_tpm;
     bool has_virtio_mmio;
+    bool has_virtio_msg;
 };
 
 struct XenPVHMachineState {
@@ -71,6 +73,10 @@ struct XenPVHMachineState {
         MemoryRegion mmio_alias;
         MemoryRegion mmio_high_alias;
     } pci;
+
+    struct {
+        VirtIOMSGProxy backends[4];
+    } virtio_msg;
 
     struct {
         MemMapEntry ram_low, ram_high;

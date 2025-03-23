@@ -86,6 +86,7 @@ static void xen_arm_machine_class_init(ObjectClass *oc, void *data)
     xpc->has_pci = true;
     xpc->has_tpm = true;
     xpc->has_virtio_mmio = true;
+    xpc->has_virtio_msg = true;
 
     xen_pvh_class_setup_common_props(xpc);
 }
