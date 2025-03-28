@@ -29,6 +29,8 @@ typedef struct VirtIOMSGBusXen {
 
         char *shm;
         evtchn_port_t local_port;
+
+        bool connected;
     } xen;
 
     struct {

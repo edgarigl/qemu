@@ -22,6 +22,8 @@
 
 #include <xengnttab.h>
 
+static void virtio_msg_bus_xen_connect_evtchn(VirtIOMSGBusXen *s, int port);
+
 static xengnttab_handle *xen_region_gnttabdev;
 
 static void virtio_msg_bus_xen_send_notify(VirtIOMSGBusXen *s)
@@ -33,6 +35,21 @@ static AddressSpace *
 virtio_msg_bus_xen_get_remote_as(VirtIOMSGBusDevice *bd)
 {
     return &address_space_memory;
+}
+
+static void virtio_msg_bus_xen_recv(VirtIOMSGBusDevice *bd,
+                                    VirtIOMSG *msg)
+{
+    VirtIOMSGBusXen *s = VIRTIO_MSG_BUS_XEN(bd);
+
+    /* Need to unpack xen bus messages.  */
+    virtio_msg_unpack(msg);
+
+    if (msg->id == VIRTIO_MSG_CONNECT) {
+        LE_TO_CPU(msg->connect_bus_xen.event_channel_port);
+        virtio_msg_bus_xen_connect_evtchn(s,
+                                   msg->connect_bus_xen.event_channel_port);
+    }
 }
 
 static void virtio_msg_bus_xen_process(VirtIOMSGBusDevice *bd) {
@@ -49,9 +66,25 @@ static void virtio_msg_bus_xen_process(VirtIOMSGBusDevice *bd) {
     do {
         r = spsc_recv(q, &msg, sizeof msg);
         if (r) {
-            virtio_msg_bus_receive(bd, &msg);
+            if (msg.type & VIRTIO_MSG_TYPE_BUS) {
+                virtio_msg_bus_xen_recv(bd, &msg);
+            } else {
+                virtio_msg_bus_receive(bd, &msg);
+            }
         }
     } while (r);
+}
+
+static void virtio_msg_bus_xen_connect(VirtIOMSGBusDevice *bd)
+{
+    VirtIOMSGBusXen *s = VIRTIO_MSG_BUS_XEN(bd);
+
+    while (!s->xen.connected) {
+        virtio_msg_bus_xen_process(bd);
+        if (!s->xen.connected) {
+            usleep(200 * 1000);
+        }
+    }
 }
 
 static int virtio_msg_bus_xen_send(VirtIOMSGBusDevice *bd,
@@ -128,6 +161,21 @@ static void virtio_msg_bus_xen_event(void *opaque)
     qemu_xen_evtchn_unmask(s->xen.eh, port);
 }
 
+static void virtio_msg_bus_xen_connect_evtchn(VirtIOMSGBusXen *s, int port)
+{
+    int evtchn_fd;
+
+    s->xen.local_port = qemu_xen_evtchn_bind_interdomain(s->xen.eh,
+                                                         xen_domid,
+                                                         port);
+    /* Register with main loop.  */
+    evtchn_fd = qemu_xen_evtchn_fd(s->xen.eh);
+    if (evtchn_fd != -1) {
+        qemu_set_fd_handler(evtchn_fd, virtio_msg_bus_xen_event, NULL, s);
+    }
+    s->xen.connected = true;
+}
+
 static void virtio_msg_bus_xen_map_shm(VirtIOMSGBusXen *s, Error **errp)
 {
     uint32_t grant_ref;
@@ -163,7 +211,6 @@ static void virtio_msg_bus_xen_realize(DeviceState *dev, Error **errp)
 {
     VirtIOMSGBusXen *s = VIRTIO_MSG_BUS_XEN(dev);
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_GET_CLASS(dev);
-    int evtchn_fd;
 
     g_autofree char *name_driver = NULL;
     g_autofree char *name_device = NULL;
@@ -201,18 +248,13 @@ static void virtio_msg_bus_xen_realize(DeviceState *dev, Error **errp)
     assert(s->shm_queues.device);
 
     s->xen.eh = qemu_xen_evtchn_open();
-    s->xen.local_port = qemu_xen_evtchn_bind_interdomain(s->xen.eh,
-                                                         xen_domid,
-                                                         s->cfg.port);
     if (!s->xen.eh) {
         error_setg_errno(errp, errno, "failed xenevtchn_open");
         return;
     }
 
-    /* Register with main loop.  */
-    evtchn_fd = qemu_xen_evtchn_fd(s->xen.eh);
-    if (evtchn_fd != -1) {
-        qemu_set_fd_handler(evtchn_fd, virtio_msg_bus_xen_event, NULL, s);
+    if (s->cfg.port) {
+        virtio_msg_bus_xen_connect_evtchn(s, s->cfg.port);
     }
 
     printf("%s: DONE\n", __func__);
@@ -229,6 +271,7 @@ static void virtio_msg_bus_xen_class_init(ObjectClass *klass, void *data)
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(klass);
 
     bdc->process = virtio_msg_bus_xen_process;
+    bdc->connect = virtio_msg_bus_xen_connect;
     bdc->send = virtio_msg_bus_xen_send;
     bdc->get_remote_as = virtio_msg_bus_xen_get_remote_as;
 

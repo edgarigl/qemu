@@ -158,6 +158,10 @@ typedef struct VirtIOMSG {
             uint32_t index;
         } QEMU_PACKED event_used;
 
+        /* Xen bus.  */
+        struct {
+            uint32_t event_channel_port;
+        } QEMU_PACKED connect_bus_xen;
 
         /* Experimental Soft IOMMU.  */
         struct {
