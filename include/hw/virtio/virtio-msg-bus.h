@@ -44,6 +44,9 @@ struct VirtIOMSGBusDeviceClass {
      */
     void (*process)(VirtIOMSGBusDevice *bd);
 
+    /* Called when the bus connects.  */
+    void (*connect)(VirtIOMSGBusDevice *bd);
+
     /*
      * Called by the transport to send a message and optionally
      * wait for a response.
