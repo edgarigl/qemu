@@ -23,7 +23,7 @@
 #include "qemu/cutils.h"
 
 /* memPcpy version for fully aligned copies.  */
-void *iov_fully_aligned32_mempcpy(void *d, const void *s, size_t n)
+static void *iov_fully_aligned32_mempcpy(void *d, const void *s, size_t n)
 {
         uint32_t *d32 = d;
         const uint32_t *s32 = s;
