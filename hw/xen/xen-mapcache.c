@@ -47,6 +47,7 @@ typedef struct MapCacheEntry {
 #define XEN_MAPCACHE_ENTRY_GRANT (1 << 1)
     uint8_t flags;
     hwaddr size;
+    bool is_write;
     struct MapCacheEntry *next;
 } MapCacheEntry;
 
@@ -272,6 +273,7 @@ static void xen_remap_bucket(MapCache *mc,
              * models using ordinary address_space_rw(), foreign mappings ignore
              * is_write and are always mapped RW.
              */
+            is_write = true;
             vaddr_base = xenforeignmemory_map2(xen_fmem, xen_domid, vaddr,
                                                PROT_READ | PROT_WRITE,
                                                vaddr ? MAP_FIXED : 0,
@@ -303,6 +305,7 @@ static void xen_remap_bucket(MapCache *mc,
     entry->vaddr_base = vaddr_base;
     entry->paddr_index = address_index;
     entry->size = size;
+    entry->is_write = is_write;
     entry->valid_mapping = g_new0(unsigned long,
                                   BITS_TO_LONGS(size >> XC_PAGE_SHIFT));
 
@@ -608,6 +611,7 @@ static void xen_invalidate_map_cache_entry_unlocked(MapCache *mc,
         entry->valid_mapping = NULL;
         entry->flags = 0;
         entry->size = 0;
+        entry->is_write = false;
     }
 }
 
@@ -685,6 +689,7 @@ static void xen_invalidate_map_cache_single(MapCache *mc)
         entry->paddr_index = 0;
         entry->vaddr_base = NULL;
         entry->size = 0;
+        entry->is_write = false;
         g_free(entry->valid_mapping);
         entry->valid_mapping = NULL;
     }
