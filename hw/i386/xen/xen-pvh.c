@@ -105,6 +105,7 @@ static void xen_pvh_machine_class_init(ObjectClass *oc, void *data)
 
     /* List of supported features known to work on PVH x86.  */
     xpc->has_pci = true;
+    xpc->has_virtio_msg = true;
 
     xen_pvh_class_setup_common_props(xpc);
 }
