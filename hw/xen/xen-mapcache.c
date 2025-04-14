@@ -263,7 +263,13 @@ static void xen_remap_bucket(MapCache *mc,
             vaddr_base = xengnttab_map_domain_grant_refs(xen_region_gnttabdev,
                                                          nb_pfn,
                                                          xen_domid, refs,
-                                                         prot);
+                                                         prot | PROT_WRITE);
+            if (!vaddr_base && !is_write) {
+                vaddr_base = xengnttab_map_domain_grant_refs(xen_region_gnttabdev,
+                                                             nb_pfn,
+                                                             xen_domid, refs,
+                                                             prot);
+            }
         } else {
             /*
              * If the caller has requested the mapping at a specific address use
