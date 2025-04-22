@@ -3273,6 +3273,7 @@ int64_t address_space_cache_init(MemoryRegionCache *cache,
          * doing this if we found actual RAM, which behaves the same
          * regardless of attributes; so UNSPECIFIED is fine.
          */
+        cache->ptr = NULL;
         if (mr->ops && mr->ops->map) {
             cache->ptr = mr->ops->map(&mr, addr, &l, is_write,
                                       MEMTXATTRS_UNSPECIFIED);
