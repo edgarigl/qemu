@@ -566,4 +566,9 @@ typedef struct xen_gfn2mfn xen_gfn2mfn_t;
 DEFINE_XEN_GUEST_HANDLE(xen_gfn2mfn_t);
 #endif
 
+int xen_virtio_msg_bus_xen_connect(domid_t domid,
+                                   uint32_t bus_id,
+                                   uint64_t shm_fifo_gfn,
+                                   uint32_t *port);
+
 #endif /* QEMU_HW_XEN_NATIVE_H */

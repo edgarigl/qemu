@@ -34,6 +34,7 @@
 #include <xenevtchn.h>
 #include <xengnttab.h>
 #include <xenforeignmemory.h>
+#include <xendevicemodel.h>
 
 /* Xen before 4.8 */
 
@@ -424,6 +425,84 @@ int xc_domain_gfn2mfn(xc_interface *xch,
         *access = xatp.access;
     }
     return r;
+}
+
+#define XEN_DMOP_virtio_msg_bus 30
+struct xen_dm_op_virtio_msg_bus {
+#define XEN_DOMCTL_VIRTIO_MSG_BUS_XEN_CONNECT                1
+    uint32_t op;                   /* IN: Operation */
+    uint32_t bus_id;               /* IN: virito-msg bus id  */
+    union {
+        /* Virtio-msg-xen bus */
+        struct {
+            uint64_aligned_t shm_fifo_gfn; /* IN: shm page for shm fifo */
+            uint32_t port;                 /* OUT: Event channel port  */
+        } xen;
+    } u;
+};
+typedef struct xen_dm_op_virtio_msg_bus xen_dm_op_virtio_msg_bus_t;
+
+struct xen_dm_op_vmsg {
+    uint32_t op;
+    uint32_t pad;
+    union {
+        xen_dm_op_virtio_msg_bus_t virtio_msg_bus;
+    } u;
+};
+
+/* Hax while we move this to libxl.  */
+#include <sys/ioctl.h>
+#include <xen/sys/privcmd.h>
+struct xendevicemodel_handle {
+    void *logger, *logger_tofree;
+    unsigned int flags;
+    void *xcall;
+    int fd;
+};
+
+static int xen_virtio_msg_bus_op(domid_t domid,
+                                 struct xen_dm_op_vmsg *op) {
+    privcmd_dm_op_buf_t ubuf;
+    privcmd_dm_op_t uop;
+    int rc;
+
+    op->op = XEN_DMOP_virtio_msg_bus;
+
+    ubuf.uptr = op;
+    ubuf.size = sizeof(*op);
+    uop.dom = domid;
+    uop.num = 1;
+    uop.ubufs = &ubuf;
+
+    rc = ioctl(xen_dmod->fd, IOCTL_PRIVCMD_DM_OP, &uop);
+    if (rc)
+        return rc;
+
+    return 0;
+}
+
+int xen_virtio_msg_bus_xen_connect(domid_t domid,
+                                   uint32_t bus_id,
+                                   uint64_t shm_fifo_gfn,
+                                   uint32_t *port)
+{
+    struct xen_dm_op_vmsg op;
+    struct xen_dm_op_virtio_msg_bus *data = &op.u.virtio_msg_bus;
+    int rc;
+
+    memset(&op, 0, sizeof(op));
+    data->op = XEN_DOMCTL_VIRTIO_MSG_BUS_XEN_CONNECT;
+    data->bus_id = bus_id;
+    data->u.xen.shm_fifo_gfn = shm_fifo_gfn;
+    data->u.xen.port = 0;
+
+    rc = xen_virtio_msg_bus_op(domid, &op);
+    if (rc) {
+        printf("%s: %s\n", __func__, strerror(rc));
+        return rc;
+    }
+    *port = data->u.xen.port;
+    return rc;
 }
 
 void setup_xen_backend_ops(void)
