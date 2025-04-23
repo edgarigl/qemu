@@ -19,12 +19,7 @@
 #include "hw/xen/xen-bus-helper.h"
 
 #include "hw/virtio/virtio-msg-bus-xen.h"
-
-#include <xengnttab.h>
-
-static void virtio_msg_bus_xen_connect_evtchn(VirtIOMSGBusXen *s, int port);
-
-static xengnttab_handle *xen_region_gnttabdev;
+#include "hw/virtio/pagemap.h"
 
 static void virtio_msg_bus_xen_send_notify(VirtIOMSGBusXen *s)
 {
@@ -43,15 +38,7 @@ static void virtio_msg_bus_xen_recv(VirtIOMSGBusDevice *bd,
     /* Need to unpack xen bus messages.  */
     virtio_msg_unpack(msg);
 
-#if 0
-    VirtIOMSGBusXen *s = VIRTIO_MSG_BUS_XEN(bd);
-
-    if (msg->id == VIRTIO_MSG_CONNECT) {
-        LE_TO_CPU(msg->connect_bus_xen.event_channel_port);
-        virtio_msg_bus_xen_connect_evtchn(s,
-                                   msg->connect_bus_xen.event_channel_port);
-    }
-#endif
+    /* We don't have any bus specific messages.  */
 }
 
 static void virtio_msg_bus_xen_process(VirtIOMSGBusDevice *bd) {
@@ -75,18 +62,6 @@ static void virtio_msg_bus_xen_process(VirtIOMSGBusDevice *bd) {
             }
         }
     } while (r);
-}
-
-static void virtio_msg_bus_xen_connect(VirtIOMSGBusDevice *bd)
-{
-    VirtIOMSGBusXen *s = VIRTIO_MSG_BUS_XEN(bd);
-
-    while (!s->xen.connected) {
-        virtio_msg_bus_xen_process(bd);
-        if (!s->xen.connected) {
-            usleep(200 * 1000);
-        }
-    }
 }
 
 static int virtio_msg_bus_xen_send(VirtIOMSGBusDevice *bd,
@@ -178,35 +153,42 @@ static void virtio_msg_bus_xen_connect_evtchn(VirtIOMSGBusXen *s, int port)
     s->xen.connected = true;
 }
 
-static void virtio_msg_bus_xen_map_shm(VirtIOMSGBusXen *s, Error **errp)
+static void virtio_msg_bus_xen_connect(VirtIOMSGBusXen *s, Error **errp)
 {
-    uint32_t grant_ref;
-    xen_pfn_t pfn;
-    int nb_pfn = 1;
+    uint32_t port = 0;
+    uint64_t gfn;
+    void *user_va;
+    int rc;
 
-    grant_ref = s->cfg.shm_base;
-
-    /* Try grants first.  */
-    if (xen_region_gnttabdev) {
-        s->xen.shm = xengnttab_map_domain_grant_refs(xen_region_gnttabdev,
-                                                     nb_pfn,
-                                                     xen_domid, &grant_ref,
-                                                     PROT_READ | PROT_WRITE);
-        if (s->xen.shm) {
-            return;
-        }
+    /* Map shm page.  */
+    user_va = mmap(NULL, XEN_PAGE_SIZE, PROT_READ | PROT_WRITE,
+            MAP_ANONYMOUS | MAP_ANONYMOUS | MAP_SHARED,
+            -1, 0);
+    if (user_va == MAP_FAILED) {
+        error_setg(errp, "Failed to map shm page");
+        return;
     }
 
-    /* Grants failed, fall back to foreign mappings.  */
-    pfn = s->cfg.shm_base >> XC_PAGE_SHIFT;
-    s->xen.shm = xenforeignmemory_map2(xen_fmem, xen_domid, NULL,
-                                       PROT_READ | PROT_WRITE,
-                                       /* No flags  */ 0,
-                                       nb_pfn, &pfn, NULL);
+    /* Pin and populate pages.  */
+    mlock(user_va, XEN_PAGE_SIZE);
+    memset(user_va, 0x55, XEN_PAGE_SIZE);
 
-    if (!s->xen.shm) {
-        error_setg(errp, "Failed to map shm-base %lx", s->cfg.shm_base);
+    /* Get the gpfn.  */
+    gfn = pagemap_virt_to_phys(user_va) >> XEN_PAGE_SHIFT;
+
+    /* Now connect to the virtio-msg bus.  */
+    rc = xen_virtio_msg_bus_xen_connect(xen_domid,
+            s->cfg.bus_id,
+            gfn, &port);
+    if (rc < 0) {
+        error_setg(errp, "Failed to connect to virtio-msg-bus");
+        return;
     }
+
+    /* Done.  */
+    s->xen.shm = user_va;
+    s->xen.port = port;
+    printf("%s: rc=%d gfn=%lx port=%d\n", __func__, rc, gfn, port);
 }
 
 static void virtio_msg_bus_xen_realize(DeviceState *dev, Error **errp)
@@ -222,21 +204,14 @@ static void virtio_msg_bus_xen_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    if (s->cfg.shm_base == UINT64_MAX) {
-        error_setg(errp, "shm-base not set!");
+    s->xen.eh = qemu_xen_evtchn_open();
+    if (!s->xen.eh) {
+        error_setg_errno(errp, errno, "failed xenevtchn_open");
         return;
     }
 
-    if (!xen_region_gnttabdev) {
-        xen_region_gnttabdev = xengnttab_open(NULL, 0);
-        if (!xen_region_gnttabdev) {
-            error_setg(errp, "Failed to open gnttab device");
-            return;
-        }
-    }
-
-    virtio_msg_bus_xen_map_shm(s, errp);
-    if (*errp) {
+    virtio_msg_bus_xen_connect(s, errp);
+    if (0 && *errp) {
         return;
     }
 
@@ -249,22 +224,13 @@ static void virtio_msg_bus_xen_realize(DeviceState *dev, Error **errp)
     assert(s->shm_queues.driver);
     assert(s->shm_queues.device);
 
-    s->xen.eh = qemu_xen_evtchn_open();
-    if (!s->xen.eh) {
-        error_setg_errno(errp, errno, "failed xenevtchn_open");
-        return;
-    }
-
-    if (s->cfg.port) {
-        virtio_msg_bus_xen_connect_evtchn(s, s->cfg.port);
-    }
+    virtio_msg_bus_xen_connect_evtchn(s, s->xen.port);
 
     printf("%s: DONE\n", __func__);
 }
 
-static Property virtio_msg_bus_xen_props[] = {
-    DEFINE_PROP_UINT64("shm-base", VirtIOMSGBusXen, cfg.shm_base, UINT64_MAX),
-    DEFINE_PROP_UINT16("port", VirtIOMSGBusXen, cfg.port, 0),
+static const Property virtio_msg_bus_xen_props[] = {
+    DEFINE_PROP_UINT32("bus-id", VirtIOMSGBusXen, cfg.bus_id, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -274,7 +240,6 @@ static void virtio_msg_bus_xen_class_init(ObjectClass *klass, void *data)
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(klass);
 
     bdc->process = virtio_msg_bus_xen_process;
-    bdc->connect = virtio_msg_bus_xen_connect;
     bdc->send = virtio_msg_bus_xen_send;
     bdc->get_remote_as = virtio_msg_bus_xen_get_remote_as;
 
