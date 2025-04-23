@@ -28,6 +28,7 @@ typedef struct VirtIOMSGBusXen {
         xenevtchn_handle *eh;
 
         char *shm;
+        uint16_t port;
         evtchn_port_t local_port;
 
         bool connected;
@@ -41,7 +42,7 @@ typedef struct VirtIOMSGBusXen {
     struct {
         uint64_t shm_base;
         uint64_t shm_gnt_ref;
-        uint16_t port;
+        uint32_t bus_id;
     } cfg;
 } VirtIOMSGBusXen;
 #endif
