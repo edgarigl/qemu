@@ -25,7 +25,7 @@ OBJECT_DECLARE_TYPE(VirtIOMSGBusDevice, VirtIOMSGBusDeviceClass,
                     VIRTIO_MSG_BUS_DEVICE)
 
 typedef struct VirtIOMSGBusPort {
-    int (*receive)(VirtIOMSGBusDevice *bus, VirtIOMSG *msg);
+    int (*receive)(VirtIOMSGBusDevice *bd, VirtIOMSG *msg);
     bool is_driver;
 } VirtIOMSGBusPort;
 
