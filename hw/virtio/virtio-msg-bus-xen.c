@@ -265,7 +265,7 @@ static const Property virtio_msg_bus_xen_props[] = {
     DEFINE_PROP_UINT16("port", VirtIOMSGBusXen, cfg.port, 0),
 };
 
-static void virtio_msg_bus_xen_class_init(ObjectClass *klass, void *data)
+static void virtio_msg_bus_xen_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(klass);

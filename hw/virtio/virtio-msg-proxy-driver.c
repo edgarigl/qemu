@@ -163,13 +163,14 @@ static void vmpd_set_features(VirtIODevice *vdev, uint64_t f)
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 }
 
-static void vmpd_set_status(VirtIODevice *vdev, uint8_t status)
+static int vmpd_set_status(VirtIODevice *vdev, uint8_t status)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
 
     if (!vdev->vm_running) {
-        return;
+        /* EAGAIN ? */
+        return 0;
     }
 
     /*
@@ -196,6 +197,7 @@ static void vmpd_set_status(VirtIODevice *vdev, uint8_t status)
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 
     vdev->status = msg_resp.get_device_status_resp.status;
+    return 0;
 }
 
 static uint32_t vmpd_read_config(VirtIODevice *vdev,
@@ -308,7 +310,7 @@ static const Property vmpd_properties[] = {
                      cfg.iommu_enable, false),
 };
 
-static void vmpd_class_init(ObjectClass *klass, void *data)
+static void vmpd_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);

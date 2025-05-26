@@ -408,7 +408,7 @@ static void virtio_msg_realize(DeviceState *d, Error **errp)
     address_space_init(&s->dma_as, MEMORY_REGION(&s->mr_iommu), "dma");
 }
 
-static void virtio_msg_class_init(ObjectClass *klass, void *data)
+static void virtio_msg_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);
@@ -478,7 +478,7 @@ static char *virtio_msg_bus_get_dev_path(DeviceState *dev)
     return proxy_path;
 }
 
-static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
+static void virtio_msg_bus_class_init(ObjectClass *klass, const void *data)
 {
     BusClass *bus_class = BUS_CLASS(klass);
     VirtioBusClass *k = VIRTIO_BUS_CLASS(klass);
@@ -503,7 +503,7 @@ static const TypeInfo virtio_msg_bus_info = {
 };
 
 static void virtio_msg_iommu_memory_region_class_init(ObjectClass *klass,
-                                                      void *data)
+                                                      const void *data)
 {
     IOMMUMemoryRegionClass *imrc = IOMMU_MEMORY_REGION_CLASS(klass);
 

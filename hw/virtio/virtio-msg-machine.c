@@ -1,6 +1,5 @@
 #include "qemu/osdep.h"
 
-#include "exec/memory.h"
 #include "qapi/error.h"
 #include "hw/qdev-core.h"
 #include "hw/virtio/virtio-msg-machine.h"
@@ -22,7 +21,7 @@ static void virtio_msg_machine_instance_init(Object *obj)
 {
 }
 
-static void virtio_msg_machine_class_init(ObjectClass *oc, void *data)
+static void virtio_msg_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 

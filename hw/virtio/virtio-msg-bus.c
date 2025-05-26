@@ -275,7 +275,7 @@ static void virtio_msg_bus_device_realize(DeviceState *dev, Error **errp)
     bd->virt2gfn_fd = -1;
 }
 
-static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
+static void virtio_msg_bus_class_init(ObjectClass *klass, const void *data)
 {
     BusClass *bc = BUS_CLASS(klass);
 
@@ -293,7 +293,8 @@ static const TypeInfo virtio_msg_bus_info = {
     .class_init = virtio_msg_bus_class_init,
 };
 
-static void virtio_msg_bus_device_class_init(ObjectClass *klass, void *data)
+static void virtio_msg_bus_device_class_init(ObjectClass *klass,
+                                             const void *data)
 {
     DeviceClass *k = DEVICE_CLASS(klass);
 

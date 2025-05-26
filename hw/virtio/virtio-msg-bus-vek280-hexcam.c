@@ -348,7 +348,8 @@ static const Property virtio_msg_bus_vek280_props[] = {
     DEFINE_PROP_STRING("iommu", VirtIOMSGBusVEK280HexCam, cfg.iommu),
 };
 
-static void virtio_msg_bus_vek280_class_init(ObjectClass *klass, void *data)
+static void virtio_msg_bus_vek280_class_init(ObjectClass *klass,
+                                             const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(klass);

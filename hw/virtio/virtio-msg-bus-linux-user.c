@@ -198,7 +198,8 @@ static const Property virtio_msg_bus_linux_user_props[] = {
     DEFINE_PROP_CHR("chardev", VirtIOMSGBusLinuxUser, cfg.chr),
 };
 
-static void virtio_msg_bus_linux_user_class_init(ObjectClass *klass, void *data)
+static void virtio_msg_bus_linux_user_class_init(ObjectClass *klass,
+                                                 const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(klass);
