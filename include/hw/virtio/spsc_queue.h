@@ -29,18 +29,23 @@ using namespace std;
 #endif
 
 #define SPSC_QUEUE_MAX_PACKET_SIZE 64
+// This cache-line size is used to align fields in the hope of
+// avoiding cache-line ping-pong:ing. Since the queue layout is
+// now fixed and used across heterogenous CPU clusters and across
+// FPGA/HW implementations, a fixed size must be used, i.e not the
+// local CPU's cache line size.
 #define SPSC_QUEUE_CACHE_LINE_SIZE 64
 
 typedef struct spsc_queue_shared {
-    int32_t head __attribute__((__aligned__(SPSC_QUEUE_CACHE_LINE_SIZE)));
-    int32_t tail __attribute__((__aligned__(SPSC_QUEUE_CACHE_LINE_SIZE)));
+    uint32_t head __attribute__((__aligned__(SPSC_QUEUE_CACHE_LINE_SIZE)));
+    uint32_t tail __attribute__((__aligned__(SPSC_QUEUE_CACHE_LINE_SIZE)));
     uint32_t packets[1][SPSC_QUEUE_MAX_PACKET_SIZE / 4]
         __attribute__((__aligned__(SPSC_QUEUE_CACHE_LINE_SIZE)));
 } spsc_queue_shared;
 
 typedef struct spsc_queue {
-    int32_t cached_tail __attribute__((__aligned__(SPSC_QUEUE_CACHE_LINE_SIZE)));
-    int32_t cached_head __attribute__((__aligned__(SPSC_QUEUE_CACHE_LINE_SIZE)));
+    uint32_t cached_tail __attribute__((__aligned__(SPSC_QUEUE_CACHE_LINE_SIZE)));
+    uint32_t cached_head __attribute__((__aligned__(SPSC_QUEUE_CACHE_LINE_SIZE)));
     spsc_queue_shared* shm;
     char* name;
     int capacity;
@@ -48,10 +53,24 @@ typedef struct spsc_queue {
     bool unmap_at_close;
 } spsc_queue;
 
+static inline void spsc_atomic_load(spsc_queue *q, uint32_t *ptr, uint32_t *ret,
+                                    int memorder)
+{
+    uint32_t val;
+
+    __atomic_load(ptr, &val, memorder);
+    /* Bounds check that index is within queue size.  */
+    if (val >= q->capacity) {
+        val = 0;
+    }
+
+    *ret = val;
+}
+
 // Returns the capacity of a queue given a specific mapsize.
 static inline int spsc_capacity(size_t mapsize) {
     spsc_queue* q = NULL;
-    int capacity;
+    unsigned int capacity;
 
     if (mapsize < sizeof(*q->shm)) {
         return 0;
@@ -182,37 +201,23 @@ static inline void spsc_close(spsc_queue* q) {
     free(q);
 }
 
-static inline int spsc_size(spsc_queue* q) {
-    int head, tail;
-    int size;
-
-    __atomic_load(&q->shm->head, &head, __ATOMIC_ACQUIRE);
-    __atomic_load(&q->shm->tail, &tail, __ATOMIC_ACQUIRE);
-
-    size = head - tail;
-    if (size < 0) {
-        size += q->capacity;
-    }
-    return size;
-}
-
 static inline bool spsc_send(spsc_queue* q, void* buf, size_t size) {
-    // get pointer to head
-    int head;
+    uint32_t next_head;
+    uint32_t head;
 
-    __atomic_load(&q->shm->head, &head, __ATOMIC_RELAXED);
+    spsc_atomic_load(q, &q->shm->head, &head, __ATOMIC_RELAXED);
 
     assert(size <= sizeof q->shm->packets[0]);
 
     // compute the head pointer
-    int next_head = head + 1;
+    next_head = head + 1;
     if (next_head == q->capacity) {
         next_head = 0;
     }
 
     // if the queue is full, bail out
     if (next_head == q->cached_tail) {
-        __atomic_load(&q->shm->tail, &q->cached_tail, __ATOMIC_ACQUIRE);
+        spsc_atomic_load(q, &q->shm->tail, &q->cached_tail, __ATOMIC_ACQUIRE);
         if (next_head == q->cached_tail) {
             return false;
         }
@@ -220,6 +225,13 @@ static inline bool spsc_send(spsc_queue* q, void* buf, size_t size) {
 
     // otherwise write in the packet
     memcpy(q->shm->packets[head], buf, size);
+
+    // Make packet visible before head update
+    // https://en.cppreference.com/w/c/atomic/memory_order
+    // Since we're racing with a remote implementation, there's no guarantee
+    // that the other side does ACQUIRE on the same atomic variable.
+    // Hence the explicit barrier. In practice this is probably not needed.
+    smp_wmb();
 
     // and update the head pointer
     __atomic_store(&q->shm->head, &next_head, __ATOMIC_RELEASE);
@@ -229,14 +241,15 @@ static inline bool spsc_send(spsc_queue* q, void* buf, size_t size) {
 
 static inline bool spsc_recv_base(spsc_queue* q, void* buf, size_t size, bool pop) {
     // get the read pointer
-    int tail;
-    __atomic_load(&q->shm->tail, &tail, __ATOMIC_RELAXED);
+    uint32_t tail;
+
+    spsc_atomic_load(q, &q->shm->tail, &tail, __ATOMIC_RELAXED);
 
     assert(size <= sizeof q->shm->packets[0]);
 
     // if the queue is empty, bail out
     if (tail == q->cached_head) {
-        __atomic_load(&q->shm->head, &q->cached_head, __ATOMIC_ACQUIRE);
+        spsc_atomic_load(q, &q->shm->head, &q->cached_head, __ATOMIC_ACQUIRE);
         if (tail == q->cached_head) {
             return false;
         }
