@@ -35,6 +35,7 @@
 enum {
     VIRTIO_MSG_NO_ERROR = 0,
     VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID = 1,
+    VIRTIO_MSG_ERROR_MEMORY = 2, /* General memory error. */
 };
 
 enum {
