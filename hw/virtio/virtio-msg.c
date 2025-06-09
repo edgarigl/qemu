@@ -481,6 +481,10 @@ static char *virtio_msg_bus_get_dev_path(DeviceState *dev)
     virtio_msg_proxy = VIRTIO_MSG(virtio_msg_bus->parent);
     proxy_path = qdev_get_dev_path(DEVICE(virtio_msg_proxy));
 
+    if (!proxy_path) {
+        /* max_dev == 1 */
+        proxy_path = g_strdup("/1");
+    }
     return proxy_path;
 }
 
