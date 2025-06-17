@@ -233,9 +233,9 @@ void virtio_msg_bus_ooo_receive(VirtIOMSGBusDevice *bd,
      * Instead, queue events and wait for the notification path to re-trigger
      * processing of messages and process the OOO queue there.
      */
-    if (msg_resp->id == VIRTIO_MSG_EVENT_AVAIL ||
-            msg_resp->id == VIRTIO_MSG_EVENT_USED ||
-            msg_resp->id == VIRTIO_MSG_EVENT_CONFIG) {
+    if (msg_resp->msg_id == VIRTIO_MSG_EVENT_AVAIL ||
+            msg_resp->msg_id == VIRTIO_MSG_EVENT_USED ||
+            msg_resp->msg_id == VIRTIO_MSG_EVENT_CONFIG) {
         virtio_msg_bus_ooo_enqueue(bd, msg_resp);
     } else {
         virtio_msg_bus_receive(bd, msg_resp);
