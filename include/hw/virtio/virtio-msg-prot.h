@@ -71,7 +71,7 @@ enum {
 
 typedef struct VirtIOMSG {
     uint8_t type;
-    uint8_t id;
+    uint8_t msg_id;
     uint16_t dev_id;
 
     union {
@@ -209,7 +209,7 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
 {
     LE_TO_CPU(msg->dev_id);
 
-    switch (msg->id) {
+    switch (msg->msg_id) {
     case VIRTIO_MSG_DEVICE_INFO:
         LE_TO_CPU(msg->get_device_info_resp.device_version);
         LE_TO_CPU(msg->get_device_info_resp.device_id);
@@ -268,7 +268,7 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
 
     LE_TO_CPU(msg->dev_id);
 
-    switch (msg->id) {
+    switch (msg->msg_id) {
     case VIRTIO_MSG_GET_FEATURES:
         LE_TO_CPU(msg->get_features.index);
         break;
@@ -317,12 +317,12 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
 }
 
 static inline void virtio_msg_pack_header(VirtIOMSG *msg,
-                                          uint8_t id,
+                                          uint8_t msg_id,
                                           uint8_t type,
                                           uint16_t dev_id)
 {
     msg->type = type;
-    msg->id = id;
+    msg->msg_id = msg_id;
     msg->dev_id = cpu_to_le16(dev_id); /* dest demux? */
 
     /* Keep things predictable.  */
@@ -583,7 +583,7 @@ static inline void virtio_msg_pack_iommu_translate_resp(VirtIOMSG *msg,
  */
 static inline bool virtio_msg_is_resp(VirtIOMSG *msg_req, VirtIOMSG *msg_resp)
 {
-    if (msg_resp->id == msg_req->id &&
+    if (msg_resp->msg_id == msg_req->msg_id &&
         msg_resp->type & VIRTIO_MSG_TYPE_RESPONSE) {
         return true;
     }
@@ -650,7 +650,7 @@ static inline void virtio_msg_print(VirtIOMSG *msg)
 
     assert(msg);
     printf("virtio-msg: id %s 0x%x type 0x%x dev_id 0x%0x\n",
-           virtio_msg_id_to_str(msg->id), msg->id,
+           virtio_msg_id_to_str(msg->msg_id), msg->msg_id,
            msg->type, msg->dev_id);
 
     for (i = 0; i < 32; i++) {
@@ -660,7 +660,7 @@ static inline void virtio_msg_print(VirtIOMSG *msg)
         }
     }
 
-    switch (msg->id) {
+    switch (msg->msg_id) {
     case VIRTIO_MSG_GET_DEVICE_STATUS:
         if (resp) {
             virtio_msg_print_status(msg->get_device_status_resp.status);

@@ -122,11 +122,11 @@ static int vmpd_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     //virtio_msg_print(msg);
     assert((msg->type & VIRTIO_MSG_TYPE_RESPONSE) == 0);
 
-    if (msg->id > ARRAY_SIZE(msg_handlers)) {
+    if (msg->msg_id > ARRAY_SIZE(msg_handlers)) {
         return VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID;
     }
 
-    handler = msg_handlers[msg->id];
+    handler = msg_handlers[msg->msg_id];
     if (handler) {
         handler(vpd, msg);
     }
