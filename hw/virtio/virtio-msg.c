@@ -36,10 +36,10 @@ static void virtio_msg_device_info(VirtIOMSGProxy *s,
                 __func__, BUS(&s->bus)->name);
     }
 
-    virtio_msg_pack_get_device_info_resp(&msg_resp,
-                                         VIRTIO_MSG_DEVICE_VERSION,
-                                         device_id,
-                                         VIRTIO_MSG_VENDOR_ID);
+    virtio_msg_pack_get_device_info_resp(&msg_resp, device_id,
+                                         VIRTIO_MSG_VENDOR_ID,
+                                         64, /* feature bits.  */
+                                         vdev->config_len);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
@@ -58,7 +58,7 @@ static void virtio_msg_get_features(VirtIOMSGProxy *s,
      */
     features = vdc->get_features(vdev, vdev->host_features, &error_abort);
 
-    virtio_msg_pack_get_features_resp(&msg_resp, 0, features);
+    virtio_msg_pack_get_features_resp(&msg_resp, 0, 2, features);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
@@ -69,7 +69,7 @@ static void virtio_msg_set_features(VirtIOMSGProxy *s,
 
     s->guest_features = msg->set_features.features;
 
-    virtio_msg_pack_set_features_resp(&msg_resp, 0, s->guest_features);
+    virtio_msg_pack_set_features_resp(&msg_resp, 0, 2, s->guest_features);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
@@ -84,6 +84,7 @@ static void virtio_msg_set_device_status(VirtIOMSGProxy *s,
 {
     VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
     uint32_t status = msg->set_device_status.status;
+    VirtIOMSG msg_resp;
 
     printf("set_device_status: %x %x\n", status, vdev->status);
 
@@ -105,6 +106,9 @@ static void virtio_msg_set_device_status(VirtIOMSGProxy *s,
     if (status == 0) {
         virtio_msg_soft_reset(s);
     }
+
+    virtio_msg_pack_set_device_status_resp(&msg_resp, vdev->status);
+    virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
 static void virtio_msg_get_device_status(VirtIOMSGProxy *s,
@@ -122,13 +126,10 @@ static void virtio_msg_get_config(VirtIOMSGProxy *s,
                                   VirtIOMSG *msg)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
-    uint8_t size = msg->get_config.size;
+    uint32_t size = msg->get_config.size;
     uint32_t offset = msg->get_config.offset;
-    uint64_t data;
+    uint64_t data = 0;
     VirtIOMSG msg_resp;
-
-    /* Add the 3rd byte of offset.  */
-    offset += msg->get_config.offset_msb << 16;
 
     switch (size) {
     case 4:
@@ -140,12 +141,16 @@ static void virtio_msg_get_config(VirtIOMSGProxy *s,
     case 1:
         data = virtio_config_modern_readb(vdev, offset);
         break;
+    case 0:
+        /* Used to read the generation count.  */
+        break;
     default:
         g_assert_not_reached();
         break;
     }
 
-    virtio_msg_pack_get_config_resp(&msg_resp, size, offset, data);
+    virtio_msg_pack_get_config_resp(&msg_resp, size, offset,
+                                    vdev->generation, data);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
@@ -153,13 +158,10 @@ static void virtio_msg_set_config(VirtIOMSGProxy *s,
                                   VirtIOMSG *msg)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
-    uint8_t size = msg->set_config.size;
+    uint32_t size = msg->set_config.size;
     uint32_t offset = msg->set_config.offset;
     uint64_t data = msg->set_config.data;
     VirtIOMSG msg_resp;
-
-    /* Add the 3rd byte of offset.  */
-    offset += msg->set_config.offset_msb << 16;
 
     switch (size) {
     case 4:
@@ -176,7 +178,8 @@ static void virtio_msg_set_config(VirtIOMSGProxy *s,
         break;
     }
 
-    virtio_msg_pack_set_config_resp(&msg_resp, size, offset, data);
+    virtio_msg_pack_set_config_resp(&msg_resp, size, offset,
+                                    vdev->generation, data);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
@@ -187,12 +190,18 @@ static void virtio_msg_get_vqueue(VirtIOMSGProxy *s,
     VirtIOMSG msg_resp;
     uint32_t max_size = VIRTQUEUE_MAX_SIZE;
     uint32_t index = msg->get_vqueue.index;
+    hwaddr desc, avail, used;
+    uint32_t size;
 
-    if (!virtio_queue_get_num(vdev, index)) {
+    size = virtio_queue_get_num(vdev, index);
+    if (!size) {
         max_size = 0;
     }
 
-    virtio_msg_pack_get_vqueue_resp(&msg_resp, index, max_size);
+    virtio_queue_get_rings(vdev, index, &desc, &avail, &used);
+
+    virtio_msg_pack_get_vqueue_resp(&msg_resp, index, max_size, size,
+                                    desc, avail, used);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
@@ -200,13 +209,23 @@ static void virtio_msg_set_vqueue(VirtIOMSGProxy *s,
                                   VirtIOMSG *msg)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
+    hwaddr desc, avail, used;
+    VirtIOMSG msg_resp;
+    uint32_t index = msg->set_vqueue.index;
+    uint32_t size;
 
-    virtio_queue_set_num(vdev, msg->set_vqueue.index, msg->set_vqueue.size);
-    virtio_queue_set_rings(vdev, msg->set_vqueue.index,
+    virtio_queue_set_num(vdev, index, msg->set_vqueue.size);
+    virtio_queue_set_rings(vdev, index,
                            msg->set_vqueue.descriptor_addr,
                            msg->set_vqueue.driver_addr,
                            msg->set_vqueue.device_addr);
-    virtio_queue_enable(vdev, vdev->queue_sel);
+    virtio_queue_enable(vdev, index);
+
+    size = virtio_queue_get_num(vdev, index);
+    virtio_queue_get_rings(vdev, index, &desc, &avail, &used);
+    virtio_msg_pack_set_vqueue_resp(&msg_resp, index, size,
+                                    desc, avail, used);
+    virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
 static void virtio_msg_event_avail(VirtIOMSGProxy *s,
