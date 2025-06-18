@@ -145,7 +145,7 @@ static uint64_t vmpd_get_features(VirtIODevice *vdev, uint64_t f, Error **errp)
     VirtIOMSG msg, msg_resp;
 
     if (virtio_msg_bus_connected(&vpd->bus)) {
-        virtio_msg_pack_get_features(&msg, 0);
+        virtio_msg_pack_get_features(&msg, 0, 2);
         virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 
         f = msg_resp.get_features_resp.features;
@@ -159,7 +159,7 @@ static void vmpd_set_features(VirtIODevice *vdev, uint64_t f)
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
 
-    virtio_msg_pack_set_features(&msg, 0, f);
+    virtio_msg_pack_set_features(&msg, 0, 2, f);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 }
 
@@ -216,7 +216,8 @@ static void vmpd_write_config(VirtIODevice *vdev,
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
 
-    virtio_msg_pack_set_config(&msg, size, addr, val);
+    /* FIXME: Generation??  */
+    virtio_msg_pack_set_config(&msg, size, addr, 0, val);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 }
 
