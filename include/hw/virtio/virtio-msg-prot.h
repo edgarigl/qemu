@@ -39,8 +39,6 @@ enum {
 };
 
 enum {
-    VIRTIO_MSG_CONNECT           = 0x01,
-    VIRTIO_MSG_DISCONNECT        = 0x02,
     VIRTIO_MSG_DEVICE_INFO       = 0x03,
     VIRTIO_MSG_GET_FEATURES      = 0x04,
     VIRTIO_MSG_SET_FEATURES      = 0x05,
@@ -594,8 +592,6 @@ static inline const char *virtio_msg_id_to_str(unsigned int type)
 {
 #define VIRTIO_MSG_TYPE2STR(x) [ VIRTIO_MSG_ ## x ] = stringify(x)
     static const char *type2str[VIRTIO_MSG_MAX + 1] = {
-        VIRTIO_MSG_TYPE2STR(CONNECT),
-        VIRTIO_MSG_TYPE2STR(DISCONNECT),
         VIRTIO_MSG_TYPE2STR(DEVICE_INFO),
         VIRTIO_MSG_TYPE2STR(GET_FEATURES),
         VIRTIO_MSG_TYPE2STR(SET_FEATURES),

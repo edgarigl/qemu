@@ -40,16 +40,18 @@ virtio_msg_bus_xen_get_remote_as(VirtIOMSGBusDevice *bd)
 static void virtio_msg_bus_xen_recv(VirtIOMSGBusDevice *bd,
                                     VirtIOMSG *msg)
 {
-    VirtIOMSGBusXen *s = VIRTIO_MSG_BUS_XEN(bd);
-
     /* Need to unpack xen bus messages.  */
     virtio_msg_unpack(msg);
+
+#if 0
+    VirtIOMSGBusXen *s = VIRTIO_MSG_BUS_XEN(bd);
 
     if (msg->id == VIRTIO_MSG_CONNECT) {
         LE_TO_CPU(msg->connect_bus_xen.event_channel_port);
         virtio_msg_bus_xen_connect_evtchn(s,
                                    msg->connect_bus_xen.event_channel_port);
     }
+#endif
 }
 
 static void virtio_msg_bus_xen_process(VirtIOMSGBusDevice *bd) {
