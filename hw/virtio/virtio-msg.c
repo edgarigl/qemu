@@ -180,16 +180,6 @@ static void virtio_msg_set_config(VirtIOMSGProxy *s,
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
-static void virtio_msg_get_config_gen(VirtIOMSGProxy *s,
-                                      VirtIOMSG *msg)
-{
-    VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
-    VirtIOMSG msg_resp;
-
-    virtio_msg_pack_get_config_gen_resp(&msg_resp, vdev->generation);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
-}
-
 static void virtio_msg_get_vqueue(VirtIOMSGProxy *s,
                                   VirtIOMSG *msg)
 {
@@ -253,7 +243,6 @@ static const VirtIOMSGHandler msg_handlers[] = {
     [VIRTIO_MSG_SET_DEVICE_STATUS] = virtio_msg_set_device_status,
     [VIRTIO_MSG_GET_CONFIG] = virtio_msg_get_config,
     [VIRTIO_MSG_SET_CONFIG] = virtio_msg_set_config,
-    [VIRTIO_MSG_GET_CONFIG_GEN] = virtio_msg_get_config_gen,
     [VIRTIO_MSG_GET_VQUEUE] = virtio_msg_get_vqueue,
     [VIRTIO_MSG_SET_VQUEUE] = virtio_msg_set_vqueue,
     [VIRTIO_MSG_EVENT_AVAIL] = virtio_msg_event_avail,
