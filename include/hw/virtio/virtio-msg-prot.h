@@ -170,9 +170,7 @@ typedef struct VirtIOMSG {
         } QEMU_PACKED event_config;
         struct {
             uint32_t index;
-            /* FIXME: SPEC.  */
-            uint32_t next_offset;
-            uint32_t next_wrap;
+            uint32_t next_offset_wrap;
         } QEMU_PACKED event_avail;
         struct {
             uint32_t index;
@@ -325,8 +323,7 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
         break;
     case VIRTIO_MSG_EVENT_AVAIL:
         LE_TO_CPU(msg->event_avail.index);
-        LE_TO_CPU(msg->event_avail.next_offset);
-        LE_TO_CPU(msg->event_avail.next_wrap);
+        LE_TO_CPU(msg->event_avail.next_offset_wrap);
         break;
     case VIRTIO_MSG_EVENT_USED:
         LE_TO_CPU(msg->event_used.index);
@@ -594,14 +591,22 @@ static inline void virtio_msg_pack_set_vqueue_resp(VirtIOMSG *msg,
 static inline void virtio_msg_pack_event_avail(VirtIOMSG *msg,
                                                uint32_t index,
                                                uint32_t next_offset,
-                                               uint32_t next_wrap)
+                                               bool next_wrap)
 {
+    uint32_t next_ow;
+
     virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_AVAIL, 0, 0,
                            sizeof msg->event_avail);
 
+    /* next_offset is 31b wide.  */
+    assert((next_offset & 0x80000000U) == 0);
+
+    /* Pack the next_offset_wrap field. */
+    next_ow = next_wrap << 31;
+    next_ow |= next_offset;
+
     msg->event_avail.index = cpu_to_le32(index);
-    msg->event_avail.next_offset = cpu_to_le32(next_offset);
-    msg->event_avail.next_wrap = cpu_to_le32(next_wrap);
+    msg->event_avail.next_offset_wrap = cpu_to_le32(next_ow);
 }
 
 static inline void virtio_msg_pack_event_used(VirtIOMSG *msg, uint32_t index)
