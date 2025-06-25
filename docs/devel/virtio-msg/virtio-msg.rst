@@ -42,6 +42,35 @@ The proxy device that translates from mmio/pci to msg:
 The virtio-msg backend machine:
   hw/virtio/virtio-msg-machine.c
 
+Running Virtio-MSG with the generic AMP PCI device
+--------------------------------------------------
+
+Run your favourite PCI capable machine, e.g ARM virt or x86 pc or q35
+with these additional command-line options for a virtio-net device over
+virtio-msg:
+
+.. code-block:: bash
+
+   -device virtio-msg-amp-pci \
+   -device virtio-net-device,netdev=n1,bus=/q35-pcihost/pcie.0/virtio-msg-amp-pci/vmsg.0/virtio-msg/virtio-msg-proxy-bus.0 \
+   -netdev user,id=n1 \
+
+
+Here's a complete example with an x86 q35 machine:
+
+.. code-block:: bash
+
+   qemu-system-x86_64 -M q35 -m 2G \
+       -serial mon:stdio \
+       -nographic -display none \
+       -append 'rdinit=init console=ttyS0,115200,8n1 acpi=debug' \
+       -device virtio-msg-amp-pci \
+       -device virtio-net-device,netdev=n1,bus=/q35-pcihost/pcie.0/virtio-msg-amp-pci/vmsg.0/virtio-msg/virtio-msg-proxy-bus.0 \
+       -netdev user,id=n1 \
+       -kernel arch/x86/boot/bzImage \
+       -initrd xen-image-minimal-genericx86-64.rootfs.cpio.gz
+
+
 Running Virtio-MSG with the Linux-user msg-bus using two QEMU instances
 -----------------------------------------------------------------------
 
