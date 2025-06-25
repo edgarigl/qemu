@@ -232,6 +232,7 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *s,
                                    VirtIOMSG *msg)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
+    uint16_t vq_idx = msg->event_avail.index;
 
     if (!(vdev->status & VIRTIO_CONFIG_S_DRIVER_OK)) {
         VirtIOMSG msg_ev;
@@ -241,6 +242,28 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *s,
                                      0, 0, NULL);
         virtio_msg_bus_send(&s->msg_bus, &msg_ev, NULL);
         return;
+    }
+
+    if (vq_idx >= VIRTIO_QUEUE_MAX) {
+        virtio_error(vdev, "Notification to bad VQ!");
+        return;
+    }
+
+    if (!virtio_queue_get_num(vdev, vq_idx)) {
+        virtio_error(vdev, "Notification to unconfigured VQ!");
+        return;
+    }
+
+    if (virtio_vdev_has_feature(vdev, VIRTIO_F_NOTIFICATION_DATA)) {
+        VirtQueue *vq = virtio_get_queue(vdev, vq_idx);
+        bool wrap = msg->event_avail.next_offset_wrap & 0x80000000;
+        uint16_t offset = msg->event_avail.next_offset_wrap;
+        uint16_t data;
+
+        data = wrap << 15;
+        data |= offset & 0x7fff;
+
+        virtio_queue_set_shadow_avail_idx(vq, data);
     }
     virtio_queue_notify(vdev, msg->event_avail.index);
 }
