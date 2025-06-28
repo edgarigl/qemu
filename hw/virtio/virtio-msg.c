@@ -256,9 +256,17 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *s,
 
     if (virtio_vdev_has_feature(vdev, VIRTIO_F_NOTIFICATION_DATA)) {
         VirtQueue *vq = virtio_get_queue(vdev, vq_idx);
-        bool wrap = msg->event_avail.next_offset_wrap & 0x80000000;
-        uint16_t offset = msg->event_avail.next_offset_wrap;
+        uint32_t next_offset_wrap = msg->event_avail.next_offset_wrap;
+        uint16_t qsize = virtio_queue_get_num(vdev, vq_idx);
+        uint32_t offset = next_offset_wrap & 0x7fffffff;
+        bool wrap = next_offset_wrap & 0x80000000;
         uint16_t data;
+
+        if (offset > 0x7fff || offset >= qsize) {
+            virtio_error(vdev, "Next offset to large!");
+            /* Bail out without notification???  */
+            return;
+        }
 
         data = wrap << 15;
         data |= offset & 0x7fff;
