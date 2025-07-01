@@ -521,8 +521,8 @@ static char *virtio_msg_bus_get_dev_path(DeviceState *dev)
     proxy_path = qdev_get_dev_path(DEVICE(virtio_msg_proxy));
 
     if (!proxy_path) {
-        /* max_dev == 1 */
-        proxy_path = g_strdup("/1");
+        const char *path = object_get_canonical_path(OBJECT(virtio_msg_proxy));
+        proxy_path = strdup(path);
     }
     return proxy_path;
 }
