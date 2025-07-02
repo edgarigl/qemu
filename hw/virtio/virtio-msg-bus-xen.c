@@ -188,7 +188,6 @@ static void virtio_msg_bus_xen_connect(VirtIOMSGBusXen *s, Error **errp)
     /* Done.  */
     s->xen.shm = user_va;
     s->xen.port = port;
-    printf("%s: rc=%d gfn=%lx port=%d\n", __func__, rc, gfn, port);
 }
 
 static void virtio_msg_bus_xen_realize(DeviceState *dev, Error **errp)
@@ -225,8 +224,6 @@ static void virtio_msg_bus_xen_realize(DeviceState *dev, Error **errp)
     assert(s->shm_queues.device);
 
     virtio_msg_bus_xen_connect_evtchn(s, s->xen.port);
-
-    printf("%s: DONE\n", __func__);
 }
 
 static const Property virtio_msg_bus_xen_props[] = {
