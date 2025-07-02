@@ -16,7 +16,7 @@
 #include <xen/ctype.h>
 #include <xen/stringify.h>
 #include <xen/bug.h>
-#include <xen/virtio_config.h>
+#include <xen/virtio/std/virtio_config.h>
 #include <asm/byteorder.h>
 #define assert ASSERT
 #define QEMU_PACKED __packed
