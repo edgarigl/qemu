@@ -333,7 +333,7 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
         break;
     default:
         break;
-    } 
+    }
 }
 
 static inline size_t virtio_msg_header_size(void)
