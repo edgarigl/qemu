@@ -254,7 +254,8 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *s,
         return;
     }
 
-    if (virtio_vdev_has_feature(vdev, VIRTIO_F_NOTIFICATION_DATA)) {
+    /* NOTIFICATION_DATA doesn't exist in QEMU 8.2.7. if (0) it */
+    if (virtio_vdev_has_feature(vdev, VIRTIO_F_NOTIFICATION_DATA) && 0) {
         VirtQueue *vq = virtio_get_queue(vdev, vq_idx);
         uint32_t next_offset_wrap = msg->event_avail.next_offset_wrap;
         uint16_t qsize = virtio_queue_get_num(vdev, vq_idx);
