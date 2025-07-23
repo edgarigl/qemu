@@ -17,6 +17,7 @@ typedef hwaddr (*phys_offset_to_gaddr_t)(hwaddr phys_offset,
                                          ram_addr_t size);
 #ifdef CONFIG_XEN
 
+bool xen_map_cache_enabled(void);
 void xen_map_cache_init(phys_offset_to_gaddr_t f,
                         void *opaque);
 uint8_t *xen_map_cache(hwaddr phys_addr, hwaddr size,
@@ -30,6 +31,11 @@ uint8_t *xen_replace_cache_entry(hwaddr old_phys_addr,
 MemoryRegion *xen_init_grant_ram(void);
 
 #else
+
+static inline bool xen_map_cache_enabled(void)
+{
+    return false;
+}
 
 static inline void xen_map_cache_init(phys_offset_to_gaddr_t f,
                                       void *opaque)

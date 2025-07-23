@@ -80,6 +80,12 @@ typedef struct MapCache {
 
 static MapCache *mapcache;
 
+bool xen_map_cache_enabled(void)
+{
+    /* Map cache enabled implies xen_enabled().  */
+    return xen_enabled() && mapcache;
+}
+
 static inline void mapcache_lock(void)
 {
     qemu_mutex_lock(&mapcache->lock);
