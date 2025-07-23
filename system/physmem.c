@@ -569,7 +569,9 @@ MemoryRegion *flatview_translate(FlatView *fv, hwaddr addr, hwaddr *xlat,
                                     is_write, true, &as, attrs);
     mr = section.mr;
 
-    if (xen_enabled() && memory_access_is_direct(mr, is_write)) {
+    if (xen_map_cache_enabled() &&
+        memory_access_is_direct(mr, is_write)) {
+        /* mapcache: Next page may be unmapped or in a different bucket/VA. */
         hwaddr page = ((addr & TARGET_PAGE_MASK) + TARGET_PAGE_SIZE) - addr;
         *plen = MIN(page, *plen);
     }
@@ -2067,7 +2069,7 @@ static void reclaim_ramblock(RAMBlock *block)
 {
     if (block->flags & RAM_PREALLOC) {
         ;
-    } else if (xen_enabled()) {
+    } else if (xen_map_cache_enabled()) {
         xen_invalidate_map_cache_entry(block->host);
 #ifndef _WIN32
     } else if (block->fd >= 0) {
@@ -2170,7 +2172,7 @@ static void *qemu_ram_ptr_length(RAMBlock *ram_block, ram_addr_t addr,
         len = *size;
     }
 
-    if (xen_enabled() && block->host == NULL) {
+    if (xen_map_cache_enabled() && block->host == NULL) {
         /* We need to check if the requested address is in the RAM
          * because we don't want to map the entire memory in QEMU.
          * In that case just map the requested area.
@@ -2214,7 +2216,7 @@ RAMBlock *qemu_ram_block_from_host(void *ptr, bool round_offset,
     RAMBlock *block;
     uint8_t *host = ptr;
 
-    if (xen_enabled()) {
+    if (xen_map_cache_enabled()) {
         ram_addr_t ram_addr;
 
         RCU_READ_LOCK_GUARD();
@@ -3198,7 +3200,7 @@ void address_space_unmap(AddressSpace *as, void *buffer, hwaddr len,
             if (is_write) {
                 invalidate_and_set_dirty(mr, addr1, access_len);
             }
-            if (xen_enabled()) {
+            if (xen_map_cache_enabled()) {
                 xen_invalidate_map_cache_entry(buffer);
             }
         }
@@ -3316,7 +3318,7 @@ void address_space_cache_destroy(MemoryRegionCache *cache)
     if (mr->ops && mr->ops->unmap) {
             mr->ops->unmap(mr, cache->ptr, cache->xlat, cache->len,
                            cache->is_write, cache->len);
-    } else if (xen_enabled()) {
+    } else if (xen_map_cache_enabled()) {
         xen_invalidate_map_cache_entry(cache->ptr);
     }
 
