@@ -375,6 +375,8 @@ uint8_t *xen_map_cache(hwaddr phys_addr, hwaddr size,
 {
     uint8_t *p;
 
+    assert(mapcache);
+
     mapcache_lock();
     p = xen_map_cache_unlocked(phys_addr, size, lock, dma);
     mapcache_unlock();
@@ -495,6 +497,8 @@ static void xen_invalidate_map_cache_entry_bh(void *opaque)
 
 void coroutine_mixed_fn xen_invalidate_map_cache_entry(uint8_t *buffer)
 {
+    assert(mapcache);
+
     if (qemu_in_coroutine()) {
         XenMapCacheData data = {
             .co = qemu_coroutine_self(),
@@ -514,6 +518,8 @@ void xen_invalidate_map_cache(void)
 {
     unsigned long i;
     MapCacheRev *reventry;
+
+    assert(mapcache);
 
     /* Flush pending AIO before destroying the mapcache */
     bdrv_drain_all();
@@ -611,6 +617,8 @@ uint8_t *xen_replace_cache_entry(hwaddr old_phys_addr,
                                  hwaddr size)
 {
     uint8_t *p;
+
+    assert(mapcache);
 
     mapcache_lock();
     p = xen_replace_cache_entry_unlocked(old_phys_addr, new_phys_addr, size);
@@ -764,6 +772,8 @@ static ram_addr_t xen_ram_addr_from_grant_cache(void *ptr)
 ram_addr_t xen_ram_addr_from_mapcache(void *ptr)
 {
     ram_addr_t raddr;
+
+    assert(mapcache);
 
     raddr = xen_ram_addr_from_mapcache_try(ptr);
     if (raddr == RAM_ADDR_INVALID) {
