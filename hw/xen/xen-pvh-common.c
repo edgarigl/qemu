@@ -29,11 +29,42 @@ static const MemoryListener xen_memory_listener = {
     .priority = MEMORY_LISTENER_PRIORITY_ACCEL,
 };
 
+static void *xen_map_guest_ram(XenPVHMachineState *s,
+                               uint64_t addr, uint64_t size)
+{
+    uint64_t nb_pfn = size  >> XC_PAGE_SHIFT;
+    g_autofree xen_pfn_t *pfns = NULL;
+    void *p = NULL;
+    uint64_t i;
+
+    pfns = g_new0(xen_pfn_t, nb_pfn);
+    if (!pfns) {
+        goto done;
+    }
+
+    for (i = 0; i < nb_pfn; i++) {
+        pfns[i] = (addr >> XC_PAGE_SHIFT) + i;
+    }
+
+    p = xenforeignmemory_map2(xen_fmem, xen_domid, NULL,
+                              PROT_READ | PROT_WRITE, 0,
+                              nb_pfn, pfns, NULL);
+done:
+    if (!p) {
+        /* We can't recover from this.  */
+        error_report("FATAL: Failed to foreign-map %" PRIx64 " - %" PRIx64,
+                     addr, addr + size);
+        exit(EXIT_FAILURE);
+    }
+    return p;
+}
+
 static void xen_pvh_init_ram(XenPVHMachineState *s,
                              MemoryRegion *sysmem)
 {
     MachineState *ms = MACHINE(s);
     ram_addr_t block_len, ram_size[2];
+    void *p;
 
     if (ms->ram_size <= s->cfg.ram_low.size) {
         ram_size[0] = ms->ram_size;
@@ -45,22 +76,40 @@ static void xen_pvh_init_ram(XenPVHMachineState *s,
         block_len = s->cfg.ram_high.base + ram_size[1];
     }
 
-    memory_region_init_ram(&xen_memory, NULL, "xen.ram", block_len,
-                           &error_fatal);
+    if (s->cfg.mapcache) {
+        memory_region_init_ram(&xen_memory, NULL, "xen.ram",
+                               block_len, &error_fatal);
+        memory_region_init_alias(&s->ram.low, NULL, "xen.ram.lo", &xen_memory,
+                                 s->cfg.ram_low.base, ram_size[0]);
+        if (ram_size[1] > 0) {
+            memory_region_init_alias(&s->ram.high, NULL, "xen.ram.hi",
+                                     &xen_memory,
+                                     s->cfg.ram_high.base, ram_size[1]);
+        }
+    } else {
+        p = xen_map_guest_ram(s, s->cfg.ram_low.base, ram_size[0]);
+        memory_region_init_ram_ptr(&s->ram.low, NULL, "xen.ram.lo",
+                                   ram_size[0], p);
+        if (ram_size[1] > 0) {
+            p = xen_map_guest_ram(s, s->cfg.ram_high.base, ram_size[1]);
+            memory_region_init_ram_ptr(&s->ram.high, NULL, "xen.ram.hi",
+                                       ram_size[1], p);
+        }
+    }
 
-    memory_region_init_alias(&s->ram.low, NULL, "xen.ram.lo", &xen_memory,
-                             s->cfg.ram_low.base, ram_size[0]);
+    /* Map them onto QEMU's address-space.  */
     memory_region_add_subregion(sysmem, s->cfg.ram_low.base, &s->ram.low);
     if (ram_size[1] > 0) {
-        memory_region_init_alias(&s->ram.high, NULL, "xen.ram.hi", &xen_memory,
-                                 s->cfg.ram_high.base, ram_size[1]);
         memory_region_add_subregion(sysmem, s->cfg.ram_high.base, &s->ram.high);
     }
 
-    /* Setup support for grants.  */
-    memory_region_init_ram(&xen_grants, NULL, "xen.grants", block_len,
-                           &error_fatal);
-    memory_region_add_subregion(sysmem, XEN_GRANT_ADDR_OFF, &xen_grants);
+    /* Grants are only supported when the mapcache is on.  */
+    if (s->cfg.mapcache) {
+        /* Setup support for grants.  */
+        memory_region_init_ram(&xen_grants, NULL, "xen.grants", block_len,
+                &error_fatal);
+        memory_region_add_subregion(sysmem, XEN_GRANT_ADDR_OFF, &xen_grants);
+    }
 }
 
 static void xen_set_irq(void *opaque, int irq, int level)
@@ -196,7 +245,7 @@ static void xen_pvh_init(MachineState *ms)
     xen_register_ioreq(&s->ioreq, ms->smp.max_cpus,
                        xpc->handle_bufioreq,
                        &xen_memory_listener,
-                       true);
+                       s->cfg.mapcache);
 
     if (s->cfg.virtio_mmio_num) {
         xen_create_virtio_mmio_devices(s);
@@ -278,6 +327,20 @@ XEN_PVH_PROP_MEMMAP(pci_ecam)
 XEN_PVH_PROP_MEMMAP(pci_mmio)
 XEN_PVH_PROP_MEMMAP(pci_mmio_high)
 
+static void xen_pvh_set_mapcache(Object *obj, bool value, Error **errp)
+{
+    XenPVHMachineState *xp = XEN_PVH_MACHINE(obj);
+
+    xp->cfg.mapcache = value;
+}
+
+static bool xen_pvh_get_mapcache(Object *obj, Error **errp)
+{
+    XenPVHMachineState *xp = XEN_PVH_MACHINE(obj);
+
+    return xp->cfg.mapcache;
+}
+
 static void xen_pvh_set_pci_intx_irq_base(Object *obj, Visitor *v,
                                           const char *name, void *opaque,
                                           Error **errp)
@@ -331,6 +394,12 @@ do {                                                                      \
         OC_MEMMAP_PROP_SIZE(c, prop_name, name);                          \
 } while (0)
 
+    object_class_property_add_bool(oc, "mapcache", xen_pvh_get_mapcache,
+                                   xen_pvh_set_mapcache);
+    object_class_property_set_description(oc, "mapcache",
+                                      "Set on/off to enable/disable the "
+                                      "mapcache");
+
     /*
      * We provide memmap properties to allow Xen to move things to other
      * addresses for example when users need to accomodate the memory-map
@@ -370,6 +439,13 @@ do {                                                                      \
 #endif
 }
 
+static void xen_pvh_instance_init(Object *obj)
+{
+    XenPVHMachineState *xp = XEN_PVH_MACHINE(obj);
+
+    xp->cfg.mapcache = true;
+}
+
 static void xen_pvh_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -388,6 +464,7 @@ static const TypeInfo xen_pvh_info = {
     .parent = TYPE_MACHINE,
     .abstract = true,
     .instance_size = sizeof(XenPVHMachineState),
+    .instance_init = xen_pvh_instance_init,
     .class_size = sizeof(XenPVHMachineClass),
     .class_init = xen_pvh_class_init,
 };
