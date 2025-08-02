@@ -65,9 +65,7 @@ static void xen_pvh_init_ram(XenPVHMachineState *s,
 
 static void xen_set_irq(void *opaque, int irq, int level)
 {
-    if (xendevicemodel_set_irq_level(xen_dmod, xen_domid, irq, level)) {
-        error_report("xendevicemodel_set_irq_level failed");
-    }
+    xen_set_isa_irq_level(xen_domid, irq, level);
 }
 
 static void xen_create_virtio_mmio_devices(XenPVHMachineState *s)
