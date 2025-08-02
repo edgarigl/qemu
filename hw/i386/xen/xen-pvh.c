@@ -59,6 +59,10 @@ static void xen_pvh_instance_init(Object *obj)
     s->cfg.ram_low = (MemMapEntry) { 0x0, 0x80000000U };
     s->cfg.ram_high = (MemMapEntry) { 0xC000000000ULL, 0x4000000000ULL };
     s->cfg.pci_intx_irq_base = 16;
+
+    s->cfg.virtio_mmio_num = 4;
+    s->cfg.virtio_mmio_irq_base = 12;
+    s->cfg.virtio_mmio = (MemMapEntry) { 0x100000000, 0x100 };
 }
 
 /*
@@ -105,6 +109,7 @@ static void xen_pvh_machine_class_init(ObjectClass *oc, const void *data)
 
     /* List of supported features known to work on PVH x86.  */
     xpc->has_pci = true;
+    xpc->has_virtio_mmio = true;
 
     xen_pvh_class_setup_common_props(xpc);
 }
