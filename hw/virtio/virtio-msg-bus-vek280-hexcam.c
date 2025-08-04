@@ -105,8 +105,10 @@ static void vek280_interrupt(void *opaque)
     VirtIOMSGBusVEK280HexCam *s = VIRTIO_MSG_BUS_VEK280_HEXCAM(opaque);
     VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(opaque);
     uint32_t r;
-//    vek280_mask_interrupt(s, true);
+    vek280_mask_interrupt(s, true);
 
+    /* FIXME: Missing IRQ? */
+    if (0) {
     do {
         /* ACK the interrupt.  */
         vek280_write32(s->msg.irq, 0x0);
@@ -114,8 +116,8 @@ static void vek280_interrupt(void *opaque)
         virtio_msg_bus_process(bd);
         r = vek280_read32(s->msg.irq);
     } while (r & 1);
-
-//    vek280_mask_interrupt(s, false);
+    }
+    vek280_mask_interrupt(s, false);
 }
 
 static int virtio_msg_bus_vek280_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req,
@@ -276,7 +278,7 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
     assert(s->msg.doorbell != MAP_FAILED);
 
     s->msg.cfg_bram = mmap(0, 8 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
-                           s->msg.fd_devmem, 0x020200004000ULL);
+                           s->msg.fd_devmem, 0x020100004000ULL);
     assert(s->msg.cfg_bram != MAP_FAILED);
 
     s->msg.irq = mmap(0, 4 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
