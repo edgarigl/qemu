@@ -126,7 +126,7 @@ static void vmsg_create_bus(VmsgAmpPciState *s, unsigned int i)
     struct fifo_bus *fifo = &s->fifo[i];
     g_autofree char *name = g_strdup_printf("vmsg.%d", i);
 
-    qbus_init(&fifo->bus, sizeof(fifo->bus), TYPE_SYSTEM_BUS, dev, name);
+    qbus_init(&fifo->bus, sizeof(fifo->bus), TYPE_VIRTIO_MSG_TP_BUS, dev, name);
 
     /* Create the proxy.  */
     object_initialize_child(o, "proxy[*]", &fifo->proxy, TYPE_VIRTIO_MSG);

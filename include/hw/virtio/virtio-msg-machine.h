@@ -8,6 +8,7 @@
 struct VirtIOMSGMachineState {
     MachineState parent_obj;
 
+    BusState bus;
     VirtIOMSGProxy backends[4];
 };
 

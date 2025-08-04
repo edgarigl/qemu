@@ -75,6 +75,7 @@ struct XenPVHMachineState {
     } pci;
 
     struct {
+        BusState bus;
         VirtIOMSGProxy backends[16];
     } virtio_msg;
 
