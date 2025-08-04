@@ -21,8 +21,11 @@ DECLARE_OBJ_CHECKERS(VirtioBusState, VirtioBusClass,
 #define TYPE_VIRTIO_MSG "virtio-msg"
 OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMSGProxy, VIRTIO_MSG)
 
+/* This is a BUS to hold VirtIOMSG transports */
+#define TYPE_VIRTIO_MSG_TP_BUS "virtio-msg-tp-bus"
+
 struct VirtIOMSGProxy {
-    SysBusDevice parent_obj;
+    DeviceState parent_obj;
 
     AddressSpace dma_as;
     AddressSpace *bus_as;

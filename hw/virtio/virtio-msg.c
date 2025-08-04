@@ -454,6 +454,7 @@ static void virtio_msg_class_init(ObjectClass *klass, void *data)
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->realize = virtio_msg_realize;
+    dc->bus_type = TYPE_BUS;
     dc->user_creatable = true;
     rc->phases.hold  = virtio_msg_reset_hold;
 
@@ -462,7 +463,7 @@ static void virtio_msg_class_init(ObjectClass *klass, void *data)
 
 static const TypeInfo virtio_msg_info = {
     .name          = TYPE_VIRTIO_MSG,
-    .parent        = TYPE_SYS_BUS_DEVICE,
+    .parent        = TYPE_DEVICE,
     .instance_size = sizeof(VirtIOMSGProxy),
     .class_init    = virtio_msg_class_init,
 };
@@ -539,12 +540,21 @@ static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
     bus_class->get_dev_path = virtio_msg_bus_get_dev_path;
 }
 
-static const TypeInfo virtio_msg_bus_info = {
+static const TypeInfo virtio_msg_bus_types[] = {
+    {
     .name          = TYPE_VIRTIO_MSG_PROXY_BUS,
     .parent        = TYPE_VIRTIO_BUS,
     .instance_size = sizeof(VirtioBusState),
     .class_init    = virtio_msg_bus_class_init,
+    },
+    {
+        .name           = TYPE_VIRTIO_MSG_TP_BUS,
+        .parent         = TYPE_BUS,
+        .instance_size  = sizeof(BusState),
+    },
 };
+
+DEFINE_TYPES(virtio_msg_bus_types);
 
 static void virtio_msg_iommu_memory_region_class_init(ObjectClass *klass,
                                                       void *data)
@@ -563,7 +573,6 @@ static const TypeInfo virtio_msg_iommu_info = {
 static void virtio_msg_register_types(void)
 {
     type_register_static(&virtio_msg_iommu_info);
-    type_register_static(&virtio_msg_bus_info);
     type_register_static(&virtio_msg_info);
 }
 
