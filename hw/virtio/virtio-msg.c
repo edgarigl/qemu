@@ -303,7 +303,7 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     VirtIOMSGProxy *s = VIRTIO_MSG(bd->opaque);
     VirtIOMSGHandler handler;
 
-    //virtio_msg_print(msg);
+    virtio_msg_print(msg);
     if (msg->msg_id > ARRAY_SIZE(msg_handlers)) {
         return VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID;
     }
@@ -447,6 +447,18 @@ static void virtio_msg_realize(DeviceState *d, Error **errp)
     address_space_init(&s->dma_as, MEMORY_REGION(&s->mr_iommu), "dma");
 }
 
+static void virtio_msg_sb_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
+
+    dc->realize = virtio_msg_realize;
+    dc->user_creatable = true;
+    rc->phases.hold  = virtio_msg_reset_hold;
+
+    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+}
+
 static void virtio_msg_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -460,12 +472,21 @@ static void virtio_msg_class_init(ObjectClass *klass, const void *data)
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 
-static const TypeInfo virtio_msg_info = {
-    .name          = TYPE_VIRTIO_MSG,
-    .parent        = TYPE_DEVICE,
-    .instance_size = sizeof(VirtIOMSGProxy),
-    .class_init    = virtio_msg_class_init,
+static const TypeInfo virtio_msg_types[] = {
+    {
+        .name          = TYPE_VIRTIO_MSG,
+        .parent        = TYPE_DEVICE,
+        .instance_size = sizeof(VirtIOMSGProxy),
+        .class_init    = virtio_msg_class_init,
+    },
+    {
+        .name          = TYPE_VIRTIO_MSG_SB_WRAPPER,
+        .parent        = TYPE_SYS_BUS_DEVICE,
+        .instance_size = sizeof(VirtIOMSGProxy),
+        .class_init    = virtio_msg_sb_class_init,
+    }
 };
+DEFINE_TYPES(virtio_msg_types);
 
 static IOMMUTLBEntry virtio_msg_iommu_translate(IOMMUMemoryRegion *iommu,
                                                 hwaddr addr,
@@ -541,10 +562,10 @@ static void virtio_msg_bus_class_init(ObjectClass *klass, const void *data)
 
 static const TypeInfo virtio_msg_bus_types[] = {
     {
-    .name          = TYPE_VIRTIO_MSG_PROXY_BUS,
-    .parent        = TYPE_VIRTIO_BUS,
-    .instance_size = sizeof(VirtioBusState),
-    .class_init    = virtio_msg_bus_class_init,
+        .name          = TYPE_VIRTIO_MSG_PROXY_BUS,
+        .parent        = TYPE_VIRTIO_BUS,
+        .instance_size = sizeof(VirtioBusState),
+        .class_init    = virtio_msg_bus_class_init,
     },
     {
         .name           = TYPE_VIRTIO_MSG_TP_BUS,
@@ -572,7 +593,6 @@ static const TypeInfo virtio_msg_iommu_info = {
 static void virtio_msg_register_types(void)
 {
     type_register_static(&virtio_msg_iommu_info);
-    type_register_static(&virtio_msg_info);
 }
 
 type_init(virtio_msg_register_types)
