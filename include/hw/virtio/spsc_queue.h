@@ -1,7 +1,9 @@
-// Single Producer Single Consumer Queue implemented over shared-memory
-
-// Copyright (c) 2023 Zero ASIC Corporation
-// This code is licensed under Apache License 2.0 (see LICENSE for details)
+/*
+ * Hardened implementation of the Single Producer Single Consumer Queue
+ * implemented over shared-memory.
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ */
 
 #ifndef SPSC_QUEUE_H__
 #define SPSC_QUEUE_H__
