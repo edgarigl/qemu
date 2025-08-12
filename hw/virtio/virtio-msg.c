@@ -204,8 +204,7 @@ static void virtio_msg_get_vqueue(VirtIOMSGProxy *s,
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
-static void virtio_msg_set_vqueue(VirtIOMSGProxy *s,
-                                  VirtIOMSG *msg)
+static void virtio_msg_set_vqueue(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
     hwaddr desc, avail, used;
@@ -224,6 +223,18 @@ static void virtio_msg_set_vqueue(VirtIOMSGProxy *s,
     virtio_queue_get_rings(vdev, index, &desc, &avail, &used);
     virtio_msg_pack_set_vqueue_resp(&msg_resp, index, size,
                                     desc, avail, used);
+    virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
+}
+
+static void virtio_msg_reset_vqueue(VirtIOMSGProxy *s, VirtIOMSG *msg)
+{
+    VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
+    VirtIOMSG msg_resp;
+
+    virtio_queue_reset(vdev,  msg->reset_vqueue.index);
+
+    printf("%s:%d\n", __func__, __LINE__);
+    virtio_msg_pack_reset_vqueue_resp(&msg_resp);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
@@ -295,6 +306,7 @@ static const VirtIOMSGHandler msg_handlers[] = {
     [VIRTIO_MSG_SET_CONFIG] = virtio_msg_set_config,
     [VIRTIO_MSG_GET_VQUEUE] = virtio_msg_get_vqueue,
     [VIRTIO_MSG_SET_VQUEUE] = virtio_msg_set_vqueue,
+    [VIRTIO_MSG_RESET_VQUEUE] = virtio_msg_reset_vqueue,
     [VIRTIO_MSG_EVENT_AVAIL] = virtio_msg_event_avail,
     [VIRTIO_MSG_IOMMU_ENABLE] = virtio_msg_iommu_enable,
 };
