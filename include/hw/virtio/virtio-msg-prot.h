@@ -317,6 +317,9 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
         LE_TO_CPU(msg->set_vqueue.driver_addr);
         LE_TO_CPU(msg->set_vqueue.device_addr);
         break;
+    case VIRTIO_MSG_RESET_VQUEUE:
+        LE_TO_CPU(msg->reset_vqueue.index);
+        break;
     case VIRTIO_MSG_EVENT_CONFIG:
         LE_TO_CPU(msg->event_config.status);
         LE_TO_CPU(msg->event_config.offset);
@@ -549,6 +552,20 @@ static inline void virtio_msg_pack_get_vqueue_resp(VirtIOMSG *msg,
     msg->get_vqueue_resp.descriptor_addr = cpu_to_le64(descriptor_addr);
     msg->get_vqueue_resp.driver_addr = cpu_to_le64(driver_addr);
     msg->get_vqueue_resp.device_addr = cpu_to_le64(device_addr);
+}
+
+static inline void virtio_msg_pack_reset_vqueue(VirtIOMSG *msg, uint32_t index)
+{
+    virtio_msg_pack_header(msg, VIRTIO_MSG_RESET_VQUEUE, 0, 0,
+                           sizeof msg->reset_vqueue);
+
+    msg->reset_vqueue.index = cpu_to_le32(index);
+}
+
+static inline void virtio_msg_pack_reset_vqueue_resp(VirtIOMSG *msg)
+{
+    virtio_msg_pack_header(msg, VIRTIO_MSG_RESET_VQUEUE,
+                           VIRTIO_MSG_TYPE_RESPONSE, 0, 0);
 }
 
 static inline void virtio_msg_pack_set_vqueue(VirtIOMSG *msg,
