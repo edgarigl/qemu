@@ -74,15 +74,13 @@ static void xen_create_virtio_msg_devices(XenPVHMachineState *s)
 {
     int i;
 
-    object_initialize_child(OBJECT(s), "vmsg[*]", &s->virtio_msg.bus,
-                            TYPE_VIRTIO_MSG_TP_BUS);
-
     for (i = 0; i < ARRAY_SIZE(s->virtio_msg.backends); i++) {
         object_initialize_child(OBJECT(s), "backend[*]",
                                 &s->virtio_msg.backends[i],
-                                TYPE_VIRTIO_MSG);
-       qdev_realize(DEVICE(&s->virtio_msg.backends[i]), &s->virtio_msg.bus,
-                    &error_fatal);
+                                TYPE_VIRTIO_MSG_SB_WRAPPER);
+
+        sysbus_realize(SYS_BUS_DEVICE(&s->virtio_msg.backends[i]),
+                       &error_fatal);
     }
 }
 
