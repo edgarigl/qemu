@@ -17,7 +17,7 @@
 #include <xen/stringify.h>
 #include <xen/bug.h>
 #include <xen/virtio/std/virtio_config.h>
-#include <asm/byteorder.h>
+#include <xen/byteorder.h>
 #define assert ASSERT
 #define QEMU_PACKED __packed
 #define g_assert_not_reached ASSERT_UNREACHABLE
