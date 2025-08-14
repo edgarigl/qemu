@@ -11,13 +11,10 @@ static void virtio_msg_machine_init(MachineState *machine)
     VirtIOMSGMachineState *s = VIRTIO_MSG_MACHINE(machine);
     int i;
 
-    object_initialize_child(OBJECT(s), "vmsg[*]", &s->bus,
-                            TYPE_VIRTIO_MSG_TP_BUS);
-
     for (i = 0; i < ARRAY_SIZE(s->backends); i++) {
         object_initialize_child(OBJECT(s), "backend[*]", &s->backends[i],
-                                TYPE_VIRTIO_MSG);
-        qdev_realize(DEVICE(&s->backends[i]), &s->bus, &error_fatal);
+                                TYPE_VIRTIO_MSG_SB_WRAPPER);
+        sysbus_realize(SYS_BUS_DEVICE(&s->backends[i]), &error_fatal);
     }
 }
 
