@@ -250,7 +250,7 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *s,
         VirtIOMSG msg_ev;
 
         virtio_error(vdev, "Notification while driver not OK?");
-        virtio_msg_pack_event_config(&msg_ev, vdev->status,
+        virtio_msg_pack_event_config(&msg_ev, vdev->status, vdev->generation,
                                      0, 0, NULL);
         virtio_msg_bus_send(&s->msg_bus, &msg_ev, NULL);
         return;
@@ -364,7 +364,8 @@ static void virtio_msg_notify(DeviceState *opaque, uint16_t vector)
 
     /* Check if we're notifying for VQ or CONFIG updates.  */
     if (vdev->isr & 2) {
-        virtio_msg_pack_event_config(&msg, vdev->status, 0, 0, NULL);
+        virtio_msg_pack_event_config(&msg, vdev->status, vdev->generation,
+                                     0, 0, NULL);
         virtio_msg_bus_send(&s->msg_bus, &msg, NULL);
     }
 }
