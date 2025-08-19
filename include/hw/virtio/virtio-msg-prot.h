@@ -671,7 +671,8 @@ static inline void virtio_msg_pack_iommu_translate_resp(VirtIOMSG *msg,
  */
 static inline bool virtio_msg_is_resp(VirtIOMSG *msg_req, VirtIOMSG *msg_resp)
 {
-    if (msg_resp->msg_id == msg_req->msg_id &&
+    if (msg_resp->dev_num == msg_req->dev_num &&
+        msg_resp->msg_id == msg_req->msg_id &&
         msg_resp->type & VIRTIO_MSG_TYPE_RESPONSE) {
         return true;
     }
