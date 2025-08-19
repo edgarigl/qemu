@@ -272,7 +272,7 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
  * @msg: the virtio message to unpack
  *
  * Virtio messages arriving on the virtio message bus have a specific
- * formate (little-endian, packet encoding, etc). To simplify for the
+ * format (little-endian, packet encoding, etc). To simplify for the
  * the rest of the implementation, we have packers and unpackers that
  * convert the wire messages into host versions. This includes endianess
  * conversion and potentially future decoding and expansion.
