@@ -429,7 +429,7 @@ static inline void virtio_msg_pack_set_features_resp(VirtIOMSG *msg,
                            sizeof msg->set_features_resp);
 
     msg->set_features_resp.index = cpu_to_le32(index);
-    msg->set_features_resp.num = cpu_to_le32(index);
+    msg->set_features_resp.num = cpu_to_le32(num);
     msg->set_features_resp.features = cpu_to_le64(f);
 }
 
