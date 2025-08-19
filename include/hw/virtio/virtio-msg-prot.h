@@ -80,6 +80,9 @@ typedef struct VirtIOMSG {
             uint32_t vendor_id;
             uint32_t num_feature_bits;
             uint32_t config_size;
+            uint32_t max_vqs;
+            uint16_t admin_vq_idx;
+            uint16_t admin_vq_count;
         } QEMU_PACKED get_device_info_resp;
         struct {
             uint32_t index;
@@ -232,6 +235,9 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
         LE_TO_CPU(msg->get_device_info_resp.vendor_id);
         LE_TO_CPU(msg->get_device_info_resp.num_feature_bits);
         LE_TO_CPU(msg->get_device_info_resp.config_size);
+        LE_TO_CPU(msg->get_device_info_resp.max_vqs);
+        LE_TO_CPU(msg->get_device_info_resp.admin_vq_idx);
+        LE_TO_CPU(msg->get_device_info_resp.admin_vq_count);
         break;
     case VIRTIO_MSG_GET_FEATURES:
         LE_TO_CPU(msg->get_features_resp.index);
@@ -370,7 +376,10 @@ static inline void virtio_msg_pack_get_device_info_resp(VirtIOMSG *msg,
                                                    uint32_t dev_num,
                                                    uint32_t vendor_id,
                                                    uint32_t num_feature_bits,
-                                                   uint32_t config_size)
+                                                   uint32_t config_size,
+                                                   uint32_t max_vqs,
+                                                   uint16_t admin_vq_idx,
+                                                   uint16_t admin_vq_count)
 {
     virtio_msg_pack_header(msg, VIRTIO_MSG_DEVICE_INFO,
                            VIRTIO_MSG_TYPE_RESPONSE, 0,
@@ -380,6 +389,9 @@ static inline void virtio_msg_pack_get_device_info_resp(VirtIOMSG *msg,
     msg->get_device_info_resp.vendor_id = cpu_to_le32(vendor_id);
     msg->get_device_info_resp.num_feature_bits = cpu_to_le32(num_feature_bits);
     msg->get_device_info_resp.config_size = cpu_to_le32(config_size);
+    msg->get_device_info_resp.max_vqs = cpu_to_le32(max_vqs);
+    msg->get_device_info_resp.admin_vq_idx = cpu_to_le16(admin_vq_idx);
+    msg->get_device_info_resp.admin_vq_count = cpu_to_le16(admin_vq_count);
 }
 
 static inline void virtio_msg_pack_get_features(VirtIOMSG *msg,
