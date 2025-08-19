@@ -427,6 +427,7 @@ int xc_domain_gfn2mfn(xc_interface *xch,
     return r;
 }
 
+#ifndef XEN_DMOP_virtio_msg_bus
 #define XEN_DMOP_virtio_msg_bus 30
 struct xen_dm_op_virtio_msg_bus {
 #define XEN_DOMCTL_VIRTIO_MSG_BUS_XEN_CONNECT                1
@@ -441,6 +442,7 @@ struct xen_dm_op_virtio_msg_bus {
     } u;
 };
 typedef struct xen_dm_op_virtio_msg_bus xen_dm_op_virtio_msg_bus_t;
+#endif
 
 struct xen_dm_op_vmsg {
     uint32_t op;
