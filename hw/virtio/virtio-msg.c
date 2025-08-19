@@ -209,10 +209,8 @@ static void virtio_msg_get_vqueue(VirtIOMSGProxy *s,
 static void virtio_msg_set_vqueue(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
     VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
-    hwaddr desc, avail, used;
     VirtIOMSG msg_resp;
     uint32_t index = msg->set_vqueue.index;
-    uint32_t size;
 
     virtio_queue_set_num(vdev, index, msg->set_vqueue.size);
     virtio_queue_set_rings(vdev, index,
@@ -221,10 +219,7 @@ static void virtio_msg_set_vqueue(VirtIOMSGProxy *s, VirtIOMSG *msg)
                            msg->set_vqueue.device_addr);
     virtio_queue_enable(vdev, index);
 
-    size = virtio_queue_get_num(vdev, index);
-    virtio_queue_get_rings(vdev, index, &desc, &avail, &used);
-    virtio_msg_pack_set_vqueue_resp(&msg_resp, index, size,
-                                    desc, avail, used);
+    virtio_msg_pack_set_vqueue_resp(&msg_resp);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
