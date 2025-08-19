@@ -10,23 +10,8 @@
 #ifndef QEMU_VIRTIO_MSG_H
 #define QEMU_VIRTIO_MSG_H
 
-#ifdef __XEN__
-/* Xen compat */
-#include <xen/lib.h>
-#include <xen/ctype.h>
-#include <xen/stringify.h>
-#include <xen/bug.h>
-#include <xen/virtio/std/virtio_config.h>
-#include <xen/byteorder.h>
-#define assert ASSERT
-#define QEMU_PACKED __packed
-#define g_assert_not_reached ASSERT_UNREACHABLE
-#define stringify __stringify
-#define printf printk
-#else
 #include <stdint.h>
 #include "standard-headers/linux/virtio_config.h"
-#endif
 
 /* v0.0.1.  */
 #define VIRTIO_MSG_DEVICE_VERSION 0x000001
@@ -808,13 +793,4 @@ static inline void virtio_msg_print(VirtIOMSG *msg)
     }
     printf("\n");
 }
-
-#ifdef __XEN__
-#undef printf
-#undef assert
-#undef QEMU_PACKED
-#undef g_assert_not_reached
-#undef stringify
-#endif
-
 #endif
