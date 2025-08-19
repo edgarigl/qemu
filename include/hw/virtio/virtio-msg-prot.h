@@ -662,6 +662,7 @@ static inline void virtio_msg_pack_event_config(VirtIOMSG *msg,
     msg->event_config.offset = cpu_to_le32(offset);
     msg->event_config.size = cpu_to_le32(size);
 
+    assert(size <= ARRAY_SIZE(msg->event_config.config_value));
     if (size > 0) {
         memcpy(&msg->event_config.config_value[0], value, size);
     }
