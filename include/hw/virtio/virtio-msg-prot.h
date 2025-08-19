@@ -140,14 +140,6 @@ typedef struct VirtIOMSG {
         } QEMU_PACKED set_vqueue;
         struct {
             uint32_t index;
-            uint32_t unused;
-            uint32_t size;
-            uint64_t descriptor_addr;
-            uint64_t driver_addr;
-            uint64_t device_addr;
-        } QEMU_PACKED set_vqueue_resp;
-        struct {
-            uint32_t index;
         } QEMU_PACKED reset_vqueue;
         struct {
             uint32_t status;
@@ -584,23 +576,10 @@ static inline void virtio_msg_pack_set_vqueue(VirtIOMSG *msg,
     msg->set_vqueue.device_addr = cpu_to_le64(device_addr);
 }
 
-static inline void virtio_msg_pack_set_vqueue_resp(VirtIOMSG *msg,
-                                                   uint32_t index,
-                                                   uint32_t size,
-                                                   uint64_t descriptor_addr,
-                                                   uint64_t driver_addr,
-                                                   uint64_t device_addr)
+static inline void virtio_msg_pack_set_vqueue_resp(VirtIOMSG *msg)
 {
     virtio_msg_pack_header(msg, VIRTIO_MSG_SET_VQUEUE,
-                           VIRTIO_MSG_TYPE_RESPONSE, 0,
-                           sizeof msg->set_vqueue_resp);
-
-    msg->set_vqueue_resp.index = cpu_to_le32(index);
-    msg->set_vqueue_resp.unused = 0;
-    msg->set_vqueue_resp.size = cpu_to_le32(size);
-    msg->set_vqueue_resp.descriptor_addr = cpu_to_le64(descriptor_addr);
-    msg->set_vqueue_resp.driver_addr = cpu_to_le64(driver_addr);
-    msg->set_vqueue_resp.device_addr = cpu_to_le64(device_addr);
+                           VIRTIO_MSG_TYPE_RESPONSE, 0, 0);
 }
 
 static inline void virtio_msg_pack_event_avail(VirtIOMSG *msg,
