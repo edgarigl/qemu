@@ -105,21 +105,21 @@ typedef struct VirtIOMSG {
             uint32_t size;
         } QEMU_PACKED get_config;
         struct {
+            uint32_t generation;
             uint32_t offset;
             uint32_t size;
-            uint32_t generation;
             uint64_t data;
         } QEMU_PACKED get_config_resp;
         struct {
+            uint32_t generation;
             uint32_t offset;
             uint32_t size;
-            uint32_t generation;
             uint64_t data;
         } QEMU_PACKED set_config;
         struct {
+            uint32_t generation;
             uint32_t offset;
             uint32_t size;
-            uint32_t generation;
             uint64_t data;
         } QEMU_PACKED set_config_resp;
         struct {
