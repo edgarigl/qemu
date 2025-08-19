@@ -649,6 +649,7 @@ static inline void virtio_msg_pack_event_used(VirtIOMSG *msg, uint32_t index)
 
 static inline void virtio_msg_pack_event_config(VirtIOMSG *msg,
                                                 uint32_t status,
+                                                uint32_t generation,
                                                 uint32_t offset,
                                                 uint32_t size,
                                                 uint8_t *value)
@@ -657,6 +658,7 @@ static inline void virtio_msg_pack_event_config(VirtIOMSG *msg,
                            sizeof msg->event_config);
 
     msg->event_config.status = cpu_to_le32(status);
+    msg->event_config.generation = cpu_to_le32(generation);
     msg->event_config.offset = cpu_to_le32(offset);
     msg->event_config.size = cpu_to_le32(size);
 
