@@ -208,6 +208,11 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
     }
 
     s->msg.fd = open(s->cfg.dev, O_RDWR);
+    if (s->msg.fd < 0) {
+        printf("Failed to open UIO dev\n");
+        exit(EXIT_FAILURE);
+    }
+
     s->msg.fd_devmem = open("/dev/mem", O_RDWR);
 
     qemu_set_fd_handler(s->msg.fd,
@@ -276,11 +281,11 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
     assert(s->msg.doorbell != MAP_FAILED);
 
     s->msg.cfg_bram = mmap(0, 8 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
-                           s->msg.fd_devmem, 0x020200004000ULL);
+                           s->msg.fd_devmem, 0x20100004000ULL);
     assert(s->msg.cfg_bram != MAP_FAILED);
 
     s->msg.irq = mmap(0, 4 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
-                           s->msg.fd_devmem, 0x020200050000ULL);
+                           s->msg.fd_devmem, 0x20100050000ULL);
     assert(s->msg.irq != MAP_FAILED);
 
     /* Wait for queue setup. */
@@ -307,7 +312,7 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
 
     virtio_msg_bus_vek280_send_notify(s);
 
-    if (0) {
+    if (1) {
         uint64_t i;
 
         printf("compare all RAM\n");
