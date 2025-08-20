@@ -147,7 +147,7 @@ typedef struct VirtIOMSG {
             uint32_t generation;
             uint32_t offset;
             uint32_t size;
-            uint8_t config_value[16];
+            uint8_t config_value[];
         } QEMU_PACKED event_config;
         struct {
             uint32_t index;
@@ -306,7 +306,9 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
         break;
     case VIRTIO_MSG_EVENT_CONFIG:
         LE_TO_CPU(msg->event_config.status);
+        LE_TO_CPU(msg->event_config.generation);
         LE_TO_CPU(msg->event_config.offset);
+        LE_TO_CPU(msg->event_config.size);
         break;
     case VIRTIO_MSG_EVENT_AVAIL:
         LE_TO_CPU(msg->event_avail.index);
@@ -619,6 +621,8 @@ static inline void virtio_msg_pack_event_config(VirtIOMSG *msg,
                                                 uint32_t size,
                                                 uint8_t *value)
 {
+    unsigned int max_size;
+
     virtio_msg_pack_header(msg, VIRTIO_MSG_EVENT_CONFIG, 0, 0,
                            sizeof msg->event_config);
 
@@ -627,8 +631,11 @@ static inline void virtio_msg_pack_event_config(VirtIOMSG *msg,
     msg->event_config.offset = cpu_to_le32(offset);
     msg->event_config.size = cpu_to_le32(size);
 
-    assert(size <= ARRAY_SIZE(msg->event_config.config_value));
-    if (size > 0) {
+    max_size = VIRTIO_MSG_MAX_SIZE;
+    max_size -= offsetof(VirtIOMSG, event_config.config_value);
+    assert(size <= max_size);
+
+    if (size > 0 && size <= max_size) {
         memcpy(&msg->event_config.config_value[0], value, size);
     }
 }
