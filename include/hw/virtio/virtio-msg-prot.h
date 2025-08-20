@@ -33,6 +33,7 @@ enum {
     VIRTIO_MSG_SET_DEVICE_STATUS = 0x08,
     VIRTIO_MSG_GET_VQUEUE        = 0x09,
     VIRTIO_MSG_SET_VQUEUE        = 0x0a,
+    VIRTIO_MSG_GET_SHM           = 0x0c, /* Not yet supported */
     VIRTIO_MSG_RESET_VQUEUE      = 0x0b,
     VIRTIO_MSG_EVENT_CONFIG      = 0x40,
     VIRTIO_MSG_EVENT_AVAIL       = 0x41,
