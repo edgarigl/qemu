@@ -427,12 +427,18 @@ int xc_domain_gfn2mfn(xc_interface *xch,
     return r;
 }
 
+/* Make sure we get this one.  */
+#undef XEN_DMOP_virtio_msg_bus
+#undef XEN_DMOP_VIRTIO_MSG_BUS_XEN_CONNECT
+
 #ifndef XEN_DMOP_virtio_msg_bus
 #define XEN_DMOP_virtio_msg_bus 30
-struct xen_dm_op_virtio_msg_bus {
-#define XEN_DOMCTL_VIRTIO_MSG_BUS_XEN_CONNECT                1
+struct qemu_xen_dm_op_virtio_msg_bus {
+#define XEN_DMOP_VIRTIO_MSG_BUS_XEN_CONNECT 1
     uint32_t op;                   /* IN: Operation */
     uint32_t bus_id;               /* IN: virito-msg bus id  */
+    uint16_t dev_num;              /* IN: virtio-msg device number */
+    uint16_t pad;
     union {
         /* Virtio-msg-xen bus */
         struct {
@@ -441,7 +447,7 @@ struct xen_dm_op_virtio_msg_bus {
         } xen;
     } u;
 };
-typedef struct xen_dm_op_virtio_msg_bus xen_dm_op_virtio_msg_bus_t;
+typedef struct qemu_xen_dm_op_virtio_msg_bus xen_dm_op_virtio_msg_bus_t;
 #endif
 
 struct xen_dm_op_vmsg {
@@ -489,11 +495,11 @@ int xen_virtio_msg_bus_xen_connect(domid_t domid,
                                    uint32_t *port)
 {
     struct xen_dm_op_vmsg op;
-    struct xen_dm_op_virtio_msg_bus *data = &op.u.virtio_msg_bus;
+    struct qemu_xen_dm_op_virtio_msg_bus *data = &op.u.virtio_msg_bus;
     int rc;
 
     memset(&op, 0, sizeof(op));
-    data->op = XEN_DOMCTL_VIRTIO_MSG_BUS_XEN_CONNECT;
+    data->op = XEN_DMOP_VIRTIO_MSG_BUS_XEN_CONNECT;
     data->bus_id = bus_id;
     data->u.xen.shm_fifo_gfn = shm_fifo_gfn;
     data->u.xen.port = 0;
