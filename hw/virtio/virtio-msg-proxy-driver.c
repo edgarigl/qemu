@@ -148,7 +148,9 @@ static uint64_t vmpd_get_features(VirtIODevice *vdev, uint64_t f, Error **errp)
         virtio_msg_pack_get_features(&msg, 0, 2);
         virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 
-        f = msg_resp.get_features_resp.features;
+        f = msg_resp.get_features_resp.b32[0];
+        f <<= 32;
+        f |= msg_resp.get_features_resp.b32[1];
     }
 
     return f;
@@ -158,8 +160,9 @@ static void vmpd_set_features(VirtIODevice *vdev, uint64_t f)
 {
     VirtIOMSGProxyDriver *vpd = VIRTIO_MSG_PROXY_DRIVER(vdev);
     VirtIOMSG msg, msg_resp;
+    uint32_t b32[2] = { f, f >> 32 };
 
-    virtio_msg_pack_set_features(&msg, 0, 2, f);
+    virtio_msg_pack_set_features(&msg, 0, ARRAY_SIZE(b32), b32);
     virtio_msg_bus_send(&vpd->bus, &msg, &msg_resp);
 }
 
