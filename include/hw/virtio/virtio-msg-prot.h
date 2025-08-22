@@ -77,18 +77,13 @@ typedef struct VirtIOMSG {
         struct {
             uint32_t index;
             uint32_t num;
-            uint64_t features;
+            uint32_t b32[];
         } QEMU_PACKED get_features_resp;
         struct {
             uint32_t index;
             uint32_t num;
-            uint64_t features;
+            uint32_t b32[];
         } QEMU_PACKED set_features;
-        struct {
-            uint32_t index;
-            uint32_t num;
-            uint64_t features;
-        } QEMU_PACKED set_features_resp;
         struct {
             uint32_t offset;
             uint32_t size;
@@ -183,6 +178,10 @@ typedef struct VirtIOMSG {
     };
 } QEMU_PACKED VirtIOMSG;
 
+#define VIRTIO_MSG_MAX_FEATURE_NUM \
+    ((VIRTIO_MSG_MAX_SIZE - offsetof(VirtIOMSG, get_features_resp.b32)) / 4)
+
+
 #define LE_TO_CPU(v)                                        \
 {                                                           \
     if (sizeof(v) == 2) {                                   \
@@ -206,6 +205,7 @@ typedef struct VirtIOMSG {
 static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
 {
     LE_TO_CPU(msg->dev_num);
+    int i;
 
     switch (msg->msg_id) {
     case VIRTIO_MSG_DEVICE_INFO:
@@ -220,12 +220,10 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
     case VIRTIO_MSG_GET_FEATURES:
         LE_TO_CPU(msg->get_features_resp.index);
         LE_TO_CPU(msg->get_features_resp.num);
-        LE_TO_CPU(msg->get_features_resp.features);
-        break;
-    case VIRTIO_MSG_SET_FEATURES:
-        LE_TO_CPU(msg->set_features_resp.index);
-        LE_TO_CPU(msg->set_features_resp.num);
-        LE_TO_CPU(msg->set_features_resp.features);
+        for (i = 0; i < VIRTIO_MSG_MAX_FEATURE_NUM &&
+                    i < msg->get_features_resp.num; i++) {
+            LE_TO_CPU(msg->get_features_resp.b32[i]);
+        }
         break;
     case VIRTIO_MSG_GET_DEVICE_STATUS:
         LE_TO_CPU(msg->get_device_status_resp.status);
@@ -266,6 +264,8 @@ static inline void virtio_msg_unpack_resp(VirtIOMSG *msg)
  * hosts.
  */
 static inline void virtio_msg_unpack(VirtIOMSG *msg) {
+    int i;
+
     if (msg->type & VIRTIO_MSG_TYPE_RESPONSE) {
         virtio_msg_unpack_resp(msg);
         return;
@@ -276,10 +276,15 @@ static inline void virtio_msg_unpack(VirtIOMSG *msg) {
     switch (msg->msg_id) {
     case VIRTIO_MSG_GET_FEATURES:
         LE_TO_CPU(msg->get_features.index);
+        LE_TO_CPU(msg->get_features.num);
         break;
     case VIRTIO_MSG_SET_FEATURES:
         LE_TO_CPU(msg->set_features.index);
-        LE_TO_CPU(msg->set_features.features);
+        LE_TO_CPU(msg->set_features.num);
+        for (i = 0; i < VIRTIO_MSG_MAX_FEATURE_NUM &&
+                    i < msg->set_features.num; i++) {
+            LE_TO_CPU(msg->set_features.b32[i]);
+        }
         break;
     case VIRTIO_MSG_SET_DEVICE_STATUS:
         LE_TO_CPU(msg->set_device_status.status);
@@ -388,42 +393,48 @@ static inline void virtio_msg_pack_get_features(VirtIOMSG *msg,
 static inline void virtio_msg_pack_get_features_resp(VirtIOMSG *msg,
                                                      uint32_t index,
                                                      uint32_t num,
-                                                     uint64_t f)
+                                                     uint32_t *f)
 {
+    unsigned int i;
+
     virtio_msg_pack_header(msg, VIRTIO_MSG_GET_FEATURES,
                            VIRTIO_MSG_TYPE_RESPONSE, 0,
                            sizeof msg->get_features_resp);
 
     msg->get_features_resp.index = cpu_to_le32(index);
     msg->get_features_resp.num = cpu_to_le32(num);
-    msg->get_features_resp.features = cpu_to_le64(f);
+
+    assert(num <= VIRTIO_MSG_MAX_FEATURE_NUM);
+
+    for (i = 0; i < num && i < VIRTIO_MSG_MAX_FEATURE_NUM; i++) {
+        msg->get_features_resp.b32[i] = cpu_to_le32(f[i]);
+    }
 }
 
 static inline void virtio_msg_pack_set_features(VirtIOMSG *msg,
                                                 uint32_t index,
                                                 uint32_t num,
-                                                uint64_t f)
+                                                uint32_t *f)
 {
+    unsigned int i;
+
     virtio_msg_pack_header(msg, VIRTIO_MSG_SET_FEATURES, 0, 0,
                            sizeof msg->set_features);
 
     msg->set_features.index = cpu_to_le32(index);
     msg->set_features.num = cpu_to_le32(num);
-    msg->set_features.features = cpu_to_le64(f);
+
+    assert(num <= VIRTIO_MSG_MAX_FEATURE_NUM);
+
+    for (i = 0; i < num && i < VIRTIO_MSG_MAX_FEATURE_NUM; i++) {
+        msg->get_features_resp.b32[i] = cpu_to_le32(f[i]);
+    }
 }
 
-static inline void virtio_msg_pack_set_features_resp(VirtIOMSG *msg,
-                                                     uint32_t index,
-                                                     uint32_t num,
-                                                     uint64_t f)
+static inline void virtio_msg_pack_set_features_resp(VirtIOMSG *msg)
 {
     virtio_msg_pack_header(msg, VIRTIO_MSG_SET_FEATURES,
-                           VIRTIO_MSG_TYPE_RESPONSE, 0,
-                           sizeof msg->set_features_resp);
-
-    msg->set_features_resp.index = cpu_to_le32(index);
-    msg->set_features_resp.num = cpu_to_le32(num);
-    msg->set_features_resp.features = cpu_to_le64(f);
+                           VIRTIO_MSG_TYPE_RESPONSE, 0, 0);
 }
 
 static inline void virtio_msg_pack_set_device_status(VirtIOMSG *msg,

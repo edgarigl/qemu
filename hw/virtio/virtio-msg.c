@@ -37,7 +37,8 @@ static void virtio_msg_device_info(VirtIOMSGProxy *s,
 
     virtio_msg_pack_get_device_info_resp(&msg_resp, device_id,
                                          VIRTIO_MSG_VENDOR_ID,
-                                         64, /* feature bits.  */
+                                         /* Feature bits in 32b chunks */
+                                         64 / 32,
                                          vdev->config_len,
                                          VIRTIO_QUEUE_MAX,
                                          0, 0);
@@ -50,16 +51,22 @@ static void virtio_msg_get_features(VirtIOMSGProxy *s,
     VirtIODevice *vdev = virtio_bus_get_device(&s->bus);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
     VirtIOMSG msg_resp;
+    uint32_t index = msg->get_features.index;
+    uint32_t f[VIRTIO_MSG_MAX_FEATURE_NUM]= { 0 };
+    uint32_t num = msg->get_features.num;
     uint64_t features;
 
-    /*
-     * The peer's host_features shouldn't matter here. When we're
-     * connected to a QEMU proxy, we need to advertise our local
-     * host features and not anything provided by the proxy.
-     */
     features = vdc->get_features(vdev, vdev->host_features, &error_abort);
 
-    virtio_msg_pack_get_features_resp(&msg_resp, 0, 2, features);
+    /* We only have 64 feature bits. If driver asks for more, return zeros  */
+    if (index < 2) {
+        features >>= index * 32;
+        f[0] = features;
+        f[1] = features >> 32;
+    }
+
+    /* If index is out of bounds, we respond with num=0, f=0.  */
+    virtio_msg_pack_get_features_resp(&msg_resp, index, num, f);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
@@ -67,10 +74,22 @@ static void virtio_msg_set_features(VirtIOMSGProxy *s,
                                     VirtIOMSG *msg)
 {
     VirtIOMSG msg_resp;
+    unsigned int i;
 
-    s->guest_features = msg->set_features.features;
+    for (i = 0; i < msg->set_features.num; i++) {
+        unsigned int feature_index = i + msg->set_features.index;
 
-    virtio_msg_pack_set_features_resp(&msg_resp, 0, 2, s->guest_features);
+        /* We only support up to 64bits  */
+        if (feature_index >= 2) {
+            break;
+        }
+
+        s->guest_features = deposit64(s->guest_features,
+                                      feature_index * 32, 32,
+                                      msg->set_features.b32[i]);
+    }
+
+    virtio_msg_pack_set_features_resp(&msg_resp);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp, NULL);
 }
 
