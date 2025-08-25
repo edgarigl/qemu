@@ -27,6 +27,13 @@ extern bool xen_allowed;
 #define xen_enabled() 0
 #endif /* CONFIG_XEN_IS_POSSIBLE */
 
+#if 0
+static inline bool xen_map_cache_enabled(void)
+{
+    return xen_enabled() && xen_map_cache_initialized();
+}
+#endif
+
 void xen_hvm_modified_memory(ram_addr_t start, ram_addr_t length);
 void xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size,
                    struct MemoryRegion *mr, Error **errp);

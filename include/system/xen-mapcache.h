@@ -12,9 +12,15 @@
 #include "exec/cpu-common.h"
 #include "system/xen.h"
 
+bool xen_map_cache_initialized(void);
+
+static inline bool xen_map_cache_enabled(void)
+{
+    return xen_enabled() && xen_map_cache_initialized();
+}
+
 typedef hwaddr (*phys_offset_to_gaddr_t)(hwaddr phys_offset,
                                          ram_addr_t size);
-bool xen_map_cache_enabled(void);
 void xen_map_cache_init(phys_offset_to_gaddr_t f,
                         void *opaque);
 uint8_t *xen_map_cache(MemoryRegion *mr, hwaddr phys_addr, hwaddr size,
