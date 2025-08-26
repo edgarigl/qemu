@@ -70,6 +70,19 @@ static void xen_set_irq(void *opaque, int irq, int level)
     }
 }
 
+static void xen_create_virtio_msg_devices(XenPVHMachineState *s)
+{
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(s->virtio_msg.backends); i++) {
+        object_initialize_child(OBJECT(s), "backend[*]",
+                                &s->virtio_msg.backends[i], TYPE_VIRTIO_MSG);
+
+        sysbus_realize(SYS_BUS_DEVICE(&s->virtio_msg.backends[i]),
+                       &error_fatal);
+    }
+}
+
 static void xen_create_virtio_mmio_devices(XenPVHMachineState *s)
 {
     int i;
@@ -199,6 +212,10 @@ static void xen_pvh_init(MachineState *ms)
 
     if (s->cfg.virtio_mmio_num) {
         xen_create_virtio_mmio_devices(s);
+    }
+
+    if (xpc->has_virtio_msg) {
+        xen_create_virtio_msg_devices(s);
     }
 
 #ifdef CONFIG_TPM
