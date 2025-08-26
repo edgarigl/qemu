@@ -548,4 +548,18 @@ static inline int xendevicemodel_set_irq_level(xendevicemodel_handle *dmod,
 #define GUEST_RAM1_SIZE   0xfe00000000ULL
 #endif
 
+#ifndef XEN_DMOP_virtio_msg_bus
+static inline int
+xendevicemodel_virtio_msg_bus_xen_connect(xendevicemodel_handle *dmod,
+                                          domid_t domid,
+                                          uint32_t bus_id,
+                                          uint16_t dev_num,
+                                          uint64_t shm_fifo_gfn,
+                                          uint32_t *port)
+{
+    errno = EOPNOTSUPP;
+    return -1;
+}
+#endif
+
 #endif /* QEMU_HW_XEN_NATIVE_H */
