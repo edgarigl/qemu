@@ -12,6 +12,11 @@ system_virtio_ss.add(when: 'CONFIG_VHOST_VDPA_DEV', if_true: files('vdpa-dev.c')
 system_virtio_ss.add(files('virtio.c'))
 system_virtio_ss.add(files('virtio-qmp.c'))
 
+system_virtio_ss.add(when: 'CONFIG_VIRTIO_MSG', if_true: files(
+    'virtio-msg.c',
+    'virtio-msg-bus.c',
+))
+
 if have_vhost
   system_virtio_ss.add(files('vhost.c'))
   system_virtio_ss.add(files('vhost-backend.c', 'vhost-iova-tree.c'))
