@@ -16,6 +16,9 @@ specific_virtio_ss.add(when: 'CONFIG_VIRTIO_MSG', if_true: files(
     'virtio-msg-bus.c',
 ))
 
+specific_virtio_ss.add(when: ['CONFIG_VIRTIO_MSG', 'CONFIG_XEN', xen],
+                       if_true: files('virtio-msg-bus-xen.c'))
+
 if have_vhost
   system_virtio_ss.add(files('vhost.c'))
   specific_virtio_ss.add(files('vhost-backend.c', 'vhost-iova-tree.c'))
