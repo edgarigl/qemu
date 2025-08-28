@@ -46,6 +46,7 @@ config PC
     select VIRTIO_PMEM_SUPPORTED
     select VIRTIO_MEM_SUPPORTED
     select HV_BALLOON_SUPPORTED
+    select VIRTIO_MSG
 
 config PC_PCI
     bool
