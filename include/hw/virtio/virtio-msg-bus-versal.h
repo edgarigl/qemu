@@ -1,14 +1,14 @@
 /*
- * VirtIO MSG bus for the VEK280 hexcam design.
+ * Virtio-msg bus for versal designs.
  *
- * Copyright (c) 2024 Advanced Micro Devices, Inc.
+ * Copyright (c) 2025 Advanced Micro Devices, Inc.
  * Written by Edgar E. Iglesias <edgar.iglesias@amd.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#ifndef QEMU_VIRTIO_MSG_BUS_VEK280_HEXCAM_H
-#define QEMU_VIRTIO_MSG_BUS_VEK280_HEXCAM_H
+#ifndef QEMU_VIRTIO_MSG_BUS_VERSAL_H
+#define QEMU_VIRTIO_MSG_BUS_VERSAL_H
 
 #include "qom/object.h"
 #include "qemu/vfio-helpers.h"
@@ -16,13 +16,13 @@
 #include "hw/virtio/virtio-msg-bus.h"
 #include "hw/virtio/spsc_queue.h"
 
-#define TYPE_VIRTIO_MSG_BUS_VEK280_HEXCAM "virtio-msg-bus-vek280-hexcam"
-OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMSGBusVEK280HexCam,
-                           VIRTIO_MSG_BUS_VEK280_HEXCAM)
-#define VIRTIO_MSG_BUS_VEK280_HEXCAM_GET_PARENT_CLASS(obj) \
-        OBJECT_GET_PARENT_CLASS(obj, TYPE_VIRTIO_MSG_BUS_VEK280_HEXCAM)
+#define TYPE_VIRTIO_MSG_BUS_VERSAL "virtio-msg-bus-versal"
+OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMSGBusVersal,
+                           VIRTIO_MSG_BUS_VERSAL)
+#define VIRTIO_MSG_BUS_VERSAL_GET_PARENT_CLASS(obj) \
+        OBJECT_GET_PARENT_CLASS(obj, TYPE_VIRTIO_MSG_BUS_VERSAL)
 
-typedef struct VirtIOMSGBusVEK280HexCam {
+typedef struct VirtIOMSGBusVersal {
     VirtIOMSGBusDevice parent;
 
     AddressSpace as;
@@ -60,6 +60,5 @@ typedef struct VirtIOMSGBusVEK280HexCam {
 
         char *iommu;
     } cfg;
-} VirtIOMSGBusVEK280HexCam;
-
+} VirtIOMSGBusVersal;
 #endif

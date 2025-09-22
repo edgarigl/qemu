@@ -15,7 +15,7 @@ specific_virtio_ss.add(files('virtio-msg-bus.c'))
 specific_virtio_ss.add(files('virtio-msg-bus-linux-user.c'))
 specific_virtio_ss.add(files('virtio-msg-bus-ivshmem.c'))
 specific_virtio_ss.add(files('virtio-msg-bus-sapphire.c'))
-specific_virtio_ss.add(files('virtio-msg-bus-vek280-hexcam.c'))
+specific_virtio_ss.add(files('virtio-msg-bus-versal.c'))
 specific_virtio_ss.add(files('virtio-msg-proxy-driver.c'))
 specific_virtio_ss.add(files('virtio-msg.c'))
 

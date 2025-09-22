@@ -1,8 +1,7 @@
 /*
- * VirtIO MSG bus for the VEK280 hexcam design.
- * This uses switchboards underlying queue's (mmap) to transfer messages.
+ * Virtio-msg bus for Xilinx versal designs.
  *
- * Copyright (c) 2024 Advanced Micro Devices, Inc.
+ * Copyright (c) 2025 Advanced Micro Devices, Inc.
  * Written by Edgar E. Iglesias <edgar.iglesias@amd.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -17,7 +16,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
 
-#include "hw/virtio/virtio-msg-bus-vek280-hexcam.h"
+#include "hw/virtio/virtio-msg-bus-versal.h"
 
 #define VEK280_INTR_STATUS    0x0
 
@@ -53,21 +52,21 @@ static inline uint64_t vek280_read64(void *p) {
         return val;
 }
 
-static void virtio_msg_bus_vek280_send_notify(VirtIOMSGBusVEK280HexCam *s)
+static void virtio_msg_bus_versal_send_notify(VirtIOMSGBusVersal *s)
 {
     vek280_write32(s->msg.doorbell, 0x0);
     vek280_write32(s->msg.doorbell, 0x1);
 }
 
-static AddressSpace *virtio_msg_bus_vek280_get_remote_as(VirtIOMSGBusDevice *bd)
+static AddressSpace *virtio_msg_bus_versal_get_remote_as(VirtIOMSGBusDevice *bd)
 {
-    VirtIOMSGBusVEK280HexCam *s = VIRTIO_MSG_BUS_VEK280_HEXCAM(bd);
+    VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(bd);
 
     return &s->as;
 }
 
-static void virtio_msg_bus_vek280_process(VirtIOMSGBusDevice *bd) {
-    VirtIOMSGBusVEK280HexCam *s = VIRTIO_MSG_BUS_VEK280_HEXCAM(bd);
+static void virtio_msg_bus_versal_process(VirtIOMSGBusDevice *bd) {
+    VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(bd);
     spsc_queue *q;
     VirtIOMSG msg;
     bool r;
@@ -85,7 +84,7 @@ static void virtio_msg_bus_vek280_process(VirtIOMSGBusDevice *bd) {
     } while (r);
 }
 
-static void vek280_mask_interrupt(VirtIOMSGBusVEK280HexCam *s, bool mask)
+static void vek280_mask_interrupt(VirtIOMSGBusVersal *s, bool mask)
 {
     uint32_t info = 1;
     ssize_t nb;
@@ -102,7 +101,7 @@ static void vek280_mask_interrupt(VirtIOMSGBusVEK280HexCam *s, bool mask)
 
 static void vek280_interrupt(void *opaque)
 {
-    VirtIOMSGBusVEK280HexCam *s = VIRTIO_MSG_BUS_VEK280_HEXCAM(opaque);
+    VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(opaque);
     VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(opaque);
     uint32_t r;
     vek280_mask_interrupt(s, true);
@@ -120,10 +119,10 @@ static void vek280_interrupt(void *opaque)
     vek280_mask_interrupt(s, false);
 }
 
-static int virtio_msg_bus_vek280_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req,
+static int virtio_msg_bus_versal_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req,
                                           VirtIOMSG *msg_resp)
 {
-    VirtIOMSGBusVEK280HexCam *s = VIRTIO_MSG_BUS_VEK280_HEXCAM(bd);
+    VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(bd);
     spsc_queue *q_tx;
     spsc_queue *q_rx;
     bool sent;
@@ -136,7 +135,7 @@ static int virtio_msg_bus_vek280_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req
         sent = spsc_send(q_tx, msg_req, sizeof *msg_req);
     } while (!sent);
 
-    virtio_msg_bus_vek280_send_notify(s);
+    virtio_msg_bus_versal_send_notify(s);
 
     if (msg_resp) {
         bool r = false;
@@ -178,9 +177,9 @@ static int virtio_msg_bus_vek280_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req
     return VIRTIO_MSG_NO_ERROR;
 }
 
-static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
+static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
 {
-    VirtIOMSGBusVEK280HexCam *s = VIRTIO_MSG_BUS_VEK280_HEXCAM(dev);
+    VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(dev);
     VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(dev);
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_GET_CLASS(dev);
     int ret;
@@ -220,33 +219,6 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
         memset(s->msg.device, 0, 4 * KiB);
     }
 
-#if 0
-    memory_region_init_ram_from_file(&s->mr_host, OBJECT(s), "mr-host",
-                                     0x8f000000, 0x100000,
-                                     RAM_SHARED | RAM_NAMED_FILE,
-                                     "/dev/mem",
-                                     0x4A000000000ULL,
-                                     &error_abort);
-#else
-#if 0
-    // KVM
-    memory_region_init_ram_from_fd(&s->mr_host, OBJECT(s), "mr-host",
-                                     0x810c2000ULL,
-                                     RAM_SHARED,
-                                     s->msg.fd,
-                                     0,
-                                     &error_abort);
-
-    memory_region_init_alias(&s->mr_host_ram, OBJECT(s), "mr-host-ram",
-                             &s->mr_host,
-                             0x10000 /* QEMU_VFIO_IOVA_MIN */, 0x80000000);
-
-    memory_region_init_alias(&s->mr_host_ram_alias, OBJECT(s),
-                             "mr-host-ram-alias",
-                             &s->mr_host,
-                             0x10000 /* QEMU_VFIO_IOVA_MIN */, 0x80000000);
-
-#else
     memory_region_init_ram_from_fd(&s->mr_host, OBJECT(s), "mr-host",
                                      s->cfg.mem_size,
                                      RAM_SHARED | RAM_NORESERVE,
@@ -262,16 +234,11 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
                              "mr-host-ram-alias",
                              &s->mr_host,
                              s->cfg.mem_offset, s->cfg.mem_size);
-#endif
-#endif
 
     address_space_init(&s->as, MEMORY_REGION(&s->mr_host_ram), "msg-bus-as");
     memory_region_add_subregion(get_system_memory(), 0, &s->mr_host_ram_alias);
 
     s->msg.host = memory_region_get_ram_ptr(&s->mr_host);
-    printf("host=%p\n", s->msg.host);
-    // Linux/KVM
-    //s->msg.driver = s->msg.host + 0x810c0000ULL;
 
     s->msg.doorbell = mmap(0, 4 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
                            s->msg.fd_devmem, 0x20180000000ULL);
@@ -307,7 +274,7 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
     s->msg.driver = s->msg.host + s->cfg.spsc_base;
     s->msg.device = s->msg.driver + 4 * 1024;
 
-    virtio_msg_bus_vek280_send_notify(s);
+    virtio_msg_bus_versal_send_notify(s);
 
     if (0) {
         uint64_t i;
@@ -337,44 +304,44 @@ static void virtio_msg_bus_vek280_realize(DeviceState *dev, Error **errp)
     usleep(10);
 }
 
-static Property virtio_msg_bus_vek280_props[] = {
-    DEFINE_PROP_STRING("dev", VirtIOMSGBusVEK280HexCam, cfg.dev),
-    DEFINE_PROP_UINT64("spsc-base", VirtIOMSGBusVEK280HexCam, cfg.spsc_base,
+static Property virtio_msg_bus_versal_props[] = {
+    DEFINE_PROP_STRING("dev", VirtIOMSGBusVersal, cfg.dev),
+    DEFINE_PROP_UINT64("spsc-base", VirtIOMSGBusVersal, cfg.spsc_base,
                        UINT64_MAX),
-    DEFINE_PROP_UINT64("mem-offset", VirtIOMSGBusVEK280HexCam, cfg.mem_offset,
+    DEFINE_PROP_UINT64("mem-offset", VirtIOMSGBusVersal, cfg.mem_offset,
                        0),
-    DEFINE_PROP_UINT64("mem-size", VirtIOMSGBusVEK280HexCam, cfg.mem_size,
+    DEFINE_PROP_UINT64("mem-size", VirtIOMSGBusVersal, cfg.mem_size,
                        0x860000000ULL),
-    DEFINE_PROP_BOOL("reset-queues", VirtIOMSGBusVEK280HexCam,
+    DEFINE_PROP_BOOL("reset-queues", VirtIOMSGBusVersal,
                      cfg.reset_queues, false),
-    DEFINE_PROP_STRING("iommu", VirtIOMSGBusVEK280HexCam, cfg.iommu),
+    DEFINE_PROP_STRING("iommu", VirtIOMSGBusVersal, cfg.iommu),
     DEFINE_PROP_END_OF_LIST(),
 };
 
-static void virtio_msg_bus_vek280_class_init(ObjectClass *klass, void *data)
+static void virtio_msg_bus_versal_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(klass);
 
-    bdc->process = virtio_msg_bus_vek280_process;
-    bdc->send = virtio_msg_bus_vek280_send;
-    bdc->get_remote_as = virtio_msg_bus_vek280_get_remote_as;
+    bdc->process = virtio_msg_bus_versal_process;
+    bdc->send = virtio_msg_bus_versal_send;
+    bdc->get_remote_as = virtio_msg_bus_versal_get_remote_as;
 
-    device_class_set_parent_realize(dc, virtio_msg_bus_vek280_realize,
+    device_class_set_parent_realize(dc, virtio_msg_bus_versal_realize,
                                     &bdc->parent_realize);
-    device_class_set_props(dc, virtio_msg_bus_vek280_props);
+    device_class_set_props(dc, virtio_msg_bus_versal_props);
 }
 
-static const TypeInfo virtio_msg_bus_vek280_info = {
-    .name = TYPE_VIRTIO_MSG_BUS_VEK280_HEXCAM,
+static const TypeInfo virtio_msg_bus_versal_info = {
+    .name = TYPE_VIRTIO_MSG_BUS_VERSAL,
     .parent = TYPE_VIRTIO_MSG_BUS_DEVICE,
-    .instance_size = sizeof(VirtIOMSGBusVEK280HexCam),
-    .class_init = virtio_msg_bus_vek280_class_init,
+    .instance_size = sizeof(VirtIOMSGBusVersal),
+    .class_init = virtio_msg_bus_versal_class_init,
 };
 
-static void virtio_msg_bus_vek280_register_types(void)
+static void virtio_msg_bus_versal_register_types(void)
 {
-    type_register_static(&virtio_msg_bus_vek280_info);
+    type_register_static(&virtio_msg_bus_versal_info);
 }
 
-type_init(virtio_msg_bus_vek280_register_types)
+type_init(virtio_msg_bus_versal_register_types)
