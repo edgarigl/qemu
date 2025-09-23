@@ -14,6 +14,7 @@ specific_virtio_ss.add(files('virtio-config-io.c', 'virtio-qmp.c'))
 specific_virtio_ss.add(when: 'CONFIG_VIRTIO_MSG', if_true: files(
     'virtio-msg.c',
     'virtio-msg-bus.c',
+    'virtio-msg-bus-versal.c',
 ))
 
 specific_virtio_ss.add(when: ['CONFIG_VIRTIO_MSG', 'CONFIG_XEN', xen],
