@@ -20,14 +20,14 @@
 
 #define VEK280_INTR_STATUS    0x0
 
-static inline void vek280_write32(void *p, uint32_t val) {
+static inline void reg_write32(void *p, uint32_t val) {
         intptr_t addr = (intptr_t) p;
 
         assert((addr % sizeof val) == 0);
         *(volatile uint32_t *)p = val;
 }
 
-static inline uint32_t vek280_read32(void *p) {
+static inline uint32_t reg_read32(void *p) {
         intptr_t addr = (intptr_t) p;
         uint32_t val;
 
@@ -38,8 +38,8 @@ static inline uint32_t vek280_read32(void *p) {
 
 static void virtio_msg_bus_versal_send_notify(VirtIOMSGBusVersal *s)
 {
-    vek280_write32(s->msg.doorbell, 0x0);
-    vek280_write32(s->msg.doorbell, 0x1);
+    reg_write32(s->msg.doorbell, 0x0);
+    reg_write32(s->msg.doorbell, 0x1);
 }
 
 static AddressSpace *virtio_msg_bus_versal_get_remote_as(VirtIOMSGBusDevice *bd)
@@ -68,7 +68,7 @@ static void virtio_msg_bus_versal_process(VirtIOMSGBusDevice *bd) {
     } while (r);
 }
 
-static void vek280_mask_interrupt(VirtIOMSGBusVersal *s, bool mask)
+static void versal_mask_interrupt(VirtIOMSGBusVersal *s, bool mask)
 {
     uint32_t info = !mask;
     ssize_t nb;
@@ -76,11 +76,11 @@ static void vek280_mask_interrupt(VirtIOMSGBusVersal *s, bool mask)
     assert(info == 1);
     nb = write(s->msg.fd, &info, sizeof(info));
     if (nb != (ssize_t) sizeof(info)) {
-        perror("vek280_unmask_interrupt: write");
+        perror("versal_unmask_interrupt: write");
     }
 }
 
-static void vek280_interrupt(void *opaque)
+static void versal_interrupt(void *opaque)
 {
     VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(opaque);
     VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(opaque);
@@ -88,12 +88,12 @@ static void vek280_interrupt(void *opaque)
 
     do {
         /* ACK the interrupt.  */
-        vek280_write32(s->msg.irq, 0x0);
+        reg_write32(s->msg.irq, 0x0);
         smp_mb();
         virtio_msg_bus_process(bd);
-        r = vek280_read32(s->msg.irq);
+        r = reg_read32(s->msg.irq);
     } while (r & 1);
-    vek280_mask_interrupt(s, false);
+    versal_mask_interrupt(s, false);
 }
 
 static int virtio_msg_bus_versal_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req,
@@ -179,8 +179,7 @@ static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
     s->msg.fd = open(s->cfg.dev, O_RDWR);
     s->msg.fd_devmem = open("/dev/mem", O_RDWR);
 
-    qemu_set_fd_handler(s->msg.fd,
-                        vek280_interrupt, NULL, s);
+    qemu_set_fd_handler(s->msg.fd, versal_interrupt, NULL, s);
 
     if (s->cfg.reset_queues) {
         memset(s->msg.driver, 0, 4 * KiB);
@@ -249,7 +248,7 @@ static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
                                          spsc_capacity(4 * KiB), s->msg.device);
 
     /* Lower doorbell reg.  */
-    vek280_write32(s->msg.doorbell, 0x0);
+    reg_write32(s->msg.doorbell, 0x0);
 }
 
 static Property virtio_msg_bus_versal_props[] = {
