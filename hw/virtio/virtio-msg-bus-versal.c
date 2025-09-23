@@ -27,28 +27,12 @@ static inline void vek280_write32(void *p, uint32_t val) {
         *(volatile uint32_t *)p = val;
 }
 
-static inline void vek280_write64(void *p, uint64_t val) {
-        intptr_t addr = (intptr_t) p;
-
-        assert((addr % sizeof val) == 0);
-        *(volatile uint64_t *)p = val;
-}
-
 static inline uint32_t vek280_read32(void *p) {
         intptr_t addr = (intptr_t) p;
         uint32_t val;
 
         assert((addr % sizeof val) == 0);
         val = *(volatile uint32_t *)p;
-        return val;
-}
-
-static inline uint64_t vek280_read64(void *p) {
-        intptr_t addr = (intptr_t) p;
-        uint64_t val;
-
-        assert((addr % sizeof val) == 0);
-        val = *(volatile uint64_t *)p;
         return val;
 }
 
