@@ -157,7 +157,6 @@ static int virtio_msg_bus_versal_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req
 static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
 {
     VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(dev);
-    VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(dev);
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_GET_CLASS(dev);
     int ret;
 
@@ -175,14 +174,6 @@ static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
     if (ret) {
         error_setg(errp, "Failed to init event notifier");
         return;
-    }
-
-    if (s->cfg.iommu) {
-        if (!strcmp(s->cfg.iommu, "xen-gfn2mfn")) {
-            bd->iommu_translate = virtio_msg_bus_xen_gfn2mfn_translate;
-        } else if (!strcmp(s->cfg.iommu, "linux-proc-pagemap")) {
-            bd->iommu_translate = virtio_msg_bus_pagemap_translate;
-        }
     }
 
     s->msg.fd = open(s->cfg.dev, O_RDWR);
