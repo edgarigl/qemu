@@ -209,15 +209,15 @@ static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
     s->msg.host = memory_region_get_ram_ptr(&s->mr_host);
 
     s->msg.doorbell = mmap(0, 4 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
-                           s->msg.fd_devmem, 0x20180000000ULL);
+                           s->msg.fd_devmem, s->cfg.doorbell_base);
     assert(s->msg.doorbell != MAP_FAILED);
 
     s->msg.cfg_bram = mmap(0, 8 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
-                           s->msg.fd_devmem, 0x020100004000ULL);
+                           s->msg.fd_devmem, s->cfg.bram_base);
     assert(s->msg.cfg_bram != MAP_FAILED);
 
     s->msg.irq = mmap(0, 4 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
-                           s->msg.fd_devmem, 0x020200050000ULL);
+                           s->msg.fd_devmem, s->cfg.irq_base);
     assert(s->msg.irq != MAP_FAILED);
 
     /* Wait for queue setup. */
@@ -238,28 +238,10 @@ static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
 
     printf("Found queue at %lx\n", s->cfg.spsc_base);
 
-    // Xen, changes every time.
     s->msg.driver = s->msg.host + s->cfg.spsc_base;
     s->msg.device = s->msg.driver + 4 * 1024;
 
     virtio_msg_bus_versal_send_notify(s);
-
-    if (0) {
-        uint64_t i;
-
-        printf("compare all RAM\n");
-        for (i = s->cfg.spsc_base; i < (s->cfg.spsc_base + 0x1000); i += 8) {
-            uint64_t v1, v2;
-
-            if ((i % (8 * 1024 * 1024) == 0)) {
-                printf("%lx\n", i);
-            }
-            v1 = vek280_read32(s->msg.host + i);
-            address_space_read(&s->as, i, MEMTXATTRS_UNSPECIFIED, &v2, 4);
-            assert(v1 == v2);
-            vek280_write32(s->msg.host + i, v1);
-        }
-    }
 
     s->shm_queues.driver = spsc_open_mem("queue-driver",
                                          spsc_capacity(4 * KiB), s->msg.driver);
@@ -274,8 +256,13 @@ static Property virtio_msg_bus_versal_props[] = {
     DEFINE_PROP_STRING("dev", VirtIOMSGBusVersal, cfg.dev),
     DEFINE_PROP_UINT64("spsc-base", VirtIOMSGBusVersal, cfg.spsc_base,
                        UINT64_MAX),
-    DEFINE_PROP_UINT64("mem-offset", VirtIOMSGBusVersal, cfg.mem_offset,
-                       0),
+    DEFINE_PROP_UINT64("doorbell-base", VirtIOMSGBusVersal, cfg.doorbell_base,
+                       0x20180000000ULL),
+    DEFINE_PROP_UINT64("bram-base", VirtIOMSGBusVersal, cfg.bram_base,
+                       0x020100004000ULL),
+    DEFINE_PROP_UINT64("irq-base", VirtIOMSGBusVersal, cfg.irq_base,
+                       0x020100050000ULL),
+    DEFINE_PROP_UINT64("mem-offset", VirtIOMSGBusVersal, cfg.mem_offset, 0),
     DEFINE_PROP_UINT64("mem-size", VirtIOMSGBusVersal, cfg.mem_size,
                        0x860000000ULL),
     DEFINE_PROP_BOOL("reset-queues", VirtIOMSGBusVersal,

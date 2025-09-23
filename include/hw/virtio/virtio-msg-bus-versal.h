@@ -55,6 +55,9 @@ typedef struct VirtIOMSGBusVersal {
         char *dev;
         bool reset_queues;
         uint64_t spsc_base;
+        uint64_t doorbell_base;
+        uint64_t bram_base;
+        uint64_t irq_base;
         uint64_t mem_offset;
         uint64_t mem_size;
 
