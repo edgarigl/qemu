@@ -70,14 +70,11 @@ static void virtio_msg_bus_versal_process(VirtIOMSGBusDevice *bd) {
 
 static void vek280_mask_interrupt(VirtIOMSGBusVersal *s, bool mask)
 {
-    uint32_t info = 1;
+    uint32_t info = !mask;
     ssize_t nb;
 
-    if (mask) {
-        nb = read(s->msg.fd, &info, sizeof(info));
-    } else {
-        nb = write(s->msg.fd, &info, sizeof(info));
-    }
+    assert(info == 1);
+    nb = write(s->msg.fd, &info, sizeof(info));
     if (nb != (ssize_t) sizeof(info)) {
         perror("vek280_unmask_interrupt: write");
     }
@@ -88,10 +85,7 @@ static void vek280_interrupt(void *opaque)
     VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(opaque);
     VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(opaque);
     uint32_t r;
-    vek280_mask_interrupt(s, true);
 
-    /* FIXME: Missing IRQ? */
-    if (0) {
     do {
         /* ACK the interrupt.  */
         vek280_write32(s->msg.irq, 0x0);
@@ -99,7 +93,6 @@ static void vek280_interrupt(void *opaque)
         virtio_msg_bus_process(bd);
         r = vek280_read32(s->msg.irq);
     } while (r & 1);
-    }
     vek280_mask_interrupt(s, false);
 }
 
@@ -281,11 +274,9 @@ static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
                                          spsc_capacity(4 * KiB), s->msg.driver);
     s->shm_queues.device = spsc_open_mem("queue-device",
                                          spsc_capacity(4 * KiB), s->msg.device);
-    vek280_mask_interrupt(s, false);
 
     /* Lower doorbell reg.  */
     vek280_write32(s->msg.doorbell, 0x0);
-    usleep(10);
 }
 
 static Property virtio_msg_bus_versal_props[] = {
