@@ -68,6 +68,36 @@ static void virtio_msg_bus_versal_process(VirtIOMSGBusDevice *bd) {
     } while (r);
 }
 
+static void virtio_msg_bus_versal_setup_queues(VirtIOMSGBusVersal *s)
+{
+    if (s->msg.cfg_bram[0] == 0) {
+        return;
+    }
+
+    printf("cfg-bram: %x %x %x\n",
+            s->msg.cfg_bram[0],
+            s->msg.cfg_bram[1],
+            s->msg.cfg_bram[2]);
+    smp_rmb();
+    s->cfg.spsc_base = s->msg.cfg_bram[2];
+    s->cfg.spsc_base <<= 32;
+    s->cfg.spsc_base |= s->msg.cfg_bram[1];
+    smp_mb();
+    s->msg.cfg_bram[0] = 0;
+
+    printf("Found queue at %lx\n", s->cfg.spsc_base);
+
+    s->msg.driver = s->msg.host + s->cfg.spsc_base;
+    s->msg.device = s->msg.driver + 4 * 1024;
+
+    virtio_msg_bus_versal_send_notify(s);
+
+    s->shm_queues.driver = spsc_open_mem("queue-driver",
+                                         spsc_capacity(4 * KiB), s->msg.driver);
+    s->shm_queues.device = spsc_open_mem("queue-device",
+                                         spsc_capacity(4 * KiB), s->msg.device);
+}
+
 static void versal_mask_interrupt(VirtIOMSGBusVersal *s, bool mask)
 {
     uint32_t info = !mask;
@@ -90,7 +120,13 @@ static void versal_interrupt(void *opaque)
         /* ACK the interrupt.  */
         reg_write32(s->msg.irq, 0x0);
         smp_mb();
-        virtio_msg_bus_process(bd);
+
+        if (s->shm_queues.driver) {
+            virtio_msg_bus_process(bd);
+        } else {
+            virtio_msg_bus_versal_setup_queues(s);
+        }
+
         r = reg_read32(s->msg.irq);
     } while (r & 1);
     versal_mask_interrupt(s, false);
@@ -218,34 +254,6 @@ static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
     s->msg.irq = mmap(0, 4 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED,
                            s->msg.fd_devmem, s->cfg.irq_base);
     assert(s->msg.irq != MAP_FAILED);
-
-    /* Wait for queue setup. */
-    printf("Wait for queue\n");
-    do {
-        usleep(100);
-    } while (s->msg.cfg_bram[0] == 0);
-    printf("cfg-bram: %x %x %x\n",
-            s->msg.cfg_bram[0],
-            s->msg.cfg_bram[1],
-            s->msg.cfg_bram[2]);
-    smp_rmb();
-    s->cfg.spsc_base = s->msg.cfg_bram[2];
-    s->cfg.spsc_base <<= 32;
-    s->cfg.spsc_base |= s->msg.cfg_bram[1];
-    smp_mb();
-    s->msg.cfg_bram[0] = 0;
-
-    printf("Found queue at %lx\n", s->cfg.spsc_base);
-
-    s->msg.driver = s->msg.host + s->cfg.spsc_base;
-    s->msg.device = s->msg.driver + 4 * 1024;
-
-    virtio_msg_bus_versal_send_notify(s);
-
-    s->shm_queues.driver = spsc_open_mem("queue-driver",
-                                         spsc_capacity(4 * KiB), s->msg.driver);
-    s->shm_queues.device = spsc_open_mem("queue-device",
-                                         spsc_capacity(4 * KiB), s->msg.device);
 
     /* Lower doorbell reg.  */
     reg_write32(s->msg.doorbell, 0x0);
