@@ -101,8 +101,8 @@ static void virtio_msg_device_info(VirtIOMSGProxy *s,
 
     virtio_msg_pack_get_device_info_resp(&msg_resp, device_id,
                                          VIRTIO_MSG_VENDOR_ID,
-                                         /* Feature bits in 32b chunks */
-                                         64 / 32,
+                                         /* Feature bits */
+                                         64,
                                          vdev->config_len,
                                          VIRTIO_QUEUE_MAX,
                                          0, 0);
