@@ -49,6 +49,11 @@ struct VirtIOMSGBusDeviceClass {
      * Called by the transport to send a message.
      */
     int (*send)(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req);
+
+    /*
+     * A bus device can construct a view into the guests address-space.
+     */
+    AddressSpace *(*get_remote_as)(VirtIOMSGBusDevice *bd);
 };
 
 typedef struct VirtIOMSGBusDevice {
@@ -90,6 +95,14 @@ int virtio_msg_bus_send(BusState *bus, VirtIOMSG *msg_req);
 
 static inline AddressSpace *virtio_msg_bus_get_remote_as(BusState *bus)
 {
+    VirtIOMSGBusDeviceClass *bdc;
+    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
+    bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
+
+    if (bdc->get_remote_as) {
+        return bdc->get_remote_as(bd);
+    }
+
     return &address_space_memory;
 }
 #endif
