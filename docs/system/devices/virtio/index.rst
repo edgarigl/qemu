@@ -20,7 +20,9 @@ can also be off-loaded to an external process via :ref:`vhost user
 .. toctree::
    :maxdepth: 1
 
+   virtio-msg-bus-amp-pci.rst
    virtio-gpu.rst
+   virtio-msg-amp-pci.rst
    virtio-pmem.rst
    virtio-snd.rst
    vhost-user.rst
