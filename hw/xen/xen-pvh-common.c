@@ -76,7 +76,8 @@ static void xen_create_virtio_msg_devices(XenPVHMachineState *s)
 
     for (i = 0; i < ARRAY_SIZE(s->virtio_msg.backends); i++) {
         object_initialize_child(OBJECT(s), "backend[*]",
-                                &s->virtio_msg.backends[i], TYPE_VIRTIO_MSG);
+                                &s->virtio_msg.backends[i],
+                                TYPE_VIRTIO_MSG_SYSBUS_DEV);
 
         sysbus_realize(SYS_BUS_DEVICE(&s->virtio_msg.backends[i]),
                        &error_fatal);
