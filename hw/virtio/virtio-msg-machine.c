@@ -6,15 +6,45 @@
 #include "sysemu/dma.h"
 #include "hw/virtio/virtio-msg-machine.h"
 
+static void virtio_msg_sysbus_realize(DeviceState *d, Error **errp)
+{
+    VirtIOMSGSysBusDev *s = VIRTIO_MSG_SYSBUS_DEV(d);
+    Object *o = OBJECT(d);
+
+    qbus_init(&s->bus, sizeof(s->bus), TYPE_VIRTIO_MSG_OUTER_BUS, d, "bus");
+
+    object_initialize_child(o, "dev", &s->dev, TYPE_VIRTIO_MSG);
+    qdev_realize(DEVICE(&s->dev), BUS(&s->bus), &error_fatal);
+}
+
+static void virtio_msg_sysbus_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->realize = virtio_msg_sysbus_realize;
+}
+
+static const TypeInfo virtio_msg_types[] = {
+    {
+        .name          = TYPE_VIRTIO_MSG_SYSBUS_DEV,
+        .parent        = TYPE_SYS_BUS_DEVICE,
+        .instance_size = sizeof(VirtIOMSGSysBusDev),
+        .class_init    = virtio_msg_sysbus_class_init,
+    },
+};
+DEFINE_TYPES(virtio_msg_types);
+
 static void virtio_msg_machine_init(MachineState *machine)
 {
     VirtIOMSGMachineState *s = VIRTIO_MSG_MACHINE(machine);
     int i;
 
     for (i = 0; i < ARRAY_SIZE(s->backends); i++) {
-        object_initialize_child(OBJECT(s), "backend[*]", &s->backends[i],
-                                TYPE_VIRTIO_MSG);
-        sysbus_realize(SYS_BUS_DEVICE(&s->backends[i]), &error_fatal);
+        g_autofree char *name = g_strdup_printf("backend%d", i);
+
+        object_initialize_child(OBJECT(s), "dev", &s->backends[i].dev,
+                                TYPE_VIRTIO_MSG_SYSBUS_DEV);
+        sysbus_realize(SYS_BUS_DEVICE(&s->backends[i].dev), &error_fatal);
     }
 }
 
