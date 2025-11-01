@@ -546,7 +546,7 @@ static void virtio_msg_reset_hold(Object *obj, ResetType type)
 {
     VirtIOMSGProxy *s = VIRTIO_MSG(obj);
     VirtIODevice *vdev;
-    bool found_a_vdev;
+    bool found_a_vdev = false;
     int i;
 
     for (i = 0; i < ARRAY_SIZE(s->devs); i++) {
