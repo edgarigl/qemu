@@ -73,7 +73,9 @@ static void virtio_msg_bus_versal_process(VirtIOMSGBusDevice *bd)
 
 static void virtio_msg_bus_versal_setup_queues(VirtIOMSGBusVersal *s)
 {
-    if (s->msg.cfg_bram[0] == 0) {
+    VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(s);
+
+    if (s->msg.cfg_bram[0] != 1) {
         return;
     }
 
@@ -96,12 +98,12 @@ static void virtio_msg_bus_versal_setup_queues(VirtIOMSGBusVersal *s)
         memset(s->msg.device, 0, 4 * KiB);
     }
 
-    virtio_msg_bus_versal_send_notify(s);
-
     spsc_init(&s->shm_queues.driver, "driver",
               spsc_capacity(4 * KiB),  s->msg.driver);
     spsc_init(&s->shm_queues.device, "device",
               spsc_capacity(4 * KiB),  s->msg.device);
+
+    virtio_msg_bus_process(bd);
 }
 
 static void versal_mask_interrupt(VirtIOMSGBusVersal *s, bool mask)
@@ -153,6 +155,13 @@ static int virtio_msg_bus_versal_send(VirtIOMSGBusDevice *bd,
     }
 
     return sent ? VIRTIO_MSG_NO_ERROR : VIRTIO_MSG_ERROR_RETRY;
+}
+
+static void virtio_msg_bus_versal_reset_exit(Object *obj)
+{
+    VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(obj);
+
+    virtio_msg_bus_versal_setup_queues(s);
 }
 
 static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
@@ -244,10 +253,12 @@ static void virtio_msg_bus_versal_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     bdc->process = virtio_msg_bus_versal_process;
     bdc->send = virtio_msg_bus_versal_send;
     bdc->get_remote_as = virtio_msg_bus_versal_get_remote_as;
+    rc->phases.exit = virtio_msg_bus_versal_reset_exit;
 
     device_class_set_parent_realize(dc, virtio_msg_bus_versal_realize,
                                     &bdc->parent_realize);
