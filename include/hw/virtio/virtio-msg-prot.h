@@ -750,7 +750,7 @@ static inline void virtio_msg_pack_bus_get_devices_resp(VirtIOMSG *msg,
     memcpy(msg->bus_get_devices_resp.data, data, num / 8);
 }
 
-static inline const char *virtio_msg_id_to_str(unsigned int type)
+static inline const char *virtio_msg_id_to_str(uint8_t type, uint8_t msg_id)
 {
 #define VIRTIO_MSG_TYPE2STR(x) [VIRTIO_MSG_ ## x] = stringify(x)
     static const char *type2str[VIRTIO_MSG_MAX + 1] = {
@@ -768,8 +768,16 @@ static inline const char *virtio_msg_id_to_str(unsigned int type)
         VIRTIO_MSG_TYPE2STR(EVENT_AVAIL),
         VIRTIO_MSG_TYPE2STR(EVENT_USED),
     };
+    static const char *bus_type2str[VIRTIO_MSG_MAX + 1] = {
+        VIRTIO_MSG_TYPE2STR(BUS_GET_DEVICES),
+    };
 
-    return type2str[type];
+    if (type & VIRTIO_MSG_TYPE_BUS) {
+        return bus_type2str[msg_id];
+    } else {
+        return type2str[msg_id];
+    }
+
 }
 
 static inline void virtio_msg_print_status(uint32_t status)
@@ -806,7 +814,7 @@ static inline void virtio_msg_print(VirtIOMSG *msg)
 
     assert(msg);
     printf("virtio-msg: id %s 0x%x type 0x%x dev_num 0x%x msg_size 0x%x\n",
-           virtio_msg_id_to_str(msg->msg_id), msg->msg_id,
+           virtio_msg_id_to_str(msg->type, msg->msg_id), msg->msg_id,
            msg->type, msg->dev_num, msg->msg_size);
 
     payload_size = msg->msg_size - offsetof(VirtIOMSG, payload_u8);
