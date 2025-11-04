@@ -162,6 +162,7 @@ static void virtio_msg_bus_versal_reset_exit(Object *obj)
     VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(obj);
 
     virtio_msg_bus_versal_setup_queues(s);
+    versal_mask_interrupt(s, false);
 }
 
 static void virtio_msg_bus_versal_realize(DeviceState *dev, Error **errp)
