@@ -121,6 +121,14 @@ static void virtio_msg_bus_get_devices(VirtIOMSGProxy *s,
     virtio_msg_bus_send(&s->msg_bus, &msg_resp);
 }
 
+static void virtio_msg_bus_ping(VirtIOMSGProxy *s, VirtIOMSG *msg)
+{
+    VirtIOMSG msg_resp;
+
+    virtio_msg_pack_bus_ping_resp(&msg_resp, msg->bus_ping.data);
+    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+}
+
 static void virtio_msg_device_info(VirtIOMSGProxy *s,
                                    VirtIOMSG *msg)
 {
@@ -438,8 +446,11 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
     if (msg->type & VIRTIO_MSG_TYPE_BUS) {
         if (msg->msg_id == VIRTIO_MSG_BUS_GET_DEVICES) {
             virtio_msg_bus_get_devices(s, msg);
-            return VIRTIO_MSG_NO_ERROR;
         }
+        if (msg->msg_id == VIRTIO_MSG_BUS_PING) {
+            virtio_msg_bus_ping(s, msg);
+        }
+        return VIRTIO_MSG_NO_ERROR;
     }
 
     if (msg->msg_id > ARRAY_SIZE(msg_handlers)) {
