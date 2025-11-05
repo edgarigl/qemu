@@ -777,7 +777,6 @@ static inline const char *virtio_msg_id_to_str(uint8_t type, uint8_t msg_id)
     } else {
         return type2str[msg_id];
     }
-
 }
 
 static inline void virtio_msg_print_status(uint32_t status)
