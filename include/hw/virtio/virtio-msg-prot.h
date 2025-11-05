@@ -40,6 +40,8 @@ enum {
 
     /* Generic bus messages.  */
     VIRTIO_MSG_BUS_GET_DEVICES   = 0x02,
+    VIRTIO_MSG_BUS_PING          = 0x03,
+    VIRTIO_MSG_BUS_EVENT_DEVICE  = 0x40,
 
     VIRTIO_MSG_MAX = VIRTIO_MSG_EVENT_USED,
 };
@@ -163,6 +165,19 @@ typedef struct VirtIOMSG {
             uint16_t next_offset;
             uint8_t data[];
         } QEMU_PACKED bus_get_devices_resp;
+        struct {
+            uint32_t data;
+        } QEMU_PACKED bus_ping;
+        struct {
+            uint32_t data;
+        } QEMU_PACKED bus_ping_resp;
+        struct {
+            uint16_t dev_num;
+
+#define VIRTIO_MSG_BUS_EVENT_DEVICE_STATE_READY   0x1
+#define VIRTIO_MSG_BUS_EVENT_DEVICE_STATE_REMOVED 0x2
+            uint16_t dev_state;
+        } QEMU_PACKED bus_event_device;
     };
 } QEMU_PACKED VirtIOMSG;
 
@@ -190,6 +205,10 @@ typedef struct VirtIOMSG {
 static inline void virtio_msg_unpack_bus(VirtIOMSG *msg)
 {
     switch (msg->msg_id) {
+    case VIRTIO_MSG_BUS_PING:
+        /* Both req and resp have the same layout.  */
+        LE_TO_CPU(msg->bus_ping.data);
+        break;
     case VIRTIO_MSG_BUS_GET_DEVICES:
         LE_TO_CPU(msg->bus_get_devices.offset);
         LE_TO_CPU(msg->bus_get_devices.num);
@@ -748,6 +767,29 @@ static inline void virtio_msg_pack_bus_get_devices_resp(VirtIOMSG *msg,
     msg->bus_get_devices_resp.next_offset = cpu_to_le16(next_offset);
 
     memcpy(msg->bus_get_devices_resp.data, data, num / 8);
+}
+
+static inline void virtio_msg_pack_bus_ping_resp(VirtIOMSG *msg,
+                                                 uint32_t data)
+{
+    virtio_msg_pack_header(msg,
+                           VIRTIO_MSG_BUS_PING,
+                           VIRTIO_MSG_TYPE_BUS | VIRTIO_MSG_TYPE_RESPONSE,
+                           0, 0, sizeof msg->bus_ping_resp);
+
+    msg->bus_ping_resp.data = cpu_to_le32(data);
+}
+
+static inline void virtio_msg_pack_bus_event_device(VirtIOMSG *msg,
+                                                    uint16_t dev_num,
+                                                    uint16_t dev_state)
+{
+    virtio_msg_pack_header(msg, VIRTIO_MSG_BUS_EVENT_DEVICE,
+                           VIRTIO_MSG_TYPE_BUS, dev_num, 0,
+                           sizeof msg->bus_event_device);
+
+    msg->bus_event_device.dev_num = cpu_to_le32(dev_num);
+    msg->bus_event_device.dev_state = cpu_to_le32(dev_state);
 }
 
 static inline const char *virtio_msg_id_to_str(uint8_t type, uint8_t msg_id)
