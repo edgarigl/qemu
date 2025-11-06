@@ -122,7 +122,14 @@ static void versal_interrupt(void *opaque)
 {
     VirtIOMSGBusVersal *s = VIRTIO_MSG_BUS_VERSAL(opaque);
     VirtIOMSGBusDevice *bd = VIRTIO_MSG_BUS_DEVICE(opaque);
+    unsigned int count;
+    ssize_t ret;
     uint32_t r;
+
+    /* Read out the irq count. */
+    do {
+	    ret = read(s->msg.fd, &count, sizeof count);
+    } while (ret != sizeof count);
 
     do {
         /* ACK the interrupt.  */
