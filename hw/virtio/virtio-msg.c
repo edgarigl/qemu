@@ -346,6 +346,7 @@ static void virtio_msg_set_vqueue(VirtIOMSGProxy *s, VirtIOMSG *msg)
         return;
     }
 
+    virtio_queue_set_vector(vdev, index, index);
     virtio_queue_set_num(vdev, index, msg->set_vqueue.size);
     virtio_queue_set_rings(vdev, index,
                            msg->set_vqueue.descriptor_addr,
@@ -400,7 +401,8 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *s,
     vq = virtio_get_queue(vdev, vq_idx);
     notifier = virtio_queue_get_host_notifier(vq);
     if (notifier) {
-	event_notifier_set(notifier);
+        event_notifier_set(notifier);
+        virtio_queue_notify(vdev, msg->event_avail.index);
         return;
     }
 
@@ -511,12 +513,18 @@ static void virtio_msg_notify(DeviceState *opaque, uint16_t vector)
         return;
     }
 
-    /* Check if we're notifying for VQ or CONFIG updates.  */
-    if (vdev->isr & 2) {
+    if (vector < VIRTIO_QUEUE_MAX) {
+        virtio_msg_pack_event_used(&msg, mdev->dev_num, vector);
+        virtio_msg_bus_send(&s->msg_bus, &msg);
+        return;
+    }
+
+    if (vector < VIRTIO_NO_VECTOR) {
         virtio_msg_pack_event_config(&msg, mdev->dev_num,
                                      vdev->status, vdev->generation,
                                      0, 0, NULL);
         virtio_msg_bus_send(&s->msg_bus, &msg);
+        return;
     }
 }
 
@@ -593,7 +601,7 @@ static void virtio_msg_reset_hold(Object *obj)
 
 static bool virtio_msg_ioeventfd_enabled(DeviceState *d)
 {
-	return false;
+	return true;
 }
 
 static int virtio_msg_ioeventfd_assign(DeviceState *d,
@@ -715,6 +723,11 @@ static AddressSpace *virtio_msg_get_dma_as(DeviceState *d)
     return as;
 }
 
+static int virtio_msg_query_nvectors(DeviceState *d)
+{
+    return VIRTIO_QUEUE_MAX;
+}
+
 static void virtio_msg_realize(DeviceState *d, Error **errp)
 {
     VirtIOMSGProxy *s = VIRTIO_MSG(d);
@@ -817,6 +830,7 @@ static void virtio_msg_bus_class_init(ObjectClass *klass, void *data)
     k->pre_plugged = virtio_msg_pre_plugged;
     k->has_variable_vring_alignment = true;
     k->get_dma_as = virtio_msg_get_dma_as;
+    k->query_nvectors = virtio_msg_query_nvectors;
 
     k->set_guest_notifiers = virtio_msg_set_guest_notifiers;
     k->ioeventfd_enabled = virtio_msg_ioeventfd_enabled;
