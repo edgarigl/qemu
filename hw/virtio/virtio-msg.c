@@ -181,7 +181,7 @@ static void virtio_msg_get_features(VirtIOMSGProxy *s,
     VirtIOMSG msg_resp;
     uint32_t index = msg->get_features.index;
     uint32_t f[VIRTIO_MSG_MAX_FEATURE_NUM] = { 0 };
-    uint32_t num = msg->get_features.num;
+    uint32_t num = MIN(msg->get_features.num, VIRTIO_MSG_MAX_FEATURE_NUM);
     uint64_t features = 0;
 
     if (vdev) {
