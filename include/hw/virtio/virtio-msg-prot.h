@@ -757,16 +757,20 @@ static inline void virtio_msg_pack_bus_get_devices_resp(VirtIOMSG *msg,
                                                         uint16_t next_offset,
                                                         uint8_t *data)
 {
+    size_t byte_len = (num + 7) / 8;
+
     virtio_msg_pack_header(msg,
                            VIRTIO_MSG_BUS_GET_DEVICES,
                            VIRTIO_MSG_TYPE_BUS | VIRTIO_MSG_TYPE_RESPONSE,
-                           0, 0, sizeof msg->bus_get_devices_resp + num);
+                           0, 0, sizeof msg->bus_get_devices_resp + byte_len);
 
     msg->bus_get_devices_resp.offset = cpu_to_le16(offset);
     msg->bus_get_devices_resp.num = cpu_to_le16(num);
     msg->bus_get_devices_resp.next_offset = cpu_to_le16(next_offset);
 
-    memcpy(msg->bus_get_devices_resp.data, data, num / 8);
+    if (byte_len > 0) {
+        memcpy(msg->bus_get_devices_resp.data, data, byte_len);
+    }
 }
 
 static inline void virtio_msg_pack_bus_ping_resp(VirtIOMSG *msg,
