@@ -118,7 +118,7 @@ static void virtio_msg_bus_get_devices(VirtIOMSGProxy *s,
     VirtIODevice *vdev;
     VirtIOMSG msg_resp;
     uint8_t data[VIRTIO_MSG_MAX_DEVS / 8] = {0};
-    uint16_t num = MAX(msg->bus_get_devices.num, VIRTIO_MSG_MAX_DEVS);
+    uint16_t num = MIN(msg->bus_get_devices.num, VIRTIO_MSG_MAX_DEVS);
     int i;
 
     for (i = 0; i < ARRAY_SIZE(s->devs); i++) {
