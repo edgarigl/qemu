@@ -115,21 +115,26 @@ static VirtIODevice *virtio_msg_lookup_vdev(VirtIOMSGProxy *s, uint16_t dev_num,
 static void virtio_msg_bus_get_devices(VirtIOMSGProxy *s,
                                        VirtIOMSG *msg)
 {
-    VirtIODevice *vdev;
     VirtIOMSG msg_resp;
     uint8_t data[VIRTIO_MSG_MAX_DEVS / 8] = {0};
-    uint16_t num = MIN(msg->bus_get_devices.num, VIRTIO_MSG_MAX_DEVS);
+    uint16_t req_offset = msg->bus_get_devices.offset;
+    uint16_t offset = MIN(req_offset, VIRTIO_MSG_MAX_DEVS);
+    uint16_t max_window = VIRTIO_MSG_MAX_DEVS - offset;
+    uint16_t num = MIN(msg->bus_get_devices.num, max_window);
+    uint16_t next_offset = offset + num;
     int i;
 
-    for (i = 0; i < ARRAY_SIZE(s->devs); i++) {
-        vdev = virtio_msg_vdev(s, i);
+    for (i = 0; i < num; i++) {
+        uint16_t dev_idx = offset + i;
+        VirtIODevice *vdev = virtio_msg_vdev(s, dev_idx);
+
         if (vdev) {
             data[i / 8] |= 1U << (i & 7);
         }
     }
 
     virtio_msg_pack_bus_get_devices_resp(&msg_resp,
-                                         msg->bus_get_devices.offset, num, 0,
+                                         offset, num, next_offset,
                                          data);
     virtio_msg_bus_send(&s->msg_bus, &msg_resp);
 }
