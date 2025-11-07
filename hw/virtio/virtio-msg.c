@@ -498,7 +498,7 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
         return VIRTIO_MSG_NO_ERROR;
     }
 
-    if (msg->msg_id > ARRAY_SIZE(msg_handlers)) {
+    if (msg->msg_id >= ARRAY_SIZE(msg_handlers)) {
         return VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID;
     }
 
