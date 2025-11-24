@@ -42,10 +42,13 @@ typedef struct VirtIOMSGBusVersalUser {
 
 static bool versal_user_recv_once(VirtIOMSGBusVersalUser *s)
 {
-    VirtIOMSG msg = {0};
+    union {
+        VirtIOMSG msg;
+        uint8_t buf[64];
+    } msg;
     ssize_t len;
 
-    len = read(s->fd, &msg, sizeof(msg));
+    len = read(s->fd, msg.buf, sizeof(msg));
     if (len < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return false;
@@ -65,8 +68,8 @@ static bool versal_user_recv_once(VirtIOMSGBusVersalUser *s)
         return true;
     }
 
-    virtio_msg_unpack(&msg);
-    virtio_msg_bus_receive(VIRTIO_MSG_BUS_DEVICE(s), &msg);
+    virtio_msg_unpack(&msg.msg);
+    virtio_msg_bus_receive(VIRTIO_MSG_BUS_DEVICE(s), &msg.msg);
     return len >= 0;
 }
 
@@ -88,17 +91,11 @@ static int virtio_msg_bus_versal_user_send(VirtIOMSGBusDevice *bd,
                                            VirtIOMSG *msg_req)
 {
     VirtIOMSGBusVersalUser *s = VIRTIO_MSG_BUS_VERSAL_USER(bd);
-    size_t msg_size;
     ssize_t written;
 
-    msg_size = le16_to_cpu(msg_req->msg_size);
-    if (!msg_size) {
-        msg_size = virtio_msg_header_size();
-    }
+    written = write(s->fd, msg_req, sizeof *msg_req);
 
-    written = write(s->fd, msg_req, msg_size);
-
-    if (written == msg_size) {
+    if (written == sizeof *msg_req) {
         return VIRTIO_MSG_NO_ERROR;
     }
 
@@ -146,7 +143,7 @@ static void virtio_msg_bus_versal_user_realize(DeviceState *dev, Error **errp)
         s->dev_path = g_strdup(VERSAL_USER_DEFAULT_DEV);
     }
 
-    s->fd = open(s->dev_path, O_RDWR | O_NONBLOCK);
+    s->fd = open(s->dev_path, O_RDWR);
     if (s->fd < 0) {
         error_setg_errno(errp, errno,
                          "virtio-msg-versal-user: failed to open %s",
