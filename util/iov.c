@@ -21,6 +21,87 @@
 #include "qemu/sockets.h"
 #include "qemu/cutils.h"
 
+#include <arm_neon.h>
+#include <stdint.h>
+#include <stddef.h>
+
+static void *memcpy_neon_nc_to_ddr(void *dst, const void *src, size_t n)
+{
+    uint8_t       *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+
+    // Align destination to 16B for NEON stores
+    while (((uintptr_t)d & 15) && n) {
+        *d++ = *s++;
+        n--;
+    }
+
+    // Main 64B loop: 4x 16B loads/stores per iteration
+    while (n >= 64) {
+	//printf("%s: n=%zd\n", __func__, n);
+        uint8x16_t q0 = vld1q_u8(s +  0);
+        uint8x16_t q1 = vld1q_u8(s + 16);
+        uint8x16_t q2 = vld1q_u8(s + 32);
+        uint8x16_t q3 = vld1q_u8(s + 48);
+
+        vst1q_u8(d +  0, q0);
+        vst1q_u8(d + 16, q1);
+        vst1q_u8(d + 32, q2);
+        vst1q_u8(d + 48, q3);
+
+        s += 64;
+        d += 64;
+        n -= 64;
+    }
+
+    // Handle 16B chunks
+    while (n >= 16) {
+        uint8x16_t q = vld1q_u8(s);
+        vst1q_u8(d, q);
+        s += 16;
+        d += 16;
+        n -= 16;
+    }
+
+    // Tail
+    while (n--) {
+        *d++ = *s++;
+    }
+    return d;
+}
+
+static void *iov_fully_aligned64_mempcpy(void *dv, const void *sv, size_t n)
+{
+        uint64_t *d = dv;
+        const uint64_t *s = sv;
+
+	while (n > 8 * 4) {
+		register uint64_t r[4];
+
+		r[0] = s[0];
+		r[1] = s[1];
+		r[2] = s[2];
+		r[3] = s[3];
+
+		d[0] = r[0];
+		d[1] = r[1];
+		d[2] = r[2];
+		d[3] = r[3];
+
+		d += 4;
+		s += 4;
+		n -= 8 * 4;
+	}
+
+        while (n) {
+                *d = *s;
+                d++;
+                s++;
+                n -= 8;
+        }
+        return d;
+}
+
 /* memPcpy version for fully aligned copies.  */
 static void *iov_fully_aligned32_mempcpy(void *d, const void *s, size_t n)
 {
@@ -43,8 +124,24 @@ void *iov_memcpy(void *d, const void *s, size_t n)
         const unsigned char *bs = s;
         uintptr_t pd = (unsigned long) d;
         uintptr_t ps = (unsigned long) s;
+        bool neon = 0;
 
-        if ((pd & 3) == 0 && (ps & 3) == 0) {
+        if (neon)
+                return memcpy_neon_nc_to_ddr(d, s, n);
+
+        if ((pd & 7) == 0 && (ps & 7) == 0 && n >= 8) {
+                size_t n_aligned = n & ~7;
+
+                bd = iov_fully_aligned64_mempcpy(d, s, n_aligned);
+                if ((n & 7) == 0)
+                        return d;
+
+                /* Fix up the last chunk.  */
+                bs += n_aligned;
+                n -= n_aligned;
+        }
+
+        if ((pd & 3) == 0 && (ps & 3) == 0 && n >= 4) {
                 size_t n_aligned = n & ~3;
 
                 bd = iov_fully_aligned32_mempcpy(d, s, n_aligned);
