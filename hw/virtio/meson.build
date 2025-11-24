@@ -15,6 +15,7 @@ specific_virtio_ss.add(when: 'CONFIG_VIRTIO_MSG', if_true: files(
     'virtio-msg.c',
     'virtio-msg-bus.c',
     'virtio-msg-bus-versal.c',
+    'virtio-msg-bus-versal-user.c',
     'virtio-msg-machine.c',
 ))
 
