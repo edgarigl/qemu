@@ -812,6 +812,7 @@ static inline const char *virtio_msg_id_to_str(uint8_t type, uint8_t msg_id)
     };
     static const char *bus_type2str[VIRTIO_MSG_MAX + 1] = {
         VIRTIO_MSG_TYPE2STR(BUS_GET_DEVICES),
+        VIRTIO_MSG_TYPE2STR(BUS_PING),
     };
 
     if (type & VIRTIO_MSG_TYPE_BUS) {
