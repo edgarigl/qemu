@@ -32,8 +32,16 @@ OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMSGBusVersalUser,
 typedef struct VirtIOMSGBusVersalUser {
     VirtIOMSGBusDevice parent_obj;
 
-    char *dev_path;
     int fd;
+    AddressSpace as;
+    MemoryRegion mr_host;
+    MemoryRegion mr_host_ram;
+    MemoryRegion mr_host_ram_alias;
+
+    struct {
+        char *dev_path;
+        uint64_t mem_size;
+    } cfg;
 } VirtIOMSGBusVersalUser;
 
 #define VERSAL_USER_DEFAULT_DEV "/dev/virtio-msg-0"
@@ -54,7 +62,8 @@ static bool versal_user_recv_once(VirtIOMSGBusVersalUser *s)
             return false;
         }
         warn_report("virtio-msg-versal-user: read failed on %s: %s",
-                    s->dev_path ? s->dev_path : "<unknown>", strerror(errno));
+                    s->cfg.dev_path ?
+                    s->cfg.dev_path : "<unknown>", strerror(errno));
         return false;
     }
 
@@ -76,8 +85,11 @@ static bool versal_user_recv_once(VirtIOMSGBusVersalUser *s)
 static void virtio_msg_bus_versal_user_process(VirtIOMSGBusDevice *bd)
 {
     VirtIOMSGBusVersalUser *s = VIRTIO_MSG_BUS_VERSAL_USER(bd);
+    bool r;
 
-    versal_user_recv_once(s);
+    do {
+        r = versal_user_recv_once(s);
+    } while (r);
 }
 
 static void versal_user_read(void *opaque)
@@ -104,8 +116,16 @@ static int virtio_msg_bus_versal_user_send(VirtIOMSGBusDevice *bd,
     }
 
     warn_report("virtio-msg-versal-user: write failed on %s: %s",
-                s->dev_path ? s->dev_path : "<unknown>", strerror(errno));
+                s->cfg.dev_path ? s->cfg.dev_path : "<unknown>", strerror(errno));
     return VIRTIO_MSG_ERROR_MEMORY;
+}
+
+static AddressSpace *
+virtio_msg_bus_versal_user_get_remote_as(VirtIOMSGBusDevice *bd)
+{
+    VirtIOMSGBusVersalUser *s = VIRTIO_MSG_BUS_VERSAL_USER(bd);
+
+    return &s->as;
 }
 
 static void virtio_msg_bus_versal_user_unrealize(DeviceState *dev)
@@ -119,8 +139,8 @@ static void virtio_msg_bus_versal_user_unrealize(DeviceState *dev)
         s->fd = -1;
     }
 
-    g_free(s->dev_path);
-    s->dev_path = NULL;
+    g_free(s->cfg.dev_path);
+    s->cfg.dev_path = NULL;
 
     if (bdc->parent_unrealize) {
         bdc->parent_unrealize(dev);
@@ -139,23 +159,44 @@ static void virtio_msg_bus_versal_user_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    if (!s->dev_path) {
-        s->dev_path = g_strdup(VERSAL_USER_DEFAULT_DEV);
+    if (!s->cfg.dev_path) {
+        s->cfg.dev_path = g_strdup(VERSAL_USER_DEFAULT_DEV);
     }
 
-    s->fd = open(s->dev_path, O_RDWR);
+    s->fd = open(s->cfg.dev_path, O_RDWR | O_NONBLOCK);
     if (s->fd < 0) {
         error_setg_errno(errp, errno,
                          "virtio-msg-versal-user: failed to open %s",
-                         s->dev_path);
+                         s->cfg.dev_path);
         return;
     }
 
     qemu_set_fd_handler(s->fd, versal_user_read, NULL, s);
+
+    memory_region_init_ram_from_fd(&s->mr_host, OBJECT(s), "mr",
+                                     s->cfg.mem_size,
+                                     RAM_SHARED | RAM_NORESERVE,
+                                     s->fd,
+                                     0,
+                                     &error_abort);
+
+    memory_region_init_alias(&s->mr_host_ram, OBJECT(s), "mr-host-ram",
+                             &s->mr_host,
+                             0, s->cfg.mem_size);
+
+    memory_region_init_alias(&s->mr_host_ram_alias, OBJECT(s),
+                             "mr-host-ram-alias",
+                             &s->mr_host,
+                             0, s->cfg.mem_size);
+
+    address_space_init(&s->as, MEMORY_REGION(&s->mr_host_ram), "msg-bus-as");
+    memory_region_add_subregion(get_system_memory(), 0, &s->mr_host_ram_alias);
 }
 
 static Property virtio_msg_bus_versal_user_props[] = {
-    DEFINE_PROP_STRING("dev", VirtIOMSGBusVersalUser, dev_path),
+    DEFINE_PROP_STRING("dev", VirtIOMSGBusVersalUser, cfg.dev_path),
+    DEFINE_PROP_UINT64("mem-size", VirtIOMSGBusVersalUser, cfg.mem_size,
+                       0x860000000ULL),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -177,6 +218,7 @@ static void virtio_msg_bus_versal_user_class_init(ObjectClass *klass, void *data
 
     bdc->process = virtio_msg_bus_versal_user_process;
     bdc->send = virtio_msg_bus_versal_user_send;
+    bdc->get_remote_as = virtio_msg_bus_versal_user_get_remote_as;
 }
 
 static const TypeInfo virtio_msg_bus_versal_user_info = {
