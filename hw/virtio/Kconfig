@@ -10,6 +10,11 @@ config VIRTIO_NSM
    bool
    depends on LIBCBOR && VIRTIO
 
+config VIRTIO_MEDIA
+    bool
+    default y
+    depends on VIRTIO && LINUX
+
 config VIRTIO_IOMMU
     bool
     default y
