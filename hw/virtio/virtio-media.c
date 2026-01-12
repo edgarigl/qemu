@@ -43,8 +43,10 @@
 
 #define VIRTIO_MEDIA_WIDTH  640u
 #define VIRTIO_MEDIA_HEIGHT 480u
-#define VIRTIO_MEDIA_PIXFMT V4L2_PIX_FMT_YUV420
-#define VIRTIO_MEDIA_BUFFER_SIZE (VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT * 3 / 2)
+#define VIRTIO_MEDIA_PIXFMT_MPLANE V4L2_PIX_FMT_YUV420
+#define VIRTIO_MEDIA_PIXFMT_SINGLE V4L2_PIX_FMT_YUYV
+#define VIRTIO_MEDIA_BUFFER_SIZE_MPLANE (VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT * 3 / 2)
+#define VIRTIO_MEDIA_BUFFER_SIZE_SINGLE (VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT * 2)
 
 struct virtio_media_cmd_header {
     uint32_t cmd;
@@ -131,6 +133,8 @@ typedef struct VirtIOMediaSession {
     uint32_t id;
     bool streaming;
     uint32_t sequence;
+    bool mplane;
+    uint32_t buffer_size;
     uint32_t num_buffers;
     VirtIOMediaBuffer *buffers;
     QTAILQ_HEAD(, VirtIOMediaBuffer) queued_buffers;
@@ -174,6 +178,8 @@ static VirtIOMediaSession *virtio_media_session_new(uint32_t id)
     VirtIOMediaSession *session = g_new0(VirtIOMediaSession, 1);
 
     session->id = id;
+    session->mplane = false;
+    session->buffer_size = VIRTIO_MEDIA_BUFFER_SIZE_SINGLE;
     QTAILQ_INIT(&session->queued_buffers);
     return session;
 }
@@ -235,28 +241,45 @@ static void virtio_media_fill_fmtdesc(struct v4l2_fmtdesc *desc, uint32_t type)
     memset(desc, 0, sizeof(*desc));
     desc->index = 0;
     desc->type = type;
-    desc->pixelformat = VIRTIO_MEDIA_PIXFMT;
-    snprintf((char *)desc->description, sizeof(desc->description), "YUV420");
+    if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        desc->pixelformat = VIRTIO_MEDIA_PIXFMT_MPLANE;
+        snprintf((char *)desc->description, sizeof(desc->description), "YUV420");
+    } else {
+        desc->pixelformat = VIRTIO_MEDIA_PIXFMT_SINGLE;
+        snprintf((char *)desc->description, sizeof(desc->description), "YUYV");
+    }
 }
 
 static void virtio_media_fill_format(struct v4l2_format *fmt, uint32_t type)
 {
-    struct v4l2_pix_format_mplane *pix_mp = &fmt->fmt.pix_mp;
-
     memset(fmt, 0, sizeof(*fmt));
     fmt->type = type;
-    pix_mp->width = VIRTIO_MEDIA_WIDTH;
-    pix_mp->height = VIRTIO_MEDIA_HEIGHT;
-    pix_mp->pixelformat = VIRTIO_MEDIA_PIXFMT;
-    pix_mp->field = V4L2_FIELD_NONE;
-    pix_mp->colorspace = V4L2_COLORSPACE_SRGB;
-    pix_mp->num_planes = 3;
-    pix_mp->plane_fmt[0].sizeimage = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT;
-    pix_mp->plane_fmt[0].bytesperline = VIRTIO_MEDIA_WIDTH;
-    pix_mp->plane_fmt[1].sizeimage = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
-    pix_mp->plane_fmt[1].bytesperline = VIRTIO_MEDIA_WIDTH / 2;
-    pix_mp->plane_fmt[2].sizeimage = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
-    pix_mp->plane_fmt[2].bytesperline = VIRTIO_MEDIA_WIDTH / 2;
+    if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        struct v4l2_pix_format_mplane *pix_mp = &fmt->fmt.pix_mp;
+
+        pix_mp->width = VIRTIO_MEDIA_WIDTH;
+        pix_mp->height = VIRTIO_MEDIA_HEIGHT;
+        pix_mp->pixelformat = VIRTIO_MEDIA_PIXFMT_MPLANE;
+        pix_mp->field = V4L2_FIELD_NONE;
+        pix_mp->colorspace = V4L2_COLORSPACE_SRGB;
+        pix_mp->num_planes = 3;
+        pix_mp->plane_fmt[0].sizeimage = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT;
+        pix_mp->plane_fmt[0].bytesperline = VIRTIO_MEDIA_WIDTH;
+        pix_mp->plane_fmt[1].sizeimage = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
+        pix_mp->plane_fmt[1].bytesperline = VIRTIO_MEDIA_WIDTH / 2;
+        pix_mp->plane_fmt[2].sizeimage = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
+        pix_mp->plane_fmt[2].bytesperline = VIRTIO_MEDIA_WIDTH / 2;
+    } else {
+        struct v4l2_pix_format *pix = &fmt->fmt.pix;
+
+        pix->width = VIRTIO_MEDIA_WIDTH;
+        pix->height = VIRTIO_MEDIA_HEIGHT;
+        pix->pixelformat = VIRTIO_MEDIA_PIXFMT_SINGLE;
+        pix->field = V4L2_FIELD_NONE;
+        pix->colorspace = V4L2_COLORSPACE_SRGB;
+        pix->bytesperline = VIRTIO_MEDIA_WIDTH * 2;
+        pix->sizeimage = VIRTIO_MEDIA_BUFFER_SIZE_SINGLE;
+    }
 }
 
 static void virtio_media_generate_frame(VirtIOMedia *s, VirtIOMediaSession *session,
@@ -264,15 +287,62 @@ static void virtio_media_generate_frame(VirtIOMedia *s, VirtIOMediaSession *sess
 {
     uint8_t *base = memory_region_get_ram_ptr(&s->hostmem);
     uint8_t *ptr = base + buf->base_offset;
-    uint32_t y_size = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT;
-    uint32_t uv_size = y_size / 4;
-    uint8_t y = session->sequence % 256;
-    uint8_t u = (session->sequence + 64) % 256;
-    uint8_t v = (session->sequence + 128) % 256;
+    static const uint8_t yuv_bars[8][3] = {
+        { 235, 128, 128 }, /* white */
+        { 210,  16, 146 }, /* yellow */
+        { 170, 166,  16 }, /* cyan */
+        { 145,  54,  34 }, /* green */
+        { 107, 202, 222 }, /* magenta */
+        {  81,  90, 240 }, /* red */
+        {  41, 240, 110 }, /* blue */
+        {  16, 128, 128 }, /* black */
+    };
+    const uint32_t width = VIRTIO_MEDIA_WIDTH;
+    const uint32_t height = VIRTIO_MEDIA_HEIGHT;
+    const uint32_t bar_width = width / 8;
 
-    memset(ptr, y, y_size);
-    memset(ptr + y_size, u, uv_size);
-    memset(ptr + y_size + uv_size, v, uv_size);
+    if (session->mplane) {
+        uint32_t y_size = width * height;
+        uint32_t uv_size = y_size / 4;
+        uint8_t *y_plane = ptr;
+        uint8_t *u_plane = ptr + y_size;
+        uint8_t *v_plane = ptr + y_size + uv_size;
+        uint32_t x;
+        uint32_t y;
+
+        for (y = 0; y < height; y++) {
+            for (x = 0; x < width; x++) {
+                uint32_t bar = MIN(x / bar_width, 7u);
+                y_plane[y * width + x] = yuv_bars[bar][0];
+            }
+        }
+
+        for (y = 0; y < height / 2; y++) {
+            for (x = 0; x < width / 2; x++) {
+                uint32_t bar = MIN((x * 2) / bar_width, 7u);
+                u_plane[y * (width / 2) + x] = yuv_bars[bar][1];
+                v_plane[y * (width / 2) + x] = yuv_bars[bar][2];
+            }
+        }
+    } else {
+        uint32_t x;
+        uint32_t y;
+
+        for (y = 0; y < height; y++) {
+            for (x = 0; x < width; x += 2) {
+                uint32_t bar = MIN(x / bar_width, 7u);
+                uint8_t y0 = yuv_bars[bar][0];
+                uint8_t u = yuv_bars[bar][1];
+                uint8_t v = yuv_bars[bar][2];
+                uint32_t offset = (y * width + x) * 2;
+
+                ptr[offset] = y0;
+                ptr[offset + 1] = u;
+                ptr[offset + 2] = y0;
+                ptr[offset + 3] = v;
+            }
+        }
+    }
 
     buf->sequence = session->sequence++;
 }
@@ -294,10 +364,14 @@ static void virtio_media_emit_dqbuf(VirtIOMedia *s, VirtIOMediaSession *session,
     buffer->timestamp.tv_usec = buf->sequence % 1000;
     buffer->m.planes = NULL;
 
-    buf->planes[0].bytesused = buf->plane_lengths[0];
-    buf->planes[1].bytesused = buf->plane_lengths[1];
-    buf->planes[2].bytesused = buf->plane_lengths[2];
-    memcpy(evt.planes, buf->planes, sizeof(buf->planes));
+    if (session->mplane) {
+        buf->planes[0].bytesused = buf->plane_lengths[0];
+        buf->planes[1].bytesused = buf->plane_lengths[1];
+        buf->planes[2].bytesused = buf->plane_lengths[2];
+        memcpy(evt.planes, buf->planes, sizeof(buf->planes));
+    } else {
+        buffer->bytesused = session->buffer_size;
+    }
     virtio_media_queue_event(s, &evt, sizeof(evt));
 }
 
@@ -327,30 +401,41 @@ static int virtio_media_alloc_buffers(VirtIOMedia *s, VirtIOMediaSession *sessio
         buf->index = i;
         buf->queued = false;
         buf->base_offset = offset;
-        buf->plane_offsets[0] = offset;
-        buf->plane_offsets[1] = offset + VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT;
-        buf->plane_offsets[2] = buf->plane_offsets[1] + VIRTIO_MEDIA_WIDTH *
-                                                   VIRTIO_MEDIA_HEIGHT / 4;
-        buf->plane_lengths[0] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT;
-        buf->plane_lengths[1] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
-        buf->plane_lengths[2] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
+        if (session->mplane) {
+            buf->plane_offsets[0] = offset;
+            buf->plane_offsets[1] = offset + VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT;
+            buf->plane_offsets[2] = buf->plane_offsets[1] +
+                                    VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
+            buf->plane_lengths[0] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT;
+            buf->plane_lengths[1] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
+            buf->plane_lengths[2] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
+        } else {
+            buf->plane_offsets[0] = offset;
+            buf->plane_lengths[0] = session->buffer_size;
+        }
 
         memset(&buf->buffer, 0, sizeof(buf->buffer));
         buf->buffer.index = i;
-        buf->buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        buf->buffer.type = session->mplane ?
+            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf->buffer.memory = V4L2_MEMORY_MMAP;
-        buf->buffer.length = 3;
-        buf->buffer.m.planes = planes;
+        if (session->mplane) {
+            buf->buffer.length = 3;
+            buf->buffer.m.planes = planes;
 
-        memset(planes, 0, sizeof(buf->planes));
-        planes[0].length = buf->plane_lengths[0];
-        planes[0].m.mem_offset = buf->plane_offsets[0];
-        planes[1].length = buf->plane_lengths[1];
-        planes[1].m.mem_offset = buf->plane_offsets[1];
-        planes[2].length = buf->plane_lengths[2];
-        planes[2].m.mem_offset = buf->plane_offsets[2];
+            memset(planes, 0, sizeof(buf->planes));
+            planes[0].length = buf->plane_lengths[0];
+            planes[0].m.mem_offset = buf->plane_offsets[0];
+            planes[1].length = buf->plane_lengths[1];
+            planes[1].m.mem_offset = buf->plane_offsets[1];
+            planes[2].length = buf->plane_lengths[2];
+            planes[2].m.mem_offset = buf->plane_offsets[2];
+        } else {
+            buf->buffer.length = session->buffer_size;
+            buf->buffer.m.offset = buf->plane_offsets[0];
+        }
 
-        offset += VIRTIO_MEDIA_BUFFER_SIZE;
+        offset += session->buffer_size;
     }
 
     if (offset > s->hostmem_size) {
@@ -368,6 +453,15 @@ static int virtio_media_find_plane(VirtIOMediaSession *session, uint32_t offset,
     for (i = 0; i < session->num_buffers; i++) {
         VirtIOMediaBuffer *buf = &session->buffers[i];
         int p;
+
+        if (!session->mplane) {
+            if (buf->plane_offsets[0] == offset) {
+                *addr = buf->plane_offsets[0];
+                *len = buf->plane_lengths[0];
+                return 0;
+            }
+            continue;
+        }
 
         for (p = 0; p < 3; p++) {
             if (buf->plane_offsets[p] == offset) {
@@ -416,7 +510,8 @@ static int virtio_media_ioctl_enum_fmt(VirtIOMediaSession *session,
     }
 
     if (desc.index != 0 ||
-        desc.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        (desc.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+         desc.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
         return -EINVAL;
     }
 
@@ -430,12 +525,23 @@ static int virtio_media_ioctl_enum_fmt(VirtIOMediaSession *session,
     return 0;
 }
 
-static int virtio_media_ioctl_g_fmt(const struct iovec *in_sg, int in_num,
-                                    size_t in_off)
+static int virtio_media_ioctl_g_fmt(const struct iovec *out_sg, int out_num,
+                                    const struct iovec *in_sg, int in_num,
+                                    size_t out_off, size_t in_off)
 {
     struct v4l2_format fmt;
 
-    virtio_media_fill_format(&fmt, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+    if (virtio_media_iov_read(out_sg, out_num, out_off, &fmt,
+                              sizeof(fmt)) != sizeof(fmt)) {
+        return -EINVAL;
+    }
+
+    if (fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        return -EINVAL;
+    }
+
+    virtio_media_fill_format(&fmt, fmt.type);
     if (virtio_media_iov_write(in_sg, in_num, in_off, &fmt,
                                sizeof(fmt)) != sizeof(fmt)) {
         return -EINVAL;
@@ -455,8 +561,19 @@ static int virtio_media_ioctl_s_fmt(const struct iovec *out_sg, int out_num,
         return -EINVAL;
     }
 
-    if (fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+    if (fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
         return -EINVAL;
+    }
+
+    if (fmt.type == V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+        if (fmt.fmt.pix.pixelformat != VIRTIO_MEDIA_PIXFMT_SINGLE) {
+            return -EINVAL;
+        }
+    } else {
+        if (fmt.fmt.pix_mp.pixelformat != VIRTIO_MEDIA_PIXFMT_MPLANE) {
+            return -EINVAL;
+        }
     }
 
     virtio_media_fill_format(&fmt, fmt.type);
@@ -481,10 +598,15 @@ static int virtio_media_ioctl_reqbufs(VirtIOMedia *s, VirtIOMediaSession *sessio
         return -EINVAL;
     }
 
-    if (reqbufs.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+    if ((reqbufs.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+         reqbufs.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ||
         reqbufs.memory != V4L2_MEMORY_MMAP) {
         return -EINVAL;
     }
+
+    session->mplane = (reqbufs.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+    session->buffer_size = session->mplane ?
+        VIRTIO_MEDIA_BUFFER_SIZE_MPLANE : VIRTIO_MEDIA_BUFFER_SIZE_SINGLE;
 
     ret = virtio_media_alloc_buffers(s, session, reqbufs.count);
     if (ret < 0) {
@@ -503,7 +625,8 @@ static int virtio_media_ioctl_reqbufs(VirtIOMedia *s, VirtIOMediaSession *sessio
 static int virtio_media_ioctl_querybuf(VirtIOMediaSession *session,
                                        const struct iovec *out_sg, int out_num,
                                        const struct iovec *in_sg, int in_num,
-                                       size_t out_off, size_t in_off)
+                                       size_t out_off, size_t in_off,
+                                       size_t *payload_len)
 {
     struct v4l2_buffer buf;
     struct v4l2_plane planes[3];
@@ -518,37 +641,58 @@ static int virtio_media_ioctl_querybuf(VirtIOMediaSession *session,
 
     index = buf.index;
     length = buf.length;
-    if (buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+    if ((buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+         buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ||
         buf.memory != V4L2_MEMORY_MMAP ||
-        index >= session->num_buffers ||
-        length < 3) {
+        index >= session->num_buffers) {
         return -EINVAL;
     }
 
-    if (virtio_media_read_planes(out_sg, out_num,
-                                 out_off + sizeof(buf),
-                                 planes, 3)) {
-        return -EINVAL;
-    }
+    if (buf.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        if (!session->mplane || length < 3) {
+            return -EINVAL;
+        }
+        if (virtio_media_read_planes(out_sg, out_num,
+                                     out_off + sizeof(buf),
+                                     planes, 3)) {
+            return -EINVAL;
+        }
 
-    for (i = 0; i < 3; i++) {
-        planes[i].length = session->buffers[index].plane_lengths[i];
-        planes[i].bytesused = 0;
-        planes[i].m.mem_offset = session->buffers[index].plane_offsets[i];
-    }
+        for (i = 0; i < 3; i++) {
+            planes[i].length = session->buffers[index].plane_lengths[i];
+            planes[i].bytesused = 0;
+            planes[i].m.mem_offset = session->buffers[index].plane_offsets[i];
+        }
 
-    buf.length = 3;
-    buf.bytesused = 0;
-    buf.flags = 0;
+        buf.length = 3;
+        buf.bytesused = 0;
+        buf.flags = 0;
 
-    if (virtio_media_iov_write(in_sg, in_num, in_off, &buf,
-                               sizeof(buf)) != sizeof(buf)) {
-        return -EINVAL;
-    }
-    if (virtio_media_write_planes(in_sg, in_num,
-                                  in_off + sizeof(buf),
-                                  planes, 3)) {
-        return -EINVAL;
+        if (virtio_media_iov_write(in_sg, in_num, in_off, &buf,
+                                   sizeof(buf)) != sizeof(buf)) {
+            return -EINVAL;
+        }
+        if (virtio_media_write_planes(in_sg, in_num,
+                                      in_off + sizeof(buf),
+                                      planes, 3)) {
+            return -EINVAL;
+        }
+        *payload_len = sizeof(struct v4l2_buffer) +
+                       sizeof(struct v4l2_plane) * 3;
+    } else {
+        if (session->mplane) {
+            return -EINVAL;
+        }
+        buf.length = session->buffer_size;
+        buf.bytesused = 0;
+        buf.flags = 0;
+        buf.m.offset = session->buffers[index].plane_offsets[0];
+
+        if (virtio_media_iov_write(in_sg, in_num, in_off, &buf,
+                                   sizeof(buf)) != sizeof(buf)) {
+            return -EINVAL;
+        }
+        *payload_len = sizeof(struct v4l2_buffer);
     }
 
     return 0;
@@ -557,7 +701,8 @@ static int virtio_media_ioctl_querybuf(VirtIOMediaSession *session,
 static int virtio_media_ioctl_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
                                    const struct iovec *out_sg, int out_num,
                                    const struct iovec *in_sg, int in_num,
-                                   size_t out_off, size_t in_off)
+                                   size_t out_off, size_t in_off,
+                                   size_t *payload_len)
 {
     struct v4l2_buffer buf;
     struct v4l2_plane planes[3];
@@ -571,36 +716,43 @@ static int virtio_media_ioctl_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
 
     index = buf.index;
     length = buf.length;
-    if (buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+    if ((buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+         buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ||
         buf.memory != V4L2_MEMORY_MMAP ||
-        index >= session->num_buffers ||
-        length < 3) {
+        index >= session->num_buffers) {
         return -EINVAL;
     }
 
-    if (virtio_media_read_planes(out_sg, out_num,
-                                 out_off + sizeof(buf),
-                                 planes, 3)) {
-        return -EINVAL;
+    if (buf.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        if (!session->mplane || length < 3) {
+            return -EINVAL;
+        }
+        if (virtio_media_read_planes(out_sg, out_num,
+                                     out_off + sizeof(buf),
+                                     planes, 3)) {
+            return -EINVAL;
+        }
     }
 
     if (session->buffers[index].queued) {
         return -EINVAL;
     }
 
-    memcpy(session->buffers[index].planes, planes, sizeof(planes));
-    session->buffers[index].planes[0].m.mem_offset =
-        session->buffers[index].plane_offsets[0];
-    session->buffers[index].planes[1].m.mem_offset =
-        session->buffers[index].plane_offsets[1];
-    session->buffers[index].planes[2].m.mem_offset =
-        session->buffers[index].plane_offsets[2];
-    session->buffers[index].planes[0].length =
-        session->buffers[index].plane_lengths[0];
-    session->buffers[index].planes[1].length =
-        session->buffers[index].plane_lengths[1];
-    session->buffers[index].planes[2].length =
-        session->buffers[index].plane_lengths[2];
+    if (buf.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        memcpy(session->buffers[index].planes, planes, sizeof(planes));
+        session->buffers[index].planes[0].m.mem_offset =
+            session->buffers[index].plane_offsets[0];
+        session->buffers[index].planes[1].m.mem_offset =
+            session->buffers[index].plane_offsets[1];
+        session->buffers[index].planes[2].m.mem_offset =
+            session->buffers[index].plane_offsets[2];
+        session->buffers[index].planes[0].length =
+            session->buffers[index].plane_lengths[0];
+        session->buffers[index].planes[1].length =
+            session->buffers[index].plane_lengths[1];
+        session->buffers[index].planes[2].length =
+            session->buffers[index].plane_lengths[2];
+    }
     session->buffers[index].queued = true;
 
     QTAILQ_INSERT_TAIL(&session->queued_buffers, &session->buffers[index], next);
@@ -618,10 +770,16 @@ static int virtio_media_ioctl_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
                                sizeof(buf)) != sizeof(buf)) {
         return -EINVAL;
     }
-    if (virtio_media_write_planes(in_sg, in_num,
-                                  in_off + sizeof(buf),
-                                  planes, 3)) {
-        return -EINVAL;
+    if (buf.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        if (virtio_media_write_planes(in_sg, in_num,
+                                      in_off + sizeof(buf),
+                                      planes, 3)) {
+            return -EINVAL;
+        }
+        *payload_len = sizeof(struct v4l2_buffer) +
+                       sizeof(struct v4l2_plane) * 3;
+    } else {
+        *payload_len = sizeof(struct v4l2_buffer);
     }
 
     return 0;
@@ -638,7 +796,12 @@ static int virtio_media_ioctl_streamon(VirtIOMedia *s, VirtIOMediaSession *sessi
         return -EINVAL;
     }
 
-    if (type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+    if (type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        return -EINVAL;
+    }
+
+    if (session->mplane != (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
         return -EINVAL;
     }
 
@@ -666,7 +829,12 @@ static int virtio_media_ioctl_streamoff(VirtIOMediaSession *session,
         return -EINVAL;
     }
 
-    if (type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+    if (type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        return -EINVAL;
+    }
+
+    if (session->mplane != (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
         return -EINVAL;
     }
 
@@ -760,7 +928,9 @@ static int virtio_media_handle_ioctl(VirtIOMedia *s, VirtIOMediaSession *session
                                            out_off, in_off);
     case _IOC_NR(VIDIOC_G_FMT):
         *payload_len = sizeof(struct v4l2_format);
-        return virtio_media_ioctl_g_fmt(elem->in_sg, elem->in_num, in_off);
+        return virtio_media_ioctl_g_fmt(elem->out_sg, elem->out_num,
+                                        elem->in_sg, elem->in_num,
+                                        out_off, in_off);
     case _IOC_NR(VIDIOC_S_FMT):
     case _IOC_NR(VIDIOC_TRY_FMT):
         *payload_len = sizeof(struct v4l2_format);
@@ -773,15 +943,15 @@ static int virtio_media_handle_ioctl(VirtIOMedia *s, VirtIOMediaSession *session
                                           elem->in_sg, elem->in_num,
                                           out_off, in_off);
     case _IOC_NR(VIDIOC_QUERYBUF):
-        *payload_len = sizeof(struct v4l2_buffer) + sizeof(struct v4l2_plane) * 3;
+        *payload_len = 0;
         return virtio_media_ioctl_querybuf(session, elem->out_sg, elem->out_num,
                                            elem->in_sg, elem->in_num,
-                                           out_off, in_off);
+                                           out_off, in_off, payload_len);
     case _IOC_NR(VIDIOC_QBUF):
-        *payload_len = sizeof(struct v4l2_buffer) + sizeof(struct v4l2_plane) * 3;
+        *payload_len = 0;
         return virtio_media_ioctl_qbuf(s, session, elem->out_sg, elem->out_num,
                                        elem->in_sg, elem->in_num,
-                                       out_off, in_off);
+                                       out_off, in_off, payload_len);
     case _IOC_NR(VIDIOC_STREAMON):
         *payload_len = 0;
         return virtio_media_ioctl_streamon(s, session, elem->out_sg,
@@ -1049,7 +1219,8 @@ static void virtio_media_realize(DeviceState *dev, Error **errp)
         s->max_buffers = 8;
     }
 
-    s->hostmem_size = pow2ceil((uint64_t)s->max_buffers * VIRTIO_MEDIA_BUFFER_SIZE);
+    s->hostmem_size = pow2ceil((uint64_t)s->max_buffers *
+                               VIRTIO_MEDIA_BUFFER_SIZE_MPLANE);
     memory_region_init_ram(&s->hostmem, OBJECT(s), "virtio-media-hostmem",
                            s->hostmem_size, errp);
     if (*errp) {
@@ -1061,7 +1232,8 @@ static void virtio_media_realize(DeviceState *dev, Error **errp)
     s->sessions = g_hash_table_new(g_direct_hash, g_direct_equal);
     QTAILQ_INIT(&s->pending_events);
 
-    s->config.device_caps = cpu_to_le32(V4L2_CAP_VIDEO_CAPTURE_MPLANE |
+    s->config.device_caps = cpu_to_le32(V4L2_CAP_VIDEO_CAPTURE |
+                                        V4L2_CAP_VIDEO_CAPTURE_MPLANE |
                                         V4L2_CAP_STREAMING);
     s->config.device_type = cpu_to_le32(0);
     memset(s->config.card, 0, sizeof(s->config.card));
