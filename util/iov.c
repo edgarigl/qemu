@@ -21,6 +21,7 @@
 #include "qemu/sockets.h"
 #include "qemu/cutils.h"
 
+#ifdef __arm__
 #include <arm_neon.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -69,6 +70,7 @@ static void *memcpy_neon_nc_to_ddr(void *dst, const void *src, size_t n)
     }
     return d;
 }
+#endif
 
 static void *iov_fully_aligned64_mempcpy(void *dv, const void *sv, size_t n)
 {
@@ -124,10 +126,12 @@ void *iov_memcpy(void *d, const void *s, size_t n)
         const unsigned char *bs = s;
         uintptr_t pd = (unsigned long) d;
         uintptr_t ps = (unsigned long) s;
+#ifdef __arm__
         bool neon = 0;
 
         if (neon)
                 return memcpy_neon_nc_to_ddr(d, s, n);
+#endif
 
         if ((pd & 7) == 0 && (ps & 7) == 0 && n >= 8) {
                 size_t n_aligned = n & ~7;
