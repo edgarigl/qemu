@@ -19,6 +19,7 @@ struct VirtIOMediaConfig {
 
 typedef struct VirtIOMedia VirtIOMedia;
 typedef struct VirtIOMediaEvent VirtIOMediaEvent;
+typedef struct VirtIOMediaSession VirtIOMediaSession;
 struct VirtIOMedia {
     VirtIODevice parent_obj;
 
@@ -31,6 +32,11 @@ struct VirtIOMedia {
     uint64_t hostmem_size;
     uint32_t max_buffers;
     bool use_hostmem;
+    char *host_device;
+    int host_fd;
+    bool use_host_device;
+    bool host_streaming;
+    VirtIOMediaSession *proxy_session;
 
     uint32_t session_next_id;
     GHashTable *sessions;
