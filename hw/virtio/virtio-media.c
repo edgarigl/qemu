@@ -628,6 +628,88 @@ static int virtio_media_proxy_ioctl(int fd, unsigned long req, void *arg)
     return virtio_media_ioctl_nointr(fd, req, arg);
 }
 
+static uint64_t virtio_media_proxy_max_sizeimage_for_format(int fd,
+                                                            uint32_t pixelformat)
+{
+    struct v4l2_frmsizeenum frmsize;
+    struct v4l2_format fmt;
+    uint32_t max_width = 0;
+    uint32_t max_height = 0;
+    int ret;
+
+    memset(&frmsize, 0, sizeof(frmsize));
+    frmsize.pixel_format = pixelformat;
+    for (frmsize.index = 0;; frmsize.index++) {
+        ret = virtio_media_proxy_ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize);
+        if (ret < 0) {
+            break;
+        }
+
+        switch (frmsize.type) {
+        case V4L2_FRMSIZE_TYPE_DISCRETE:
+            if (frmsize.discrete.width > max_width) {
+                max_width = frmsize.discrete.width;
+            }
+            if (frmsize.discrete.height > max_height) {
+                max_height = frmsize.discrete.height;
+            }
+            break;
+        case V4L2_FRMSIZE_TYPE_CONTINUOUS:
+        case V4L2_FRMSIZE_TYPE_STEPWISE:
+            max_width = frmsize.stepwise.max_width;
+            max_height = frmsize.stepwise.max_height;
+            frmsize.index = UINT32_MAX;
+            break;
+        default:
+            frmsize.index = UINT32_MAX;
+            break;
+        }
+    }
+
+    if (!max_width || !max_height) {
+        return 0;
+    }
+
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmt.fmt.pix.width = max_width;
+    fmt.fmt.pix.height = max_height;
+    fmt.fmt.pix.pixelformat = pixelformat;
+
+    ret = virtio_media_proxy_ioctl(fd, VIDIOC_TRY_FMT, &fmt);
+    if (ret < 0) {
+        return 0;
+    }
+
+    if (fmt.fmt.pix.sizeimage) {
+        return fmt.fmt.pix.sizeimage;
+    }
+
+    return (uint64_t)fmt.fmt.pix.width * fmt.fmt.pix.height * 2;
+}
+
+static uint64_t virtio_media_proxy_max_sizeimage(int fd)
+{
+    struct v4l2_fmtdesc desc;
+    uint64_t max_sizeimage = 0;
+    int ret;
+
+    memset(&desc, 0, sizeof(desc));
+    desc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    for (desc.index = 0;; desc.index++) {
+        ret = virtio_media_proxy_ioctl(fd, VIDIOC_ENUM_FMT, &desc);
+        if (ret < 0) {
+            break;
+        }
+
+        max_sizeimage = MAX(max_sizeimage,
+                            virtio_media_proxy_max_sizeimage_for_format(fd,
+                                                                        desc.pixelformat));
+    }
+
+    return max_sizeimage;
+}
+
 static int virtio_media_proxy_enuminput(VirtIOMedia *s,
                                         const struct iovec *out_sg, int out_num,
                                         const struct iovec *in_sg, int in_num,
@@ -2334,6 +2416,8 @@ static void virtio_media_realize(DeviceState *dev, Error **errp)
     s->proxy_session = NULL;
 
     if (s->host_device) {
+        uint64_t max_sizeimage;
+
         s->host_fd = open(s->host_device, O_RDWR | O_NONBLOCK);
         if (s->host_fd < 0) {
             error_setg(errp, "virtio-media: failed to open host device %s: %s",
@@ -2354,6 +2438,11 @@ static void virtio_media_realize(DeviceState *dev, Error **errp)
         if (virtio_media_ioctl_nointr(s->host_fd, VIDIOC_G_FMT, &fmt) == 0 &&
             fmt.fmt.pix.sizeimage > 0) {
             buffer_size = fmt.fmt.pix.sizeimage;
+        }
+
+        max_sizeimage = virtio_media_proxy_max_sizeimage(s->host_fd);
+        if (max_sizeimage > buffer_size) {
+            buffer_size = max_sizeimage;
         }
 
         caps = cap.device_caps ? cap.device_caps : cap.capabilities;
