@@ -150,7 +150,10 @@ typedef struct VirtIOMediaSession {
     bool host_streaming;
     void **host_maps;
     uint32_t *host_lengths;
+    uint32_t *host_offsets;
     uint32_t host_num_buffers;
+    uint32_t host_num_planes;
+    uint32_t host_plane_lengths[VIRTIO_MEDIA_MAX_PLANES];
     QTAILQ_HEAD(, VirtIOMediaBuffer) queued_buffers;
 } VirtIOMediaSession;
 
@@ -187,22 +190,32 @@ static void vmedia_proxy_release_buffers(VirtIOMedia *s,
                                          VirtIOMediaSession *session)
 {
     uint32_t i;
+    uint32_t p;
+    uint32_t planes;
 
     if (!s->use_host_device || !session->host_maps) {
         return;
     }
 
+    planes = session->host_num_planes ? session->host_num_planes : 1;
     for (i = 0; i < session->host_num_buffers; i++) {
-        if (session->host_maps[i]) {
-            munmap(session->host_maps[i], session->host_lengths[i]);
+        for (p = 0; p < planes; p++) {
+            uint32_t idx = i * planes + p;
+
+            if (session->host_maps[idx]) {
+                munmap(session->host_maps[idx], session->host_lengths[idx]);
+            }
         }
     }
 
     g_free(session->host_maps);
     g_free(session->host_lengths);
+    g_free(session->host_offsets);
     session->host_maps = NULL;
     session->host_lengths = NULL;
+    session->host_offsets = NULL;
     session->host_num_buffers = 0;
+    session->host_num_planes = 0;
 }
 
 static void vmedia_session_free(VirtIOMedia *s, VirtIOMediaSession *session)
@@ -234,7 +247,10 @@ static VirtIOMediaSession *vmedia_session_new(VirtIOMedia *s, uint32_t id)
     session->host_streaming = false;
     session->host_maps = NULL;
     session->host_lengths = NULL;
+    session->host_offsets = NULL;
     session->host_num_buffers = 0;
+    session->host_num_planes = 0;
+    memset(session->host_plane_lengths, 0, sizeof(session->host_plane_lengths));
     QTAILQ_INIT(&session->queued_buffers);
     return session;
 }
@@ -286,11 +302,18 @@ static void vmedia_host_fd_handler(void *opaque)
     VirtIOMediaSession *session = opaque;
     VirtIOMedia *s = session->dev;
     struct v4l2_buffer buf;
+    struct v4l2_plane planes[VIRTIO_MEDIA_MAX_PLANES];
 
     for (;;) {
         memset(&buf, 0, sizeof(buf));
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        memset(planes, 0, sizeof(planes));
+        buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                                     V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
+        if (session->mplane) {
+            buf.length = session->host_num_planes;
+            buf.m.planes = planes;
+        }
 
         int ret = vmedia_ioctl_nointr(session->host_fd, VIDIOC_DQBUF, &buf);
         if (ret < 0) {
@@ -305,14 +328,32 @@ static void vmedia_host_fd_handler(void *opaque)
             continue;
         }
 
-        memcpy(memory_region_get_ram_ptr(&s->hostmem) +
-               session->buffers[buf.index].base_offset,
-               session->host_maps[buf.index],
-               MIN(buf.bytesused, session->host_lengths[buf.index]));
+        if (session->mplane && session->host_num_planes) {
+            uint32_t num_planes = MIN(session->host_num_planes,
+                                      session->buffers[buf.index].buffer.length);
+            for (uint32_t p = 0; p < num_planes; p++) {
+                uint32_t idx = buf.index * session->host_num_planes + p;
+                uint32_t bytes = planes[p].bytesused ?
+                    planes[p].bytesused : session->host_lengths[idx];
+
+                memcpy(memory_region_get_ram_ptr(&s->hostmem) +
+                       session->buffers[buf.index].plane_offsets[p],
+                       session->host_maps[idx],
+                       MIN(bytes, session->buffers[buf.index].plane_lengths[p]));
+                session->buffers[buf.index].planes[p].bytesused = bytes;
+            }
+        } else {
+            memcpy(memory_region_get_ram_ptr(&s->hostmem) +
+                   session->buffers[buf.index].base_offset,
+                   session->host_maps[buf.index],
+                   MIN(buf.bytesused, session->host_lengths[buf.index]));
+        }
 
         session->buffers[buf.index].queued = false;
         session->buffers[buf.index].sequence = buf.sequence;
-        session->buffers[buf.index].buffer.bytesused = buf.bytesused;
+        if (!session->mplane) {
+            session->buffers[buf.index].buffer.bytesused = buf.bytesused;
+        }
         session->buffers[buf.index].buffer.timestamp = buf.timestamp;
 
         vmedia_emit_dqbuf(s, session, &session->buffers[buf.index]);
@@ -525,21 +566,42 @@ static int vmedia_alloc_buffers(VirtIOMedia *s, VirtIOMediaSession *session,
     for (i = 0; i < count; i++) {
         VirtIOMediaBuffer *buf = &session->buffers[i];
         struct v4l2_plane *planes = buf->planes;
+        uint32_t num_planes = 0;
+        uint32_t plane_lengths[VIRTIO_MEDIA_MAX_PLANES] = { 0 };
+        uint64_t buf_size = 0;
 
         buf->index = i;
         buf->queued = false;
         buf->base_offset = offset;
         if (session->mplane) {
+            bool use_host_planes = session->host_num_planes &&
+                session->host_plane_lengths[0];
+
+            if (use_host_planes) {
+                num_planes = session->host_num_planes;
+                for (uint32_t p = 0; p < num_planes; p++) {
+                    plane_lengths[p] = session->host_plane_lengths[p];
+                }
+            } else {
+                num_planes = 3;
+                plane_lengths[0] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT;
+                plane_lengths[1] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
+                plane_lengths[2] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
+            }
+
             buf->plane_offsets[0] = offset;
-            buf->plane_offsets[1] = offset + VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT;
-            buf->plane_offsets[2] = buf->plane_offsets[1] +
-                                    VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
-            buf->plane_lengths[0] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT;
-            buf->plane_lengths[1] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
-            buf->plane_lengths[2] = VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT / 4;
+            for (uint32_t p = 0; p < num_planes; p++) {
+                if (p > 0) {
+                    buf->plane_offsets[p] =
+                        buf->plane_offsets[p - 1] + plane_lengths[p - 1];
+                }
+                buf->plane_lengths[p] = plane_lengths[p];
+                buf_size += plane_lengths[p];
+            }
         } else {
             buf->plane_offsets[0] = offset;
             buf->plane_lengths[0] = session->buffer_size;
+            buf_size = session->buffer_size;
         }
 
         memset(&buf->buffer, 0, sizeof(buf->buffer));
@@ -548,22 +610,20 @@ static int vmedia_alloc_buffers(VirtIOMedia *s, VirtIOMediaSession *session,
             V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf->buffer.memory = V4L2_MEMORY_MMAP;
         if (session->mplane) {
-            buf->buffer.length = 3;
+            buf->buffer.length = num_planes;
             buf->buffer.m.planes = planes;
 
             memset(planes, 0, sizeof(buf->planes));
-            planes[0].length = buf->plane_lengths[0];
-            planes[0].m.mem_offset = buf->plane_offsets[0];
-            planes[1].length = buf->plane_lengths[1];
-            planes[1].m.mem_offset = buf->plane_offsets[1];
-            planes[2].length = buf->plane_lengths[2];
-            planes[2].m.mem_offset = buf->plane_offsets[2];
+            for (uint32_t p = 0; p < num_planes; p++) {
+                planes[p].length = buf->plane_lengths[p];
+                planes[p].m.mem_offset = buf->plane_offsets[p];
+            }
         } else {
             buf->buffer.length = session->buffer_size;
             buf->buffer.m.offset = buf->plane_offsets[0];
         }
 
-        offset += session->buffer_size;
+        offset += buf_size;
     }
 
     if (offset > s->hostmem_size) {
@@ -794,7 +854,8 @@ static int vmedia_proxy_enum_fmt(VirtIOMediaSession *session,
         return -EINVAL;
     }
 
-    if (desc.type != V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+    if (desc.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        desc.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
         return -EINVAL;
     }
 
@@ -824,7 +885,8 @@ static int vmedia_proxy_g_fmt(VirtIOMediaSession *session,
         return -EINVAL;
     }
 
-    if (fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+    if (fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
         return -EINVAL;
     }
 
@@ -859,7 +921,8 @@ static int vmedia_proxy_s_fmt(VirtIOMediaSession *session,
         return -EINVAL;
     }
 
-    if (fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+    if (fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        fmt.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
         return -EINVAL;
     }
 
@@ -889,10 +952,21 @@ static int vmedia_proxy_s_fmt(VirtIOMediaSession *session,
         return ret;
     }
 
-    sizeimage = fmt.fmt.pix.sizeimage;
-    if (!sizeimage) {
-        sizeimage = (uint64_t)fmt.fmt.pix.width *
-                    (uint64_t)fmt.fmt.pix.height * 2;
+    if (fmt.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        sizeimage = 0;
+        for (int i = 0; i < fmt.fmt.pix_mp.num_planes; i++) {
+            sizeimage += fmt.fmt.pix_mp.plane_fmt[i].sizeimage;
+        }
+        if (!sizeimage) {
+            sizeimage = (uint64_t)fmt.fmt.pix_mp.width *
+                        (uint64_t)fmt.fmt.pix_mp.height * 2;
+        }
+    } else {
+        sizeimage = fmt.fmt.pix.sizeimage;
+        if (!sizeimage) {
+            sizeimage = (uint64_t)fmt.fmt.pix.width *
+                        (uint64_t)fmt.fmt.pix.height * 2;
+        }
     }
     if (sizeimage &&
         (uint64_t)session->dev->max_buffers * sizeimage >
@@ -905,6 +979,7 @@ static int vmedia_proxy_s_fmt(VirtIOMediaSession *session,
         vmedia_reset_buffers(session);
         QTAILQ_INIT(&session->queued_buffers);
         session->streaming = false;
+        session->mplane = (fmt.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
         session->buffer_size = sizeimage ? (uint32_t)sizeimage :
             VIRTIO_MEDIA_BUFFER_SIZE_SINGLE;
     }
@@ -932,7 +1007,8 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
         return -EINVAL;
     }
 
-    if (reqbufs.type != V4L2_BUF_TYPE_VIDEO_CAPTURE ||
+    if ((reqbufs.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+         reqbufs.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ||
         reqbufs.memory != V4L2_MEMORY_MMAP) {
         return -EINVAL;
     }
@@ -946,8 +1022,9 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
         return ret;
     }
 
-    session->mplane = false;
+    session->mplane = (reqbufs.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
     session->buffer_size = VIRTIO_MEDIA_BUFFER_SIZE_SINGLE;
+    session->host_num_planes = session->mplane ? 0 : 1;
     session->host_num_buffers = reqbufs.count;
 
     if (reqbufs.count == 0) {
@@ -959,14 +1036,46 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
         return 0;
     }
 
-    session->host_maps = g_new0(void *, reqbufs.count);
-    session->host_lengths = g_new0(uint32_t, reqbufs.count);
+    if (session->mplane) {
+        struct v4l2_format fmt;
+
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        if (vmedia_proxy_ioctl(session->host_fd, VIDIOC_G_FMT, &fmt) == 0 &&
+            fmt.fmt.pix_mp.num_planes > 0) {
+            session->host_num_planes = MIN(fmt.fmt.pix_mp.num_planes,
+                                           (uint32_t)VIRTIO_MEDIA_MAX_PLANES);
+            for (i = 0; i < session->host_num_planes; i++) {
+                session->host_plane_lengths[i] =
+                    fmt.fmt.pix_mp.plane_fmt[i].sizeimage;
+            }
+        } else {
+            session->host_num_planes = 1;
+        }
+    } else {
+        session->host_num_planes = 1;
+    }
+
+    session->host_maps = g_new0(void *,
+                                reqbufs.count * session->host_num_planes);
+    session->host_lengths = g_new0(uint32_t,
+                                   reqbufs.count * session->host_num_planes);
+    session->host_offsets = g_new0(uint32_t,
+                                   reqbufs.count * session->host_num_planes);
 
     for (i = 0; i < reqbufs.count; i++) {
+        struct v4l2_plane planes[VIRTIO_MEDIA_MAX_PLANES];
+
         memset(&buf, 0, sizeof(buf));
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        memset(planes, 0, sizeof(planes));
+        buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                                     V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
         buf.index = i;
+        if (session->mplane) {
+            buf.length = session->host_num_planes;
+            buf.m.planes = planes;
+        }
 
         ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QUERYBUF, &buf);
         if (ret < 0) {
@@ -978,22 +1087,69 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
             return ret;
         }
 
-        session->host_maps[i] = mmap(NULL, buf.length,
-                                     PROT_READ | PROT_WRITE, MAP_SHARED,
-                                     session->host_fd, buf.m.offset);
-        if (session->host_maps[i] == MAP_FAILED) {
-            session->host_maps[i] = NULL;
-            ret = -errno;
-            vmedia_proxy_release_buffers(s, session);
-            memset(&reqbufs, 0, sizeof(reqbufs));
-            reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            reqbufs.memory = V4L2_MEMORY_MMAP;
-            vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &reqbufs);
-            return ret;
+        if (session->mplane) {
+            uint32_t p;
+
+            for (p = 0; p < session->host_num_planes; p++) {
+                uint32_t idx = i * session->host_num_planes + p;
+
+                session->host_offsets[idx] = planes[p].m.mem_offset;
+                session->host_lengths[idx] = planes[p].length;
+                session->host_maps[idx] = mmap(NULL, planes[p].length,
+                                               PROT_READ | PROT_WRITE,
+                                               MAP_SHARED,
+                                               session->host_fd,
+                                               planes[p].m.mem_offset);
+                if (session->host_maps[idx] == MAP_FAILED) {
+                    session->host_maps[idx] = NULL;
+                    ret = -errno;
+                    vmedia_proxy_release_buffers(s, session);
+                    memset(&reqbufs, 0, sizeof(reqbufs));
+                    reqbufs.type = session->mplane ?
+                        V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                        V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                    reqbufs.memory = V4L2_MEMORY_MMAP;
+                    vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
+                                       &reqbufs);
+                    return ret;
+                }
+            }
+            if (i == 0) {
+                uint64_t total = 0;
+
+                for (p = 0; p < session->host_num_planes; p++) {
+                    total += session->host_lengths[p];
+                }
+                session->buffer_size = total ? (uint32_t)total :
+                    VIRTIO_MEDIA_BUFFER_SIZE_MPLANE;
+            }
+        } else {
+            session->host_offsets[i] = buf.m.offset;
+            session->host_maps[i] = mmap(NULL, buf.length,
+                                         PROT_READ | PROT_WRITE, MAP_SHARED,
+                                         session->host_fd, buf.m.offset);
+            if (session->host_maps[i] == MAP_FAILED) {
+                session->host_maps[i] = NULL;
+                ret = -errno;
+                vmedia_proxy_release_buffers(s, session);
+                memset(&reqbufs, 0, sizeof(reqbufs));
+                reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                reqbufs.memory = V4L2_MEMORY_MMAP;
+                vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &reqbufs);
+                return ret;
+            }
+            session->host_lengths[i] = buf.length;
+            if (i == 0) {
+                session->buffer_size = buf.length;
+            }
         }
-        session->host_lengths[i] = buf.length;
-        if (i == 0) {
-            session->buffer_size = buf.length;
+    }
+
+    if (session->mplane && session->host_num_planes) {
+        uint32_t p;
+
+        for (p = 0; p < session->host_num_planes; p++) {
+            session->host_plane_lengths[p] = session->host_lengths[p];
         }
     }
 
@@ -1016,6 +1172,83 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
     return 0;
 }
 
+static int vmedia_proxy_querybuf(VirtIOMediaSession *session,
+                                 const struct iovec *out_sg, int out_num,
+                                 const struct iovec *in_sg, int in_num,
+                                 size_t out_off, size_t in_off,
+                                 size_t *payload_len)
+{
+    struct v4l2_buffer buf;
+    struct v4l2_plane planes[VIRTIO_MEDIA_MAX_PLANES];
+    uint32_t index;
+    uint32_t length;
+    uint32_t i;
+
+    if (vmedia_iov_read(out_sg, out_num, out_off, &buf,
+                        sizeof(buf)) != sizeof(buf)) {
+        return -EINVAL;
+    }
+
+    index = buf.index;
+    length = buf.length;
+    if ((buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+         buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ||
+        buf.memory != V4L2_MEMORY_MMAP ||
+        index >= session->num_buffers) {
+        return -EINVAL;
+    }
+
+    if (session->mplane != (buf.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
+        return -EINVAL;
+    }
+
+    if (buf.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        if (length < session->buffers[index].buffer.length) {
+            return -EINVAL;
+        }
+        if (vmedia_read_planes(out_sg, out_num,
+                               out_off + sizeof(buf),
+                               planes, session->buffers[index].buffer.length)) {
+            return -EINVAL;
+        }
+
+        for (i = 0; i < session->buffers[index].buffer.length; i++) {
+            planes[i].length = session->buffers[index].plane_lengths[i];
+            planes[i].bytesused = 0;
+            planes[i].m.mem_offset = session->buffers[index].plane_offsets[i];
+        }
+
+        buf.length = session->buffers[index].buffer.length;
+        buf.bytesused = 0;
+        buf.flags = 0;
+
+        if (vmedia_iov_write(in_sg, in_num, in_off, &buf,
+                             sizeof(buf)) != sizeof(buf)) {
+            return -EINVAL;
+        }
+        if (vmedia_write_planes(in_sg, in_num,
+                                in_off + sizeof(buf),
+                                planes, session->buffers[index].buffer.length)) {
+            return -EINVAL;
+        }
+        *payload_len = sizeof(struct v4l2_buffer) +
+            sizeof(struct v4l2_plane) * session->buffers[index].buffer.length;
+    } else {
+        buf.length = session->buffers[index].plane_lengths[0];
+        buf.bytesused = 0;
+        buf.flags = 0;
+        buf.m.offset = session->buffers[index].plane_offsets[0];
+
+        if (vmedia_iov_write(in_sg, in_num, in_off, &buf,
+                             sizeof(buf)) != sizeof(buf)) {
+            return -EINVAL;
+        }
+        *payload_len = sizeof(struct v4l2_buffer);
+    }
+
+    return 0;
+}
+
 static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
                                    const struct iovec *out_sg, int out_num,
                                    const struct iovec *in_sg, int in_num,
@@ -1024,6 +1257,7 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
 {
     struct v4l2_buffer buf;
     struct v4l2_buffer host_buf;
+    struct v4l2_plane planes[VIRTIO_MEDIA_MAX_PLANES];
     uint32_t index;
     int ret;
 
@@ -1032,8 +1266,13 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
         return -EINVAL;
     }
 
-    if (buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE ||
+    if ((buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+         buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ||
         buf.memory != V4L2_MEMORY_MMAP) {
+        return -EINVAL;
+    }
+
+    if (session->mplane != (buf.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
         return -EINVAL;
     }
 
@@ -1047,9 +1286,29 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
     }
 
     memset(&host_buf, 0, sizeof(host_buf));
-    host_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    host_buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                                      V4L2_BUF_TYPE_VIDEO_CAPTURE;
     host_buf.memory = V4L2_MEMORY_MMAP;
     host_buf.index = index;
+    if (session->mplane) {
+        if (!session->host_num_planes ||
+            buf.length < session->host_num_planes) {
+            return -EINVAL;
+        }
+        if (vmedia_read_planes(out_sg, out_num,
+                               out_off + sizeof(buf),
+                               planes, session->host_num_planes)) {
+            return -EINVAL;
+        }
+        host_buf.length = session->host_num_planes;
+        host_buf.m.planes = planes;
+        for (uint32_t p = 0; p < session->host_num_planes; p++) {
+            uint32_t idx = index * session->host_num_planes + p;
+
+            planes[p].length = session->host_lengths[idx];
+            planes[p].m.mem_offset = session->host_offsets[idx];
+        }
+    }
 
     ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QBUF, &host_buf);
     if (ret < 0) {
@@ -1062,7 +1321,17 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
                                sizeof(buf)) != sizeof(buf)) {
         return -EINVAL;
     }
-    *payload_len = sizeof(struct v4l2_buffer);
+    if (session->mplane) {
+        if (vmedia_write_planes(in_sg, in_num,
+                                in_off + sizeof(buf),
+                                planes, session->host_num_planes)) {
+            return -EINVAL;
+        }
+        *payload_len = sizeof(struct v4l2_buffer) +
+            sizeof(struct v4l2_plane) * session->host_num_planes;
+    } else {
+        *payload_len = sizeof(struct v4l2_buffer);
+    }
     return 0;
 }
 
@@ -1078,7 +1347,11 @@ static int vmedia_proxy_streamon(VirtIOMedia *s, VirtIOMediaSession *session,
         return -EINVAL;
     }
 
-    if (type != V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+    if (type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        return -EINVAL;
+    }
+    if (session->mplane != (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
         return -EINVAL;
     }
 
@@ -1106,7 +1379,11 @@ static int vmedia_proxy_streamoff(VirtIOMedia *s, VirtIOMediaSession *session,
         return -EINVAL;
     }
 
-    if (type != V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+    if (type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        return -EINVAL;
+    }
+    if (session->mplane != (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
         return -EINVAL;
     }
 
@@ -1974,6 +2251,11 @@ static int vmedia_handle_ioctl(VirtIOMedia *s,
                                           out_off, in_off);
     case _IOC_NR(VIDIOC_QUERYBUF):
         *payload_len = 0;
+        if (s->use_host_device) {
+            return vmedia_proxy_querybuf(session, elem->out_sg, elem->out_num,
+                                          elem->in_sg, elem->in_num,
+                                          out_off, in_off, payload_len);
+        }
         return vmedia_ioctl_querybuf(session, elem->out_sg, elem->out_num,
                                            elem->in_sg, elem->in_num,
                                            out_off, in_off, payload_len);
