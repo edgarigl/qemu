@@ -54,6 +54,8 @@
 #define VIRTIO_MEDIA_BUFFER_SIZE_MPLANE (VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT * 3 / 2)
 #define VIRTIO_MEDIA_BUFFER_SIZE_SINGLE (VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT * 2)
 
+static int virtio_media_ioctl_nointr(int fd, unsigned long req, void *arg);
+
 struct virtio_media_cmd_header {
     uint32_t cmd;
     uint32_t reserved;
@@ -280,8 +282,9 @@ static void virtio_media_host_fd_handler(void *opaque)
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
 
-        if (ioctl(s->host_fd, VIDIOC_DQBUF, &buf) < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        int ret = virtio_media_ioctl_nointr(s->host_fd, VIDIOC_DQBUF, &buf);
+        if (ret < 0) {
+            if (ret == -EAGAIN || ret == -EWOULDBLOCK) {
                 break;
             }
             return;
@@ -317,7 +320,7 @@ static void virtio_media_proxy_stop(VirtIOMedia *s)
     }
 
     if (s->host_streaming) {
-        ioctl(s->host_fd, VIDIOC_STREAMOFF, &type);
+        virtio_media_ioctl_nointr(s->host_fd, VIDIOC_STREAMOFF, &type);
         s->host_streaming = false;
     }
 
@@ -609,13 +612,80 @@ static int virtio_media_write_planes(const struct iovec *iov, int iov_cnt,
     return (written == len) ? 0 : -EINVAL;
 }
 
+static int virtio_media_ioctl_nointr(int fd, unsigned long req, void *arg)
+{
+    int ret;
+
+    do {
+        ret = ioctl(fd, req, arg);
+    } while (ret < 0 && errno == EINTR);
+
+    return ret < 0 ? -errno : 0;
+}
+
 static int virtio_media_proxy_ioctl(int fd, unsigned long req, void *arg)
 {
-    if (ioctl(fd, req, arg) < 0) {
-        return -errno;
+    return virtio_media_ioctl_nointr(fd, req, arg);
+}
+
+static int virtio_media_proxy_enuminput(VirtIOMedia *s,
+                                        const struct iovec *out_sg, int out_num,
+                                        const struct iovec *in_sg, int in_num,
+                                        size_t out_off, size_t in_off)
+{
+    struct v4l2_input input;
+    int ret;
+
+    if (virtio_media_iov_read(out_sg, out_num, out_off, &input,
+                              sizeof(input)) != sizeof(input)) {
+        return -EINVAL;
+    }
+
+    ret = virtio_media_proxy_ioctl(s->host_fd, VIDIOC_ENUMINPUT, &input);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (virtio_media_iov_write(in_sg, in_num, in_off, &input,
+                               sizeof(input)) != sizeof(input)) {
+        return -EINVAL;
     }
 
     return 0;
+}
+
+static int virtio_media_proxy_g_input(VirtIOMedia *s,
+                                      const struct iovec *in_sg, int in_num,
+                                      size_t in_off)
+{
+    uint32_t input = 0;
+    int ret;
+
+    ret = virtio_media_proxy_ioctl(s->host_fd, VIDIOC_G_INPUT, &input);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (virtio_media_iov_write(in_sg, in_num, in_off, &input,
+                               sizeof(input)) != sizeof(input)) {
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+static int virtio_media_proxy_s_input(VirtIOMedia *s,
+                                      const struct iovec *out_sg, int out_num,
+                                      size_t out_off)
+{
+    uint32_t input;
+
+    if (virtio_media_iov_read(out_sg, out_num, out_off, &input,
+                              sizeof(input)) != sizeof(input)) {
+        return -EINVAL;
+    }
+
+    return virtio_media_proxy_ioctl(s->host_fd, VIDIOC_S_INPUT, &input);
 }
 
 static int virtio_media_proxy_enum_fmt(VirtIOMedia *s,
@@ -687,6 +757,7 @@ static int virtio_media_proxy_s_fmt(VirtIOMedia *s,
     struct v4l2_format fmt;
     unsigned long req = is_try ? VIDIOC_TRY_FMT : VIDIOC_S_FMT;
     struct v4l2_requestbuffers reqbufs;
+    uint32_t type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     uint64_t sizeimage;
     VirtIOMediaSession *session = s->proxy_session;
     int ret;
@@ -701,13 +772,24 @@ static int virtio_media_proxy_s_fmt(VirtIOMedia *s,
     }
 
     ret = virtio_media_proxy_ioctl(s->host_fd, req, &fmt);
-    if (ret < 0 && ret == -EBUSY && !is_try) {
-        virtio_media_proxy_stop(s);
+    if (ret == -EBUSY && !is_try) {
+        int stop_ret;
+
+        stop_ret = virtio_media_proxy_ioctl(s->host_fd, VIDIOC_STREAMOFF, &type);
+        if (stop_ret < 0 && stop_ret != -EINVAL) {
+            return stop_ret;
+        }
+        s->host_streaming = false;
+        virtio_media_set_host_handler(s, false);
+
         memset(&reqbufs, 0, sizeof(reqbufs));
         reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         reqbufs.memory = V4L2_MEMORY_MMAP;
         reqbufs.count = 0;
-        virtio_media_proxy_ioctl(s->host_fd, VIDIOC_REQBUFS, &reqbufs);
+        ret = virtio_media_proxy_ioctl(s->host_fd, VIDIOC_REQBUFS, &reqbufs);
+        if (ret < 0) {
+            return ret;
+        }
 
         ret = virtio_media_proxy_ioctl(s->host_fd, req, &fmt);
     }
@@ -794,6 +876,11 @@ static int virtio_media_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *sessio
 
         ret = virtio_media_proxy_ioctl(s->host_fd, VIDIOC_QUERYBUF, &buf);
         if (ret < 0) {
+            virtio_media_proxy_release_buffers(s, session);
+            memset(&reqbufs, 0, sizeof(reqbufs));
+            reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            reqbufs.memory = V4L2_MEMORY_MMAP;
+            virtio_media_proxy_ioctl(s->host_fd, VIDIOC_REQBUFS, &reqbufs);
             return ret;
         }
 
@@ -802,7 +889,13 @@ static int virtio_media_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *sessio
                                      s->host_fd, buf.m.offset);
         if (session->host_maps[i] == MAP_FAILED) {
             session->host_maps[i] = NULL;
-            return -errno;
+            ret = -errno;
+            virtio_media_proxy_release_buffers(s, session);
+            memset(&reqbufs, 0, sizeof(reqbufs));
+            reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            reqbufs.memory = V4L2_MEMORY_MMAP;
+            virtio_media_proxy_ioctl(s->host_fd, VIDIOC_REQBUFS, &reqbufs);
+            return ret;
         }
         session->host_lengths[i] = buf.length;
         if (i == 0) {
@@ -812,6 +905,11 @@ static int virtio_media_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *sessio
 
     ret = virtio_media_alloc_buffers(s, session, reqbufs.count);
     if (ret < 0) {
+        virtio_media_proxy_release_buffers(s, session);
+        memset(&reqbufs, 0, sizeof(reqbufs));
+        reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        reqbufs.memory = V4L2_MEMORY_MMAP;
+        virtio_media_proxy_ioctl(s->host_fd, VIDIOC_REQBUFS, &reqbufs);
         return ret;
     }
 
@@ -1811,14 +1909,27 @@ static int virtio_media_handle_ioctl(VirtIOMedia *s, VirtIOMediaSession *session
                                             elem->out_num, out_off);
     case _IOC_NR(VIDIOC_ENUMINPUT):
         *payload_len = sizeof(struct v4l2_input);
+        if (s->use_host_device) {
+            return virtio_media_proxy_enuminput(s, elem->out_sg, elem->out_num,
+                                                elem->in_sg, elem->in_num,
+                                                out_off, in_off);
+        }
         return virtio_media_ioctl_enuminput(elem->out_sg, elem->out_num,
                                             elem->in_sg, elem->in_num,
                                             out_off, in_off);
     case _IOC_NR(VIDIOC_G_INPUT):
         *payload_len = sizeof(uint32_t);
+        if (s->use_host_device) {
+            return virtio_media_proxy_g_input(s, elem->in_sg, elem->in_num,
+                                              in_off);
+        }
         return virtio_media_ioctl_g_input(elem->in_sg, elem->in_num, in_off);
     case _IOC_NR(VIDIOC_S_INPUT):
         *payload_len = 0;
+        if (s->use_host_device) {
+            return virtio_media_proxy_s_input(s, elem->out_sg, elem->out_num,
+                                              out_off);
+        }
         return virtio_media_ioctl_s_input(elem->out_sg, elem->out_num, out_off);
     case _IOC_NR(VIDIOC_QUERYCTRL):
         *payload_len = sizeof(struct v4l2_queryctrl);
@@ -2073,6 +2184,9 @@ static void virtio_media_handle_command(VirtIODevice *vdev, VirtQueue *vq)
         } else {
             status = virtio_media_handle_ioctl(s, session, code, elem, &payload_len);
         }
+        if (status < 0) {
+            payload_len = 0;
+        }
 
         virtio_media_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
         virtio_media_iov_write(elem->in_sg, elem->in_num, 0,
@@ -2227,7 +2341,7 @@ static void virtio_media_realize(DeviceState *dev, Error **errp)
             return;
         }
 
-        if (ioctl(s->host_fd, VIDIOC_QUERYCAP, &cap) < 0) {
+        if (virtio_media_ioctl_nointr(s->host_fd, VIDIOC_QUERYCAP, &cap) < 0) {
             error_setg(errp, "virtio-media: VIDIOC_QUERYCAP failed on %s: %s",
                        s->host_device, strerror(errno));
             close(s->host_fd);
@@ -2237,7 +2351,7 @@ static void virtio_media_realize(DeviceState *dev, Error **errp)
 
         memset(&fmt, 0, sizeof(fmt));
         fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        if (ioctl(s->host_fd, VIDIOC_G_FMT, &fmt) == 0 &&
+        if (virtio_media_ioctl_nointr(s->host_fd, VIDIOC_G_FMT, &fmt) == 0 &&
             fmt.fmt.pix.sizeimage > 0) {
             buffer_size = fmt.fmt.pix.sizeimage;
         }
