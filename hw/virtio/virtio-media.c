@@ -2289,24 +2289,24 @@ static int vmedia_handle_ioctl(VirtIOMedia *s,
         *payload_len = sizeof(struct v4l2_input);
         if (s->use_host_device) {
             return vmedia_proxy_enuminput(session, elem->out_sg, elem->out_num,
-                                                elem->in_sg, elem->in_num,
-                                                out_off, in_off);
+                                          elem->in_sg, elem->in_num,
+                                          out_off, in_off);
         }
         return vmedia_ioctl_enuminput(elem->out_sg, elem->out_num,
-                                            elem->in_sg, elem->in_num,
-                                            out_off, in_off);
+                                      elem->in_sg, elem->in_num,
+                                      out_off, in_off);
     case _IOC_NR(VIDIOC_G_INPUT):
         *payload_len = sizeof(uint32_t);
         if (s->use_host_device) {
             return vmedia_proxy_g_input(session, elem->in_sg, elem->in_num,
-                                              in_off);
+                                        in_off);
         }
         return vmedia_ioctl_g_input(elem->in_sg, elem->in_num, in_off);
     case _IOC_NR(VIDIOC_S_INPUT):
         *payload_len = 0;
         if (s->use_host_device) {
             return vmedia_proxy_s_input(session, elem->out_sg, elem->out_num,
-                                              out_off);
+                                        out_off);
         }
         return vmedia_ioctl_s_input(elem->out_sg, elem->out_num, out_off);
     case _IOC_NR(VIDIOC_QUERYCTRL):
@@ -2738,6 +2738,11 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
         }
 
         caps = cap.device_caps ? cap.device_caps : cap.capabilities;
+        caps &= V4L2_CAP_VIDEO_CAPTURE |
+            V4L2_CAP_VIDEO_CAPTURE_MPLANE |
+            V4L2_CAP_STREAMING |
+            V4L2_CAP_READWRITE |
+            V4L2_CAP_EXT_PIX_FORMAT;
         s->config.device_caps = cpu_to_le32(caps);
         memset(s->config.card, 0, sizeof(s->config.card));
         snprintf((char *)s->config.card, sizeof(s->config.card),
