@@ -4343,6 +4343,11 @@ int vnc_init_func(void *opaque, QemuOpts *opts, Error **errp)
 {
     Error *local_err = NULL;
     char *id = (char *)qemu_opts_id(opts);
+    const char *addr = qemu_opt_get(opts, "vnc");
+
+    if (addr == NULL || g_str_equal(addr, "none")) {
+        return 0;
+    }
 
     if (!id) {
         /* auto-assign id if not present */
