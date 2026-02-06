@@ -431,6 +431,13 @@ static void vmedia_host_fd_handler(void *opaque)
             continue;
         }
 
+        if (!session->buffers[buf.index].queued) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "virtio-media: host dqbuf for unqueued buffer idx=%u session=%u\n",
+                          buf.index, session->id);
+            continue;
+        }
+
         if (session->mplane && session->host_num_planes) {
             uint32_t num_planes =
                 MIN(session->host_num_planes,
