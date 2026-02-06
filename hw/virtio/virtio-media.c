@@ -1399,6 +1399,9 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
     }
 
     if (session->buffers[index].queued) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: qbuf idx=%u already queued (session=%u)\n",
+                      index, session->id);
         return -EINVAL;
     }
 
@@ -1429,6 +1432,22 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
 
     ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QBUF, &host_buf);
     if (ret < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: host qbuf failed ret=%d session=%u idx=%u type=%u mplane=%d len=%u flags=0x%x bytesused=%u\n",
+                      ret, session->id, index, host_buf.type, session->mplane,
+                      host_buf.length, host_buf.flags, host_buf.bytesused);
+        if (session->mplane && session->host_num_planes) {
+            for (uint32_t p = 0; p < session->host_num_planes; p++) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "virtio-media: host qbuf plane[%u] mem_offset=0x%x length=%u bytesused=%u data_offset=%u\n",
+                              p, planes[p].m.mem_offset, planes[p].length,
+                              planes[p].bytesused, planes[p].data_offset);
+            }
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "virtio-media: host qbuf single mem_offset=0x%x\n",
+                          host_buf.m.offset);
+        }
         return ret;
     }
 
