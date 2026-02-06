@@ -15,7 +15,9 @@
 #include "qemu/queue.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-media.h"
+#include "hw/xen/xen.h"
 #include "standard-headers/linux/virtio_ids.h"
+#include "system/xen.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -25,6 +27,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <xen/gntalloc.h>
 
 #define VIRTIO_MEDIA_COMMAND_VQ 0
 #define VIRTIO_MEDIA_EVENT_VQ   1
@@ -47,6 +50,9 @@
 
 #define VIRTIO_MEDIA_MAX_PLANES VIDEO_MAX_PLANES
 
+#define VIRTIO_MEDIA_F_GNTREF 0
+#define VIRTIO_MEDIA_GREF_PAGE_SIZE 4096u
+
 #define VIRTIO_MEDIA_WIDTH  640u
 #define VIRTIO_MEDIA_HEIGHT 480u
 #define VIRTIO_MEDIA_PIXFMT_MPLANE V4L2_PIX_FMT_YUV420
@@ -57,6 +63,94 @@
     (VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT * 2)
 
 static int vmedia_ioctl_nointr(int fd, unsigned long req, void *arg);
+
+static uint8_t *vmedia_hostmem_base(VirtIOMedia *s)
+{
+    return s->hostmem_buf ? s->hostmem_buf
+                          : memory_region_get_ram_ptr(&s->hostmem);
+}
+
+static void vmedia_gntalloc_cleanup(VirtIOMedia *s)
+{
+    if (s->hostmem_buf && s->hostmem_buf != MAP_FAILED) {
+        munmap(s->hostmem_buf, s->hostmem_size);
+        s->hostmem_buf = NULL;
+    }
+
+    if (s->gntalloc_fd >= 0 && s->gref_count) {
+        struct ioctl_gntalloc_dealloc_gref dealloc = {
+            .index = s->gntalloc_index,
+            .count = s->gref_count,
+        };
+
+        ioctl(s->gntalloc_fd, IOCTL_GNTALLOC_DEALLOC_GREF, &dealloc);
+    }
+
+    if (s->gntalloc_fd >= 0) {
+        close(s->gntalloc_fd);
+        s->gntalloc_fd = -1;
+    }
+
+    g_free(s->grefs);
+    s->grefs = NULL;
+    s->gref_count = 0;
+}
+
+static bool vmedia_gntalloc_init(VirtIOMedia *s, Error **errp)
+{
+    struct ioctl_gntalloc_alloc_gref *alloc;
+    size_t alloc_sz;
+    uint32_t gref_count;
+    int fd;
+    int ret;
+
+    gref_count = DIV_ROUND_UP(s->hostmem_size, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+    if (!gref_count) {
+        error_setg(errp, "virtio-media: invalid gref count");
+        return false;
+    }
+
+    fd = open("/dev/xen/gntalloc", O_RDWR);
+    if (fd < 0) {
+        error_setg_errno(errp, errno,
+                         "virtio-media: failed to open /dev/xen/gntalloc");
+        return false;
+    }
+
+    alloc_sz = sizeof(*alloc) + (gref_count - 1) * sizeof(uint32_t);
+    alloc = g_malloc0(alloc_sz);
+    alloc->domid = xen_domid;
+    alloc->flags = GNTALLOC_FLAG_WRITABLE;
+    alloc->count = gref_count;
+
+    ret = ioctl(fd, IOCTL_GNTALLOC_ALLOC_GREF, alloc);
+    if (ret < 0) {
+        error_setg_errno(errp, errno,
+                         "virtio-media: gntalloc alloc failed");
+        g_free(alloc);
+        close(fd);
+        return false;
+    }
+
+    s->gref_count = gref_count;
+    s->grefs = g_new(uint32_t, gref_count);
+    memcpy(s->grefs, alloc->gref_ids, gref_count * sizeof(uint32_t));
+    s->gntalloc_index = alloc->index;
+    g_free(alloc);
+
+    s->hostmem_buf = mmap(NULL, s->hostmem_size, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, fd, s->gntalloc_index);
+    if (s->hostmem_buf == MAP_FAILED) {
+        error_setg_errno(errp, errno,
+                         "virtio-media: gntalloc mmap failed");
+        close(fd);
+        s->gntalloc_fd = -1;
+        return false;
+    }
+
+    s->gntalloc_fd = fd;
+    return true;
+}
 
 struct virtio_media_cmd_header {
     uint32_t cmd;
@@ -105,6 +199,11 @@ struct virtio_media_resp_mmap {
     struct virtio_media_resp_header hdr;
     uint64_t driver_addr;
     uint64_t len;
+    uint32_t gref_count;
+    uint32_t gref_page_size;
+    uint32_t gref_domid;
+    uint32_t pad;
+    uint32_t gref_ids[0];
 };
 
 struct virtio_media_cmd_munmap {
@@ -343,14 +442,14 @@ static void vmedia_host_fd_handler(void *opaque)
                 uint32_t max_len = session->buffers[buf.index].plane_lengths[p];
                 uint32_t copy_len = MIN(bytes, max_len);
 
-                memcpy(memory_region_get_ram_ptr(&s->hostmem) +
+                memcpy(vmedia_hostmem_base(s) +
                        session->buffers[buf.index].plane_offsets[p],
                        session->host_maps[idx],
                        copy_len);
                 session->buffers[buf.index].planes[p].bytesused = bytes;
             }
         } else {
-            memcpy(memory_region_get_ram_ptr(&s->hostmem) +
+            memcpy(vmedia_hostmem_base(s) +
                    session->buffers[buf.index].base_offset,
                    session->host_maps[buf.index],
                    MIN(buf.bytesused, session->host_lengths[buf.index]));
@@ -464,7 +563,7 @@ static void vmedia_fill_format(struct v4l2_format *fmt, uint32_t type)
 static void vmedia_generate_frame(VirtIOMedia *s, VirtIOMediaSession *session,
                                   VirtIOMediaBuffer *buf)
 {
-    uint8_t *base = memory_region_get_ram_ptr(&s->hostmem);
+    uint8_t *base = vmedia_hostmem_base(s);
     uint8_t *ptr = base + buf->base_offset;
     static const uint8_t yuv_bars[8][3] = {
         { 235, 128, 128 }, /* white */
@@ -2607,17 +2706,12 @@ static void vmedia_handle_command(VirtIODevice *vdev, VirtQueue *vq)
     case VIRTIO_MEDIA_CMD_MMAP: {
         struct virtio_media_cmd_mmap mmap_cmd;
         struct virtio_media_resp_mmap resp;
+        size_t resp_len;
         VirtIOMediaSession *session;
         uint64_t addr = 0;
         uint64_t len = 0;
         uint32_t id;
         int status;
-
-        if (in_len < sizeof(resp)) {
-            virtio_error(vdev, "virtio-media: short MMAP response buffer");
-            virtqueue_push(vq, elem, 0);
-            break;
-        }
 
         if (vmedia_iov_read(elem->out_sg, elem->out_num, 0,
                             &mmap_cmd,
@@ -2639,9 +2733,58 @@ static void vmedia_handle_command(VirtIODevice *vdev, VirtQueue *vq)
         vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
         resp.driver_addr = cpu_to_le64(addr);
         resp.len = cpu_to_le64(len);
-        vmedia_iov_write(elem->in_sg, elem->in_num, 0,
-                               &resp, sizeof(resp));
-        virtqueue_push(vq, elem, sizeof(resp));
+        resp.gref_count = 0;
+        resp.gref_page_size = 0;
+        resp.gref_domid = 0;
+        resp.pad = 0;
+
+        if (s->use_grefs && status == 0) {
+            uint32_t gref_start;
+            uint32_t gref_count;
+            size_t needed;
+
+            gref_start = addr / VIRTIO_MEDIA_GREF_PAGE_SIZE;
+            gref_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            needed = sizeof(resp) + gref_count * sizeof(uint32_t);
+            if (in_len < needed ||
+                gref_start + gref_count > s->gref_count) {
+                vmedia_write_resp_header(&resp.hdr, ENOSPC);
+                vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                                 &resp, sizeof(resp));
+                virtqueue_push(vq, elem, sizeof(resp));
+                break;
+            }
+
+            resp.gref_count = cpu_to_le32(gref_count);
+            resp.gref_page_size = cpu_to_le32(VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            /* gntalloc grants pages from dom0. */
+            resp.gref_domid = cpu_to_le32(0);
+
+            vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                             &resp, sizeof(resp));
+            {
+                uint32_t i;
+                g_autofree uint32_t *grefs = g_new(uint32_t, gref_count);
+
+                for (i = 0; i < gref_count; i++) {
+                    grefs[i] = cpu_to_le32(s->grefs[gref_start + i]);
+                }
+                vmedia_iov_write(elem->in_sg, elem->in_num, sizeof(resp),
+                                 grefs,
+                                 gref_count * sizeof(uint32_t));
+            }
+            resp_len = needed;
+        } else {
+            if (in_len < sizeof(resp)) {
+                virtio_error(vdev, "virtio-media: short MMAP response buffer");
+                virtqueue_push(vq, elem, 0);
+                break;
+            }
+            vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                             &resp, sizeof(resp));
+            resp_len = sizeof(resp);
+        }
+        virtqueue_push(vq, elem, resp_len);
         break;
     }
     case VIRTIO_MEDIA_CMD_MUNMAP: {
@@ -2698,6 +2841,11 @@ static void vmedia_get_config(VirtIODevice *vdev, uint8_t *config_data)
 static uint64_t vmedia_get_features(VirtIODevice *vdev, uint64_t f,
                                           Error **errp)
 {
+    VirtIOMedia *s = VIRTIO_MEDIA(vdev);
+
+    if (s->use_grefs) {
+        f |= (1ULL << VIRTIO_MEDIA_F_GNTREF);
+    }
     return f;
 }
 
@@ -2791,10 +2939,24 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
     s->config.device_type = cpu_to_le32(0);
 
     s->hostmem_size = pow2ceil((uint64_t)s->max_buffers * buffer_size);
-    memory_region_init_ram(&s->hostmem, OBJECT(s), "virtio-media-hostmem",
-                           s->hostmem_size, errp);
-    if (*errp) {
-        return;
+    s->hostmem_buf = NULL;
+    s->use_grefs = xen_enabled();
+    s->gntalloc_fd = -1;
+    s->gntalloc_index = 0;
+    s->gref_count = 0;
+    s->grefs = NULL;
+    if (s->use_grefs) {
+        if (!vmedia_gntalloc_init(s, errp)) {
+            return;
+        }
+    } else {
+        memory_region_init_ram(&s->hostmem, OBJECT(s),
+                               "virtio-media-hostmem",
+                               s->hostmem_size, errp);
+        if (*errp) {
+            return;
+        }
+        s->hostmem_buf = memory_region_get_ram_ptr(&s->hostmem);
     }
 
     s->use_hostmem = true;
@@ -2834,6 +2996,10 @@ static void vmedia_unrealize(DeviceState *dev)
     virtio_del_queue(vdev, VIRTIO_MEDIA_EVENT_VQ);
     virtio_del_queue(vdev, VIRTIO_MEDIA_COMMAND_VQ);
     virtio_cleanup(vdev);
+
+    if (s->use_grefs) {
+        vmedia_gntalloc_cleanup(s);
+    }
 }
 
 static const Property virtio_media_properties[] = {

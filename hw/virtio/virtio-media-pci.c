@@ -35,12 +35,14 @@ static void vmedia_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
         return;
     }
 
-    pci_register_bar(&vpci_dev->pci_dev, 4,
-                     PCI_BASE_ADDRESS_SPACE_MEMORY |
-                     PCI_BASE_ADDRESS_MEM_PREFETCH |
-                     PCI_BASE_ADDRESS_MEM_TYPE_64,
-                     &mdev->hostmem);
-    virtio_pci_add_shm_cap(vpci_dev, 4, 0, mdev->hostmem_size, 0);
+    if (!mdev->use_grefs) {
+        pci_register_bar(&vpci_dev->pci_dev, 4,
+                         PCI_BASE_ADDRESS_SPACE_MEMORY |
+                         PCI_BASE_ADDRESS_MEM_PREFETCH |
+                         PCI_BASE_ADDRESS_MEM_TYPE_64,
+                         &mdev->hostmem);
+        virtio_pci_add_shm_cap(vpci_dev, 4, 0, mdev->hostmem_size, 0);
+    }
 }
 
 static void vmedia_initfn(Object *obj)

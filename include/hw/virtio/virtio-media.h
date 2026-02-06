@@ -28,6 +28,12 @@ struct VirtIOMedia {
 
     VirtIOMediaConfig config;
     MemoryRegion hostmem;
+    uint8_t *hostmem_buf;
+    bool use_grefs;
+    int gntalloc_fd;
+    uint64_t gntalloc_index;
+    uint32_t gref_count;
+    uint32_t *grefs;
 
     uint64_t hostmem_size;
     uint32_t max_buffers;
