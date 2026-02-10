@@ -62,6 +62,12 @@
 #define VIRTIO_MEDIA_BUFFER_SIZE_SINGLE \
     (VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT * 2)
 
+typedef enum VirtIOMediaHostV4L2MemMode {
+    VMEDIA_HOST_V4L2_MEM_AUTO = 0,
+    VMEDIA_HOST_V4L2_MEM_MMAP,
+    VMEDIA_HOST_V4L2_MEM_USERPTR,
+} VirtIOMediaHostV4L2MemMode;
+
 static int vmedia_ioctl_nointr(int fd, unsigned long req, void *arg);
 
 static uint8_t *vmedia_hostmem_base(VirtIOMedia *s)
@@ -248,6 +254,7 @@ typedef struct VirtIOMediaSession {
     uint32_t num_buffers;
     VirtIOMediaBuffer *buffers;
     int host_fd;
+    uint32_t host_memory;
     bool host_streaming;
     void **host_maps;
     uint32_t *host_lengths;
@@ -345,6 +352,7 @@ static VirtIOMediaSession *vmedia_session_new(VirtIOMedia *s, uint32_t id)
     session->mplane = false;
     session->buffer_size = VIRTIO_MEDIA_BUFFER_SIZE_SINGLE;
     session->host_fd = -1;
+    session->host_memory = V4L2_MEMORY_MMAP;
     session->host_streaming = false;
     session->host_maps = NULL;
     session->host_lengths = NULL;
@@ -412,7 +420,7 @@ static void vmedia_host_fd_handler(void *opaque)
         memset(planes, 0, sizeof(planes));
         buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
                                      V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
+        buf.memory = session->host_memory;
         if (session->mplane) {
             buf.length = session->host_num_planes;
             buf.m.planes = planes;
@@ -444,18 +452,27 @@ static void vmedia_host_fd_handler(void *opaque)
                     session->buffers[buf.index].buffer.length);
             for (uint32_t p = 0; p < num_planes; p++) {
                 uint32_t idx = buf.index * session->host_num_planes + p;
-                uint32_t bytes = planes[p].bytesused ?
-                    planes[p].bytesused : session->host_lengths[idx];
+                uint32_t bytes;
+                uint32_t fallback_len;
                 uint32_t max_len = session->buffers[buf.index].plane_lengths[p];
-                uint32_t copy_len = MIN(bytes, max_len);
+                uint32_t copy_len;
 
-                memcpy(vmedia_hostmem_base(s) +
-                       session->buffers[buf.index].plane_offsets[p],
-                       session->host_maps[idx],
-                       copy_len);
+                if (session->host_memory == V4L2_MEMORY_MMAP) {
+                    fallback_len = session->host_lengths[idx];
+                } else {
+                    fallback_len = session->buffers[buf.index].plane_lengths[p];
+                }
+                bytes = planes[p].bytesused ? planes[p].bytesused : fallback_len;
+                copy_len = MIN(bytes, max_len);
+                if (session->host_memory == V4L2_MEMORY_MMAP) {
+                    memcpy(vmedia_hostmem_base(s) +
+                           session->buffers[buf.index].plane_offsets[p],
+                           session->host_maps[idx],
+                           copy_len);
+                }
                 session->buffers[buf.index].planes[p].bytesused = bytes;
             }
-        } else {
+        } else if (session->host_memory == V4L2_MEMORY_MMAP) {
             memcpy(vmedia_hostmem_base(s) +
                    session->buffers[buf.index].base_offset,
                    session->host_maps[buf.index],
@@ -818,6 +835,84 @@ static int vmedia_proxy_ioctl(int fd, unsigned long req, void *arg)
     return vmedia_ioctl_nointr(fd, req, arg);
 }
 
+static bool vmedia_type_supports_userptr(int fd, uint32_t type)
+{
+    struct v4l2_requestbuffers reqbufs = { 0 };
+    int ret;
+
+    reqbufs.type = type;
+    reqbufs.memory = V4L2_MEMORY_MMAP;
+    ret = vmedia_proxy_ioctl(fd, VIDIOC_REQBUFS, &reqbufs);
+    if (ret < 0) {
+        return false;
+    }
+
+    if (reqbufs.capabilities &&
+        !(reqbufs.capabilities & V4L2_BUF_CAP_SUPPORTS_USERPTR)) {
+        return false;
+    }
+
+    memset(&reqbufs, 0, sizeof(reqbufs));
+    reqbufs.type = type;
+    reqbufs.memory = V4L2_MEMORY_USERPTR;
+    return vmedia_proxy_ioctl(fd, VIDIOC_REQBUFS, &reqbufs) == 0;
+}
+
+static bool vmedia_userptr_supported_for_type(VirtIOMedia *s, uint32_t type)
+{
+    if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        return s->host_userptr_mplane;
+    }
+
+    return s->host_userptr_capture;
+}
+
+static int vmedia_get_host_memory_mode(VirtIOMedia *s, uint32_t type,
+                                       uint32_t *memory)
+{
+    bool supports_userptr = vmedia_userptr_supported_for_type(s, type);
+
+    switch (s->host_v4l2_mem_mode) {
+    case VMEDIA_HOST_V4L2_MEM_MMAP:
+        *memory = V4L2_MEMORY_MMAP;
+        return 0;
+    case VMEDIA_HOST_V4L2_MEM_USERPTR:
+        if (!supports_userptr) {
+            return -EINVAL;
+        }
+        *memory = V4L2_MEMORY_USERPTR;
+        return 0;
+    case VMEDIA_HOST_V4L2_MEM_AUTO:
+        *memory = supports_userptr ? V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP;
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
+static int vmedia_parse_host_v4l2_mem_mode(VirtIOMedia *s, Error **errp)
+{
+    const char *mode = s->host_v4l2_mem ? s->host_v4l2_mem : "auto";
+
+    if (!strcmp(mode, "auto")) {
+        s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_AUTO;
+        return 0;
+    }
+    if (!strcmp(mode, "mmap")) {
+        s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_MMAP;
+        return 0;
+    }
+    if (!strcmp(mode, "userptr")) {
+        s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_USERPTR;
+        return 0;
+    }
+
+    error_setg(errp,
+               "virtio-media: invalid host-v4l2-memory '%s' (use auto|mmap|userptr)",
+               mode);
+    return -EINVAL;
+}
+
 static uint64_t vmedia_proxy_max_sizeimage_for_format(int fd,
                                                       uint32_t pixelformat)
 {
@@ -1120,7 +1215,9 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
                                       size_t out_off, size_t in_off)
 {
     struct v4l2_requestbuffers reqbufs;
+    struct v4l2_requestbuffers host_reqbufs;
     struct v4l2_buffer buf;
+    uint32_t host_memory;
     uint32_t i;
     int ret;
 
@@ -1135,19 +1232,38 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
         return -EINVAL;
     }
 
+    ret = vmedia_get_host_memory_mode(s, reqbufs.type, &host_memory);
+    if (ret < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: host USERPTR not supported for queue type %u\n",
+                      reqbufs.type);
+        return ret;
+    }
+
     reqbufs.count = MIN(reqbufs.count, s->max_buffers);
 
     vmedia_proxy_release_buffers(s, session);
 
-    ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &reqbufs);
+    host_reqbufs = reqbufs;
+    host_reqbufs.memory = host_memory;
+    if (host_memory == V4L2_MEMORY_USERPTR) {
+        host_reqbufs.count = 0;
+    }
+    ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &host_reqbufs);
     if (ret < 0) {
         return ret;
     }
 
+    session->host_memory = host_memory;
     session->mplane = (reqbufs.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
     session->buffer_size = VIRTIO_MEDIA_BUFFER_SIZE_SINGLE;
     session->host_num_planes = session->mplane ? 0 : 1;
-    session->host_num_buffers = reqbufs.count;
+    if (host_memory == V4L2_MEMORY_MMAP) {
+        session->host_num_buffers = host_reqbufs.count;
+        reqbufs.count = host_reqbufs.count;
+    } else {
+        session->host_num_buffers = reqbufs.count;
+    }
 
     if (reqbufs.count == 0) {
         vmedia_reset_buffers(session);
@@ -1178,110 +1294,114 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
         session->host_num_planes = 1;
     }
 
-    session->host_maps = g_new0(void *,
-                                reqbufs.count * session->host_num_planes);
-    session->host_lengths = g_new0(uint32_t,
-                                   reqbufs.count * session->host_num_planes);
-    session->host_offsets = g_new0(uint32_t,
-                                   reqbufs.count * session->host_num_planes);
+    if (host_memory == V4L2_MEMORY_MMAP) {
+        session->host_maps = g_new0(void *,
+                                    reqbufs.count * session->host_num_planes);
+        session->host_lengths = g_new0(uint32_t,
+                                       reqbufs.count * session->host_num_planes);
+        session->host_offsets = g_new0(uint32_t,
+                                       reqbufs.count * session->host_num_planes);
 
-    for (i = 0; i < reqbufs.count; i++) {
-        struct v4l2_plane planes[VIRTIO_MEDIA_MAX_PLANES];
+        for (i = 0; i < reqbufs.count; i++) {
+            struct v4l2_plane planes[VIRTIO_MEDIA_MAX_PLANES];
 
-        memset(&buf, 0, sizeof(buf));
-        memset(planes, 0, sizeof(planes));
-        buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
-                                     V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        buf.index = i;
-        if (session->mplane) {
-            buf.length = session->host_num_planes;
-            buf.m.planes = planes;
+            memset(&buf, 0, sizeof(buf));
+            memset(planes, 0, sizeof(planes));
+            buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                                         V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buf.memory = V4L2_MEMORY_MMAP;
+            buf.index = i;
+            if (session->mplane) {
+                buf.length = session->host_num_planes;
+                buf.m.planes = planes;
+            }
+
+            ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QUERYBUF, &buf);
+            if (ret < 0) {
+                vmedia_proxy_release_buffers(s, session);
+                memset(&host_reqbufs, 0, sizeof(host_reqbufs));
+                host_reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                host_reqbufs.memory = V4L2_MEMORY_MMAP;
+                vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
+                                   &host_reqbufs);
+                return ret;
+            }
+
+            if (session->mplane) {
+                uint32_t p;
+
+                for (p = 0; p < session->host_num_planes; p++) {
+                    uint32_t idx = i * session->host_num_planes + p;
+
+                    session->host_offsets[idx] = planes[p].m.mem_offset;
+                    session->host_lengths[idx] = planes[p].length;
+                    session->host_maps[idx] = mmap(NULL, planes[p].length,
+                                                   PROT_READ | PROT_WRITE,
+                                                   MAP_SHARED,
+                                                   session->host_fd,
+                                                   planes[p].m.mem_offset);
+                    if (session->host_maps[idx] == MAP_FAILED) {
+                        session->host_maps[idx] = NULL;
+                        ret = -errno;
+                        vmedia_proxy_release_buffers(s, session);
+                        memset(&host_reqbufs, 0, sizeof(host_reqbufs));
+                        host_reqbufs.type = session->mplane ?
+                            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                            V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                        host_reqbufs.memory = V4L2_MEMORY_MMAP;
+                        vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
+                                           &host_reqbufs);
+                        return ret;
+                    }
+                }
+                if (i == 0) {
+                    uint64_t total = 0;
+
+                    for (p = 0; p < session->host_num_planes; p++) {
+                        total += session->host_lengths[p];
+                    }
+                    session->buffer_size = total ? (uint32_t)total :
+                        VIRTIO_MEDIA_BUFFER_SIZE_MPLANE;
+                }
+            } else {
+                session->host_offsets[i] = buf.m.offset;
+                session->host_maps[i] = mmap(NULL, buf.length,
+                                             PROT_READ | PROT_WRITE, MAP_SHARED,
+                                             session->host_fd, buf.m.offset);
+                if (session->host_maps[i] == MAP_FAILED) {
+                    session->host_maps[i] = NULL;
+                    ret = -errno;
+                    vmedia_proxy_release_buffers(s, session);
+                    memset(&host_reqbufs, 0, sizeof(host_reqbufs));
+                    host_reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                    host_reqbufs.memory = V4L2_MEMORY_MMAP;
+                    vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
+                                       &host_reqbufs);
+                    return ret;
+                }
+                session->host_lengths[i] = buf.length;
+                if (i == 0) {
+                    session->buffer_size = buf.length;
+                }
+            }
         }
 
-        ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QUERYBUF, &buf);
-        if (ret < 0) {
-            vmedia_proxy_release_buffers(s, session);
-            memset(&reqbufs, 0, sizeof(reqbufs));
-            reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            reqbufs.memory = V4L2_MEMORY_MMAP;
-            vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &reqbufs);
-            return ret;
-        }
-
-        if (session->mplane) {
+        if (session->mplane && session->host_num_planes) {
             uint32_t p;
 
             for (p = 0; p < session->host_num_planes; p++) {
-                uint32_t idx = i * session->host_num_planes + p;
-
-                session->host_offsets[idx] = planes[p].m.mem_offset;
-                session->host_lengths[idx] = planes[p].length;
-                session->host_maps[idx] = mmap(NULL, planes[p].length,
-                                               PROT_READ | PROT_WRITE,
-                                               MAP_SHARED,
-                                               session->host_fd,
-                                               planes[p].m.mem_offset);
-                if (session->host_maps[idx] == MAP_FAILED) {
-                    session->host_maps[idx] = NULL;
-                    ret = -errno;
-                    vmedia_proxy_release_buffers(s, session);
-                    memset(&reqbufs, 0, sizeof(reqbufs));
-                    reqbufs.type = session->mplane ?
-                        V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
-                        V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                    reqbufs.memory = V4L2_MEMORY_MMAP;
-                    vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
-                                       &reqbufs);
-                    return ret;
-                }
+                session->host_plane_lengths[p] = session->host_lengths[p];
             }
-            if (i == 0) {
-                uint64_t total = 0;
-
-                for (p = 0; p < session->host_num_planes; p++) {
-                    total += session->host_lengths[p];
-                }
-                session->buffer_size = total ? (uint32_t)total :
-                    VIRTIO_MEDIA_BUFFER_SIZE_MPLANE;
-            }
-        } else {
-            session->host_offsets[i] = buf.m.offset;
-            session->host_maps[i] = mmap(NULL, buf.length,
-                                         PROT_READ | PROT_WRITE, MAP_SHARED,
-                                         session->host_fd, buf.m.offset);
-            if (session->host_maps[i] == MAP_FAILED) {
-                session->host_maps[i] = NULL;
-                ret = -errno;
-                vmedia_proxy_release_buffers(s, session);
-                memset(&reqbufs, 0, sizeof(reqbufs));
-                reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                reqbufs.memory = V4L2_MEMORY_MMAP;
-                vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &reqbufs);
-                return ret;
-            }
-            session->host_lengths[i] = buf.length;
-            if (i == 0) {
-                session->buffer_size = buf.length;
-            }
-        }
-    }
-
-    if (session->mplane && session->host_num_planes) {
-        uint32_t p;
-
-        for (p = 0; p < session->host_num_planes; p++) {
-            session->host_plane_lengths[p] = session->host_lengths[p];
         }
     }
 
     ret = vmedia_alloc_buffers(s, session, reqbufs.count);
     if (ret < 0) {
         vmedia_proxy_release_buffers(s, session);
-        memset(&reqbufs, 0, sizeof(reqbufs));
-        reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        reqbufs.memory = V4L2_MEMORY_MMAP;
-        vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &reqbufs);
+        memset(&host_reqbufs, 0, sizeof(host_reqbufs));
+        host_reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        host_reqbufs.memory = session->host_memory;
+        vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &host_reqbufs);
         return ret;
     }
 
@@ -1415,7 +1535,7 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
     memset(&host_buf, 0, sizeof(host_buf));
     host_buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
                                       V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    host_buf.memory = V4L2_MEMORY_MMAP;
+    host_buf.memory = session->host_memory;
     host_buf.index = index;
     if (session->mplane) {
         if (!session->host_num_planes ||
@@ -1432,9 +1552,21 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
         for (uint32_t p = 0; p < session->host_num_planes; p++) {
             uint32_t idx = index * session->host_num_planes + p;
 
-            planes[p].length = session->host_lengths[idx];
-            planes[p].m.mem_offset = session->host_offsets[idx];
+            if (session->host_memory == V4L2_MEMORY_MMAP) {
+                planes[p].length = session->host_lengths[idx];
+                planes[p].m.mem_offset = session->host_offsets[idx];
+            } else {
+                planes[p].length = session->buffers[index].plane_lengths[p];
+                planes[p].m.userptr =
+                    (unsigned long)(uintptr_t)(vmedia_hostmem_base(s) +
+                                               session->buffers[index].plane_offsets[p]);
+            }
         }
+    } else if (session->host_memory == V4L2_MEMORY_USERPTR) {
+        host_buf.length = session->buffers[index].plane_lengths[0];
+        host_buf.m.userptr =
+            (unsigned long)(uintptr_t)(vmedia_hostmem_base(s) +
+                                       session->buffers[index].plane_offsets[0]);
     }
 
     ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QBUF, &host_buf);
@@ -1445,15 +1577,28 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
                       host_buf.length, host_buf.flags, host_buf.bytesused);
         if (session->mplane && session->host_num_planes) {
             for (uint32_t p = 0; p < session->host_num_planes; p++) {
-                qemu_log_mask(LOG_GUEST_ERROR,
-                              "virtio-media: host qbuf plane[%u] mem_offset=0x%x length=%u bytesused=%u data_offset=%u\n",
-                              p, planes[p].m.mem_offset, planes[p].length,
-                              planes[p].bytesused, planes[p].data_offset);
+                if (session->host_memory == V4L2_MEMORY_MMAP) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "virtio-media: host qbuf plane[%u] mem_offset=0x%x length=%u bytesused=%u data_offset=%u\n",
+                                  p, planes[p].m.mem_offset, planes[p].length,
+                                  planes[p].bytesused, planes[p].data_offset);
+                } else {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "virtio-media: host qbuf plane[%u] userptr=0x%lx length=%u bytesused=%u data_offset=%u\n",
+                                  p, planes[p].m.userptr, planes[p].length,
+                                  planes[p].bytesused, planes[p].data_offset);
+                }
             }
         } else {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "virtio-media: host qbuf single mem_offset=0x%x\n",
-                          host_buf.m.offset);
+            if (session->host_memory == V4L2_MEMORY_MMAP) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "virtio-media: host qbuf single mem_offset=0x%x\n",
+                              host_buf.m.offset);
+            } else {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "virtio-media: host qbuf single userptr=0x%lx len=%u\n",
+                              host_buf.m.userptr, host_buf.length);
+            }
         }
         return ret;
     }
@@ -2910,10 +3055,17 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
         s->max_buffers = 8;
     }
 
+    if (vmedia_parse_host_v4l2_mem_mode(s, errp) < 0) {
+        return;
+    }
+
     s->use_host_device = false;
+    s->host_userptr_capture = false;
+    s->host_userptr_mplane = false;
 
     if (s->host_device) {
         uint64_t max_sizeimage;
+        int host_caps;
         int host_fd;
 
         host_fd = open(s->host_device, O_RDWR | O_NONBLOCK);
@@ -2942,7 +3094,29 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
             buffer_size = max_sizeimage;
         }
 
-        caps = cap.device_caps ? cap.device_caps : cap.capabilities;
+        host_caps = cap.device_caps ? cap.device_caps : cap.capabilities;
+        if (host_caps & V4L2_CAP_STREAMING) {
+            if (host_caps & V4L2_CAP_VIDEO_CAPTURE) {
+                s->host_userptr_capture =
+                    vmedia_type_supports_userptr(host_fd,
+                                                 V4L2_BUF_TYPE_VIDEO_CAPTURE);
+            }
+            if (host_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) {
+                s->host_userptr_mplane =
+                    vmedia_type_supports_userptr(host_fd,
+                                                 V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+            }
+        }
+
+        if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_USERPTR &&
+            !s->host_userptr_capture && !s->host_userptr_mplane) {
+            error_setg(errp,
+                       "virtio-media: host-v4l2-memory=userptr requested but host device does not support USERPTR");
+            close(host_fd);
+            return;
+        }
+
+        caps = host_caps;
         caps &= V4L2_CAP_VIDEO_CAPTURE |
             V4L2_CAP_VIDEO_CAPTURE_MPLANE |
             V4L2_CAP_STREAMING |
@@ -3031,6 +3205,7 @@ static void vmedia_unrealize(DeviceState *dev)
 static const Property virtio_media_properties[] = {
     DEFINE_PROP_UINT32("max-buffers", VirtIOMedia, max_buffers, 8),
     DEFINE_PROP_STRING("host-device", VirtIOMedia, host_device),
+    DEFINE_PROP_STRING("host-v4l2-memory", VirtIOMedia, host_v4l2_mem),
 };
 
 static void vmedia_class_init(ObjectClass *klass, const void *data)

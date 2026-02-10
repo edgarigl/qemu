@@ -39,7 +39,11 @@ struct VirtIOMedia {
     uint32_t max_buffers;
     bool use_hostmem;
     char *host_device;
+    char *host_v4l2_mem;
     bool use_host_device;
+    bool host_userptr_capture;
+    bool host_userptr_mplane;
+    uint8_t host_v4l2_mem_mode;
 
     uint32_t session_next_id;
     GHashTable *sessions;
