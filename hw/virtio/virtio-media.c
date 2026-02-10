@@ -1250,6 +1250,17 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
         host_reqbufs.count = 0;
     }
     ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &host_reqbufs);
+    if (ret < 0 && host_memory == V4L2_MEMORY_USERPTR &&
+        s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_AUTO) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: USERPTR reqbufs failed (%d), falling back to MMAP\n",
+                      ret);
+        host_memory = V4L2_MEMORY_MMAP;
+        host_reqbufs = reqbufs;
+        host_reqbufs.memory = host_memory;
+        ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
+                                 &host_reqbufs);
+    }
     if (ret < 0) {
         return ret;
     }
