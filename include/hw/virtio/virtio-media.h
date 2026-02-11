@@ -44,6 +44,8 @@ struct VirtIOMedia {
     bool host_userptr_capture;
     bool host_userptr_mplane;
     uint8_t host_v4l2_mem_mode;
+    uint64_t next_share_handle;
+    GHashTable *share_handles;
 
     uint32_t session_next_id;
     GHashTable *sessions;

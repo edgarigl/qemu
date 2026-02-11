@@ -41,6 +41,9 @@
 #define VIRTIO_MEDIA_CMD_IOCTL  3
 #define VIRTIO_MEDIA_CMD_MMAP   4
 #define VIRTIO_MEDIA_CMD_MUNMAP 5
+#define VIRTIO_MEDIA_CMD_EXPORT_BUFFER 6
+#define VIRTIO_MEDIA_CMD_IMPORT_BUFFER 7
+#define VIRTIO_MEDIA_CMD_RELEASE_HANDLE 8
 
 #define VIRTIO_MEDIA_EVT_ERROR  0
 #define VIRTIO_MEDIA_EVT_DQBUF  1
@@ -51,6 +54,8 @@
 #define VIRTIO_MEDIA_MAX_PLANES VIDEO_MAX_PLANES
 
 #define VIRTIO_MEDIA_F_GNTREF 63
+#define VIRTIO_MEDIA_F_EXPORT_IMPORT 62
+#define VIRTIO_MEDIA_F_SHARE_FENCE 61
 #define VIRTIO_MEDIA_GREF_PAGE_SIZE 4096u
 
 #define VIRTIO_MEDIA_WIDTH  640u
@@ -221,6 +226,51 @@ struct virtio_media_resp_munmap {
     struct virtio_media_resp_header hdr;
 };
 
+struct virtio_media_cmd_export_buffer {
+    struct virtio_media_cmd_header hdr;
+    uint32_t session_id;
+    uint32_t queue_type;
+    uint32_t buffer_index;
+    uint32_t plane_index;
+    uint32_t flags;
+    uint32_t reserved;
+};
+
+struct virtio_media_resp_export_buffer {
+    struct virtio_media_resp_header hdr;
+    uint64_t handle_id;
+    uint64_t len;
+    uint32_t plane_count;
+    uint32_t reserved;
+};
+
+struct virtio_media_cmd_import_buffer {
+    struct virtio_media_cmd_header hdr;
+    uint32_t session_id;
+    uint32_t flags;
+    uint64_t handle_id;
+};
+
+struct virtio_media_resp_import_buffer {
+    struct virtio_media_resp_header hdr;
+    uint64_t driver_addr;
+    uint64_t len;
+    uint32_t gref_count;
+    uint32_t gref_page_size;
+    uint32_t gref_domid;
+    uint32_t pad;
+    uint32_t gref_ids[0];
+};
+
+struct virtio_media_cmd_release_handle {
+    struct virtio_media_cmd_header hdr;
+    uint64_t handle_id;
+};
+
+struct virtio_media_resp_release_handle {
+    struct virtio_media_resp_header hdr;
+};
+
 struct virtio_media_event_header {
     uint32_t event;
     uint32_t session_id;
@@ -271,11 +321,28 @@ struct VirtIOMediaEvent {
     uint8_t data[sizeof(struct virtio_media_event_dqbuf)];
 };
 
+typedef struct VirtIOMediaShare {
+    uint64_t handle_id;
+    uint32_t owner_session_id;
+    uint32_t queue_type;
+    uint32_t buffer_index;
+    uint32_t plane_index;
+    uint64_t driver_addr;
+    uint64_t len;
+    uint32_t plane_count;
+} VirtIOMediaShare;
+
+static void vmedia_share_free(gpointer opaque)
+{
+    g_free(opaque);
+}
+
 static void vmedia_host_fd_handler(void *opaque);
 static void vmedia_emit_dqbuf(VirtIOMedia *s, VirtIOMediaSession *session,
                               VirtIOMediaBuffer *buf);
 static void vmedia_flush_events(VirtIOMedia *s);
 static void vmedia_proxy_stop(VirtIOMediaSession *session);
+static void vmedia_share_remove_for_owner(VirtIOMedia *s, uint32_t owner_id);
 
 static void vmedia_reset_buffers(VirtIOMediaSession *session)
 {
@@ -331,6 +398,8 @@ static void vmedia_session_free(VirtIOMedia *s, VirtIOMediaSession *session)
     if (!session) {
         return;
     }
+
+    vmedia_share_remove_for_owner(s, session->id);
 
     if (session->host_fd >= 0) {
         vmedia_proxy_stop(session);
@@ -796,6 +865,80 @@ static int vmedia_find_plane(VirtIOMediaSession *session, uint32_t offset,
     }
 
     return -EINVAL;
+}
+
+static gboolean vmedia_share_remove_for_owner_cb(gpointer key, gpointer value,
+                                                 gpointer user_data)
+{
+    VirtIOMediaShare *share = value;
+    uint32_t owner_id = *(uint32_t *)user_data;
+
+    return share->owner_session_id == owner_id;
+}
+
+static void vmedia_share_remove_for_owner(VirtIOMedia *s, uint32_t owner_id)
+{
+    if (!s->share_handles) {
+        return;
+    }
+
+    g_hash_table_foreach_remove(s->share_handles,
+                                vmedia_share_remove_for_owner_cb,
+                                &owner_id);
+}
+
+static VirtIOMediaShare *vmedia_share_lookup(VirtIOMedia *s, uint64_t handle_id)
+{
+    return g_hash_table_lookup(s->share_handles, &handle_id);
+}
+
+static uint64_t vmedia_share_next_handle(VirtIOMedia *s)
+{
+    if (s->next_share_handle == 0) {
+        s->next_share_handle = 1;
+    }
+
+    return s->next_share_handle++;
+}
+
+static int vmedia_share_from_buffer(VirtIOMedia *s, VirtIOMediaSession *session,
+                                    uint32_t queue_type, uint32_t buffer_index,
+                                    uint32_t plane_index,
+                                    VirtIOMediaShare **out_share)
+{
+    VirtIOMediaBuffer *buf;
+    VirtIOMediaShare *share;
+    uint32_t num_planes;
+
+    if (queue_type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        queue_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        return -EINVAL;
+    }
+    if (session->mplane != (queue_type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
+        return -EINVAL;
+    }
+    if (buffer_index >= session->num_buffers) {
+        return -EINVAL;
+    }
+
+    buf = &session->buffers[buffer_index];
+    num_planes = session->mplane ? buf->buffer.length : 1;
+    if (plane_index >= num_planes) {
+        return -EINVAL;
+    }
+
+    share = g_new0(VirtIOMediaShare, 1);
+    share->handle_id = vmedia_share_next_handle(s);
+    share->owner_session_id = session->id;
+    share->queue_type = queue_type;
+    share->buffer_index = buffer_index;
+    share->plane_index = plane_index;
+    share->driver_addr = buf->plane_offsets[plane_index];
+    share->len = buf->plane_lengths[plane_index];
+    share->plane_count = num_planes;
+    *out_share = share;
+
+    return 0;
 }
 
 static int vmedia_read_planes(const struct iovec *iov, int iov_cnt,
@@ -2885,6 +3028,189 @@ static void vmedia_handle_command(VirtIODevice *vdev, VirtQueue *vq)
         virtqueue_push(vq, elem, used);
         break;
     }
+    case VIRTIO_MEDIA_CMD_EXPORT_BUFFER: {
+        struct virtio_media_cmd_export_buffer export_cmd;
+        struct virtio_media_resp_export_buffer resp = { 0 };
+        VirtIOMediaSession *session;
+        VirtIOMediaShare *share = NULL;
+        uint32_t id;
+        int status = 0;
+
+        if (in_len < sizeof(resp)) {
+            virtio_error(vdev, "virtio-media: short EXPORT response buffer");
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+        if (!virtio_vdev_has_feature(vdev, VIRTIO_MEDIA_F_EXPORT_IMPORT)) {
+            status = -EOPNOTSUPP;
+            goto export_respond;
+        }
+        if (vmedia_iov_read(elem->out_sg, elem->out_num, 0,
+                            &export_cmd,
+                            sizeof(export_cmd)) != sizeof(export_cmd)) {
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+
+        id = le32_to_cpu(export_cmd.session_id);
+        session = g_hash_table_lookup(s->sessions, GUINT_TO_POINTER(id));
+        if (!session) {
+            status = -EINVAL;
+            goto export_respond;
+        }
+
+        status = vmedia_share_from_buffer(s, session,
+                                          le32_to_cpu(export_cmd.queue_type),
+                                          le32_to_cpu(export_cmd.buffer_index),
+                                          le32_to_cpu(export_cmd.plane_index),
+                                          &share);
+        if (status < 0) {
+            goto export_respond;
+        }
+
+        {
+            guint64 *key = g_new(guint64, 1);
+            *key = share->handle_id;
+            g_hash_table_insert(s->share_handles, key, share);
+        }
+
+        resp.handle_id = cpu_to_le64(share->handle_id);
+        resp.len = cpu_to_le64(share->len);
+        resp.plane_count = cpu_to_le32(share->plane_count);
+
+export_respond:
+        if (status < 0 && share) {
+            g_free(share);
+        }
+        vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
+        vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
+        virtqueue_push(vq, elem, sizeof(resp));
+        break;
+    }
+    case VIRTIO_MEDIA_CMD_IMPORT_BUFFER: {
+        struct virtio_media_cmd_import_buffer import_cmd;
+        struct virtio_media_resp_import_buffer resp = { 0 };
+        VirtIOMediaSession *session;
+        VirtIOMediaShare *share;
+        size_t resp_len;
+        uint32_t id;
+        uint64_t addr = 0;
+        uint64_t len = 0;
+        int status = 0;
+
+        if (!virtio_vdev_has_feature(vdev, VIRTIO_MEDIA_F_EXPORT_IMPORT)) {
+            status = -EOPNOTSUPP;
+            goto import_respond;
+        }
+        if (vmedia_iov_read(elem->out_sg, elem->out_num, 0,
+                            &import_cmd,
+                            sizeof(import_cmd)) != sizeof(import_cmd)) {
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+
+        id = le32_to_cpu(import_cmd.session_id);
+        session = g_hash_table_lookup(s->sessions, GUINT_TO_POINTER(id));
+        if (!session) {
+            status = -EINVAL;
+            goto import_respond;
+        }
+
+        share = vmedia_share_lookup(s, le64_to_cpu(import_cmd.handle_id));
+        if (!share) {
+            status = -ENOENT;
+            goto import_respond;
+        }
+        addr = share->driver_addr;
+        len = share->len;
+
+import_respond:
+        vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
+        resp.driver_addr = cpu_to_le64(addr);
+        resp.len = cpu_to_le64(len);
+        resp.gref_count = 0;
+        resp.gref_page_size = 0;
+        resp.gref_domid = 0;
+        resp.pad = 0;
+
+        if (s->use_grefs && status == 0) {
+            uint32_t gref_start;
+            uint32_t gref_count;
+            size_t needed;
+
+            gref_start = addr / VIRTIO_MEDIA_GREF_PAGE_SIZE;
+            gref_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            needed = sizeof(resp) + gref_count * sizeof(uint32_t);
+            if (in_len < needed ||
+                gref_start + gref_count > s->gref_count) {
+                vmedia_write_resp_header(&resp.hdr, ENOSPC);
+                vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                                 &resp, sizeof(resp));
+                virtqueue_push(vq, elem, sizeof(resp));
+                break;
+            }
+
+            resp.gref_count = cpu_to_le32(gref_count);
+            resp.gref_page_size = cpu_to_le32(VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            resp.gref_domid = cpu_to_le32(0);
+
+            vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
+            {
+                uint32_t i;
+                g_autofree uint32_t *grefs = g_new(uint32_t, gref_count);
+
+                for (i = 0; i < gref_count; i++) {
+                    grefs[i] = cpu_to_le32(s->grefs[gref_start + i]);
+                }
+                vmedia_iov_write(elem->in_sg, elem->in_num, sizeof(resp),
+                                 grefs, gref_count * sizeof(uint32_t));
+            }
+            resp_len = needed;
+        } else {
+            if (in_len < sizeof(resp)) {
+                virtio_error(vdev, "virtio-media: short IMPORT response buffer");
+                virtqueue_push(vq, elem, 0);
+                break;
+            }
+            vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
+            resp_len = sizeof(resp);
+        }
+        virtqueue_push(vq, elem, resp_len);
+        break;
+    }
+    case VIRTIO_MEDIA_CMD_RELEASE_HANDLE: {
+        struct virtio_media_cmd_release_handle release_cmd;
+        struct virtio_media_resp_release_handle resp = { 0 };
+        int status = 0;
+
+        if (in_len < sizeof(resp)) {
+            virtio_error(vdev, "virtio-media: short RELEASE response buffer");
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+        if (!virtio_vdev_has_feature(vdev, VIRTIO_MEDIA_F_EXPORT_IMPORT)) {
+            status = -EOPNOTSUPP;
+            goto release_respond;
+        }
+        if (vmedia_iov_read(elem->out_sg, elem->out_num, 0,
+                            &release_cmd,
+                            sizeof(release_cmd)) != sizeof(release_cmd)) {
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+        {
+            uint64_t handle_id = le64_to_cpu(release_cmd.handle_id);
+            if (!g_hash_table_remove(s->share_handles, &handle_id)) {
+                status = -ENOENT;
+            }
+        }
+
+release_respond:
+        vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
+        vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
+        virtqueue_push(vq, elem, sizeof(resp));
+        break;
+    }
     case VIRTIO_MEDIA_CMD_MMAP: {
         struct virtio_media_cmd_mmap mmap_cmd;
         struct virtio_media_resp_mmap resp;
@@ -3028,6 +3354,8 @@ static uint64_t vmedia_get_features(VirtIODevice *vdev, uint64_t f,
     if (s->use_grefs) {
         f |= (1ULL << VIRTIO_MEDIA_F_GNTREF);
     }
+    f |= (1ULL << VIRTIO_MEDIA_F_EXPORT_IMPORT);
+    f |= (1ULL << VIRTIO_MEDIA_F_SHARE_FENCE);
     return f;
 }
 
@@ -3172,7 +3500,10 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
 
     s->use_hostmem = true;
     s->session_next_id = 1;
+    s->next_share_handle = 1;
     s->sessions = g_hash_table_new(g_direct_hash, g_direct_equal);
+    s->share_handles = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                             g_free, vmedia_share_free);
     QTAILQ_INIT(&s->pending_events);
 
     virtio_init(vdev, VIRTIO_ID_MEDIA, sizeof(s->config));
@@ -3197,6 +3528,8 @@ static void vmedia_unrealize(DeviceState *dev)
     }
     g_hash_table_destroy(s->sessions);
     s->sessions = NULL;
+    g_hash_table_destroy(s->share_handles);
+    s->share_handles = NULL;
 
     while (!QTAILQ_EMPTY(&s->pending_events)) {
         evt = QTAILQ_FIRST(&s->pending_events);
