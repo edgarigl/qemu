@@ -3052,6 +3052,13 @@ static void vmedia_handle_command(VirtIODevice *vdev, VirtQueue *vq)
             break;
         }
 
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: EXPORT cmd session=%u qtype=%u idx=%u plane=%u\n",
+                      le32_to_cpu(export_cmd.session_id),
+                      le32_to_cpu(export_cmd.queue_type),
+                      le32_to_cpu(export_cmd.buffer_index),
+                      le32_to_cpu(export_cmd.plane_index));
+
         id = le32_to_cpu(export_cmd.session_id);
         session = g_hash_table_lookup(s->sessions, GUINT_TO_POINTER(id));
         if (!session) {
@@ -3068,6 +3075,13 @@ static void vmedia_handle_command(VirtIODevice *vdev, VirtQueue *vq)
             goto export_respond;
         }
 
+        if (!s->share_handles) {
+            s->share_handles = g_hash_table_new_full(g_int64_hash,
+                                                     g_int64_equal,
+                                                     g_free,
+                                                     vmedia_share_free);
+        }
+
         {
             guint64 *key = g_new(guint64, 1);
             *key = share->handle_id;
@@ -3082,6 +3096,10 @@ export_respond:
         if (status < 0 && share) {
             g_free(share);
         }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: EXPORT resp status=%d handle=%" PRIu64 " len=%" PRIu64 "\n",
+                      status, (uint64_t)le64_to_cpu(resp.handle_id),
+                      (uint64_t)le64_to_cpu(resp.len));
         vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
         vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
         virtqueue_push(vq, elem, sizeof(resp));
@@ -3108,6 +3126,11 @@ export_respond:
             virtqueue_push(vq, elem, 0);
             break;
         }
+
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: IMPORT cmd session=%u handle=%" PRIu64 "\n",
+                      le32_to_cpu(import_cmd.session_id),
+                      (uint64_t)le64_to_cpu(import_cmd.handle_id));
 
         id = le32_to_cpu(import_cmd.session_id);
         session = g_hash_table_lookup(s->sessions, GUINT_TO_POINTER(id));
@@ -3175,6 +3198,10 @@ import_respond:
             vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
             resp_len = sizeof(resp);
         }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: IMPORT resp status=%d addr=0x%" PRIx64 " len=0x%" PRIx64 " grefs=%u\n",
+                      status, (uint64_t)addr, (uint64_t)len,
+                      (uint32_t)le32_to_cpu(resp.gref_count));
         virtqueue_push(vq, elem, resp_len);
         break;
     }
@@ -3198,6 +3225,9 @@ import_respond:
             virtqueue_push(vq, elem, 0);
             break;
         }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: RELEASE cmd handle=%" PRIu64 "\n",
+                      (uint64_t)le64_to_cpu(release_cmd.handle_id));
         {
             uint64_t handle_id = le64_to_cpu(release_cmd.handle_id);
             if (!g_hash_table_remove(s->share_handles, &handle_id)) {
@@ -3206,6 +3236,8 @@ import_respond:
         }
 
 release_respond:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: RELEASE resp status=%d\n", status);
         vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
         vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
         virtqueue_push(vq, elem, sizeof(resp));
