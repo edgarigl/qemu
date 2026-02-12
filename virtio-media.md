@@ -127,8 +127,12 @@ Additionally implemented:
 
 Current limitation:
 
-- DMABUFs are currently handle-oriented objects for virtio-media control flow;
-  generic DMA attachment/map operations are not implemented yet.
+- Generic DMA attachment/map is implemented for imported DMABUFs backed by Xen
+  grant refs.
+- Exported handle-based DMABUFs are still control-plane objects unless they are
+  imported from grant-backed mappings.
+- Fence synchronization across guests is not implemented yet
+  (`VIRTIO_MEDIA_F_SHARE_FENCE` is reserved only).
 
 ## 4. Compatibility and deviations
 
