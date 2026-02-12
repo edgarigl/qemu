@@ -422,6 +422,7 @@ static VirtIOMediaPeerGrant *vmedia_peer_grant_new(uint32_t domid, uint64_t len,
     pg->grefs = g_new(uint32_t, pg->gref_count);
     memcpy(pg->grefs, alloc->gref_ids, pg->gref_count * sizeof(uint32_t));
     pg->gntalloc_index = alloc->index;
+    pg->gntalloc_fd = fd;
     g_free(alloc);
     alloc = NULL;
 
@@ -439,7 +440,7 @@ static VirtIOMediaPeerGrant *vmedia_peer_grant_new(uint32_t domid, uint64_t len,
 
 err:
     g_free(alloc);
-    if (fd >= 0) {
+    if (fd >= 0 && pg && pg->gntalloc_fd < 0) {
         close(fd);
     }
     vmedia_peer_grant_free(pg);
