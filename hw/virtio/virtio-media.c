@@ -56,7 +56,12 @@
 #define VIRTIO_MEDIA_F_GNTREF 63
 #define VIRTIO_MEDIA_F_EXPORT_IMPORT 62
 #define VIRTIO_MEDIA_F_SHARE_FENCE 61
+#define VIRTIO_MEDIA_F_PEER_GREF_IMPORT 60
 #define VIRTIO_MEDIA_GREF_PAGE_SIZE 4096u
+
+#define VIRTIO_MEDIA_IMPORT_F_TARGET_DOMID (1U << 1)
+#define VIRTIO_MEDIA_IMPORT_DOMID_SHIFT 16
+#define VIRTIO_MEDIA_IMPORT_DOMID_MASK 0xffffU
 
 #define VIRTIO_MEDIA_WIDTH  640u
 #define VIRTIO_MEDIA_HEIGHT 480u
@@ -330,11 +335,131 @@ typedef struct VirtIOMediaShare {
     uint64_t driver_addr;
     uint64_t len;
     uint32_t plane_count;
+    GHashTable *peer_grants;
 } VirtIOMediaShare;
+
+typedef struct VirtIOMediaPeerGrant {
+    uint32_t domid;
+    uint32_t gref_count;
+    uint64_t gntalloc_index;
+    uint64_t map_len;
+    uint64_t len;
+    int gntalloc_fd;
+    uint8_t *map;
+    uint32_t *grefs;
+} VirtIOMediaPeerGrant;
+
+static void vmedia_peer_grant_free(gpointer opaque)
+{
+    VirtIOMediaPeerGrant *pg = opaque;
+
+    if (!pg) {
+        return;
+    }
+
+    if (pg->map && pg->map != MAP_FAILED) {
+        munmap(pg->map, pg->map_len);
+        pg->map = NULL;
+    }
+
+    if (pg->gntalloc_fd >= 0 && pg->gref_count) {
+        struct ioctl_gntalloc_dealloc_gref dealloc = {
+            .index = pg->gntalloc_index,
+            .count = pg->gref_count,
+        };
+
+        ioctl(pg->gntalloc_fd, IOCTL_GNTALLOC_DEALLOC_GREF, &dealloc);
+    }
+
+    if (pg->gntalloc_fd >= 0) {
+        close(pg->gntalloc_fd);
+        pg->gntalloc_fd = -1;
+    }
+
+    g_free(pg->grefs);
+    g_free(pg);
+}
+
+static VirtIOMediaPeerGrant *vmedia_peer_grant_new(uint32_t domid, uint64_t len,
+                                                   int *status)
+{
+    struct ioctl_gntalloc_alloc_gref *alloc = NULL;
+    VirtIOMediaPeerGrant *pg = NULL;
+    size_t alloc_sz;
+    int fd = -1;
+    int ret;
+
+    if (!len) {
+        *status = -EINVAL;
+        return NULL;
+    }
+
+    pg = g_new0(VirtIOMediaPeerGrant, 1);
+    pg->domid = domid;
+    pg->len = len;
+    pg->gref_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+    pg->map_len = (uint64_t)pg->gref_count * VIRTIO_MEDIA_GREF_PAGE_SIZE;
+    pg->gntalloc_fd = -1;
+
+    fd = open("/dev/xen/gntalloc", O_RDWR);
+    if (fd < 0) {
+        *status = -errno;
+        goto err;
+    }
+
+    alloc_sz = sizeof(*alloc) + (pg->gref_count - 1) * sizeof(uint32_t);
+    alloc = g_malloc0(alloc_sz);
+    alloc->domid = domid;
+    alloc->flags = GNTALLOC_FLAG_WRITABLE;
+    alloc->count = pg->gref_count;
+
+    ret = ioctl(fd, IOCTL_GNTALLOC_ALLOC_GREF, alloc);
+    if (ret < 0) {
+        *status = -errno;
+        goto err;
+    }
+
+    pg->grefs = g_new(uint32_t, pg->gref_count);
+    memcpy(pg->grefs, alloc->gref_ids, pg->gref_count * sizeof(uint32_t));
+    pg->gntalloc_index = alloc->index;
+    g_free(alloc);
+    alloc = NULL;
+
+    pg->map = mmap(NULL, pg->map_len, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, pg->gntalloc_index);
+    if (pg->map == MAP_FAILED) {
+        *status = -errno;
+        pg->map = NULL;
+        goto err;
+    }
+
+    pg->gntalloc_fd = fd;
+    *status = 0;
+    return pg;
+
+err:
+    g_free(alloc);
+    if (fd >= 0) {
+        close(fd);
+    }
+    vmedia_peer_grant_free(pg);
+    return NULL;
+}
 
 static void vmedia_share_free(gpointer opaque)
 {
-    g_free(opaque);
+    VirtIOMediaShare *share = opaque;
+
+    if (!share) {
+        return;
+    }
+
+    if (share->peer_grants) {
+        g_hash_table_destroy(share->peer_grants);
+        share->peer_grants = NULL;
+    }
+
+    g_free(share);
 }
 
 static void vmedia_host_fd_handler(void *opaque);
@@ -343,6 +468,8 @@ static void vmedia_emit_dqbuf(VirtIOMedia *s, VirtIOMediaSession *session,
 static void vmedia_flush_events(VirtIOMedia *s);
 static void vmedia_proxy_stop(VirtIOMediaSession *session);
 static void vmedia_share_remove_for_owner(VirtIOMedia *s, uint32_t owner_id);
+static void vmedia_share_sync_for_buffer(VirtIOMedia *s, VirtIOMediaSession *session,
+                                         uint32_t buffer_index);
 
 static void vmedia_reset_buffers(VirtIOMediaSession *session)
 {
@@ -555,6 +682,7 @@ static void vmedia_host_fd_handler(void *opaque)
         }
         session->buffers[buf.index].buffer.timestamp = buf.timestamp;
 
+        vmedia_share_sync_for_buffer(s, session, buf.index);
         vmedia_emit_dqbuf(s, session, &session->buffers[buf.index]);
     }
 
@@ -892,6 +1020,85 @@ static VirtIOMediaShare *vmedia_share_lookup(VirtIOMedia *s, uint64_t handle_id)
     return g_hash_table_lookup(s->share_handles, &handle_id);
 }
 
+static void vmedia_share_sync_peer_grants(VirtIOMedia *s, VirtIOMediaShare *share)
+{
+    GHashTableIter iter;
+    gpointer key;
+    gpointer value;
+    uint8_t *src;
+
+    if (!share->peer_grants || g_hash_table_size(share->peer_grants) == 0) {
+        return;
+    }
+
+    src = vmedia_hostmem_base(s) + share->driver_addr;
+    g_hash_table_iter_init(&iter, share->peer_grants);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        VirtIOMediaPeerGrant *pg = value;
+
+        memcpy(pg->map, src, share->len);
+    }
+}
+
+typedef struct VirtIOMediaShareSyncCtx {
+    VirtIOMedia *s;
+    uint32_t owner_session_id;
+    uint32_t buffer_index;
+} VirtIOMediaShareSyncCtx;
+
+static void vmedia_share_sync_cb(gpointer key, gpointer value, gpointer user_data)
+{
+    VirtIOMediaShare *share = value;
+    VirtIOMediaShareSyncCtx *ctx = user_data;
+
+    if (share->owner_session_id != ctx->owner_session_id ||
+        share->buffer_index != ctx->buffer_index) {
+        return;
+    }
+
+    vmedia_share_sync_peer_grants(ctx->s, share);
+}
+
+static void vmedia_share_sync_for_buffer(VirtIOMedia *s, VirtIOMediaSession *session,
+                                         uint32_t buffer_index)
+{
+    VirtIOMediaShareSyncCtx ctx = {
+        .s = s,
+        .owner_session_id = session->id,
+        .buffer_index = buffer_index,
+    };
+
+    if (!s->share_handles || g_hash_table_size(s->share_handles) == 0) {
+        return;
+    }
+
+    g_hash_table_foreach(s->share_handles, vmedia_share_sync_cb, &ctx);
+}
+
+static VirtIOMediaPeerGrant *vmedia_share_get_peer_grant(VirtIOMedia *s,
+                                                          VirtIOMediaShare *share,
+                                                          uint32_t domid,
+                                                          int *status)
+{
+    VirtIOMediaPeerGrant *pg;
+
+    pg = g_hash_table_lookup(share->peer_grants, GUINT_TO_POINTER(domid));
+    if (pg) {
+        *status = 0;
+        return pg;
+    }
+
+    pg = vmedia_peer_grant_new(domid, share->len, status);
+    if (!pg) {
+        return NULL;
+    }
+
+    memcpy(pg->map, vmedia_hostmem_base(s) + share->driver_addr, share->len);
+    g_hash_table_insert(share->peer_grants, GUINT_TO_POINTER(domid), pg);
+    *status = 0;
+    return pg;
+}
+
 static uint64_t vmedia_share_next_handle(VirtIOMedia *s)
 {
     if (s->next_share_handle == 0) {
@@ -936,6 +1143,8 @@ static int vmedia_share_from_buffer(VirtIOMedia *s, VirtIOMediaSession *session,
     share->driver_addr = buf->plane_offsets[plane_index];
     share->len = buf->plane_lengths[plane_index];
     share->plane_count = num_planes;
+    share->peer_grants = g_hash_table_new_full(g_direct_hash, g_direct_equal,
+                                                NULL, vmedia_peer_grant_free);
     *out_share = share;
 
     return 0;
@@ -2490,6 +2699,7 @@ static int vmedia_ioctl_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
         QTAILQ_REMOVE(&session->queued_buffers, qbuf, next);
         qbuf->queued = false;
         vmedia_generate_frame(s, session, qbuf);
+        vmedia_share_sync_for_buffer(s, session, qbuf->index);
         vmedia_emit_dqbuf(s, session, qbuf);
         vmedia_flush_events(s);
     }
@@ -2539,6 +2749,7 @@ static int vmedia_ioctl_streamon(VirtIOMedia *s, VirtIOMediaSession *session,
         QTAILQ_REMOVE(&session->queued_buffers, qbuf, next);
         qbuf->queued = false;
         vmedia_generate_frame(s, session, qbuf);
+        vmedia_share_sync_for_buffer(s, session, qbuf->index);
         vmedia_emit_dqbuf(s, session, qbuf);
     }
     vmedia_flush_events(s);
@@ -3110,8 +3321,11 @@ export_respond:
         struct virtio_media_resp_import_buffer resp = { 0 };
         VirtIOMediaSession *session;
         VirtIOMediaShare *share;
+        VirtIOMediaPeerGrant *peer_grant = NULL;
         size_t resp_len;
         uint32_t id;
+        uint32_t flags = 0;
+        uint32_t import_domid = 0;
         uint64_t addr = 0;
         uint64_t len = 0;
         int status = 0;
@@ -3127,10 +3341,25 @@ export_respond:
             break;
         }
 
+        flags = le32_to_cpu(import_cmd.flags);
+        if (flags & VIRTIO_MEDIA_IMPORT_F_TARGET_DOMID) {
+            import_domid = (flags >> VIRTIO_MEDIA_IMPORT_DOMID_SHIFT) &
+                           VIRTIO_MEDIA_IMPORT_DOMID_MASK;
+            if (!import_domid) {
+                status = -EINVAL;
+                goto import_respond;
+            }
+            if (!virtio_vdev_has_feature(vdev, VIRTIO_MEDIA_F_PEER_GREF_IMPORT)) {
+                status = -EOPNOTSUPP;
+                goto import_respond;
+            }
+        }
+
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "virtio-media: IMPORT cmd session=%u handle=%" PRIu64 "\n",
+                      "virtio-media: IMPORT cmd session=%u handle=%" PRIu64 " flags=0x%x domid=%u\n",
                       le32_to_cpu(import_cmd.session_id),
-                      (uint64_t)le64_to_cpu(import_cmd.handle_id));
+                      (uint64_t)le64_to_cpu(import_cmd.handle_id),
+                      flags, import_domid);
 
         id = le32_to_cpu(import_cmd.session_id);
         session = g_hash_table_lookup(s->sessions, GUINT_TO_POINTER(id));
@@ -3147,6 +3376,14 @@ export_respond:
         addr = share->driver_addr;
         len = share->len;
 
+        if (import_domid) {
+            peer_grant = vmedia_share_get_peer_grant(s, share, import_domid,
+                                                     &status);
+            if (!peer_grant) {
+                goto import_respond;
+            }
+        }
+
 import_respond:
         vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
         resp.driver_addr = cpu_to_le64(addr);
@@ -3161,11 +3398,16 @@ import_respond:
             uint32_t gref_count;
             size_t needed;
 
-            gref_start = addr / VIRTIO_MEDIA_GREF_PAGE_SIZE;
-            gref_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            if (peer_grant) {
+                gref_start = 0;
+                gref_count = peer_grant->gref_count;
+            } else {
+                gref_start = addr / VIRTIO_MEDIA_GREF_PAGE_SIZE;
+                gref_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            }
             needed = sizeof(resp) + gref_count * sizeof(uint32_t);
             if (in_len < needed ||
-                gref_start + gref_count > s->gref_count) {
+                (!peer_grant && gref_start + gref_count > s->gref_count)) {
                 vmedia_write_resp_header(&resp.hdr, ENOSPC);
                 vmedia_iov_write(elem->in_sg, elem->in_num, 0,
                                  &resp, sizeof(resp));
@@ -3175,7 +3417,7 @@ import_respond:
 
             resp.gref_count = cpu_to_le32(gref_count);
             resp.gref_page_size = cpu_to_le32(VIRTIO_MEDIA_GREF_PAGE_SIZE);
-            resp.gref_domid = cpu_to_le32(0);
+            resp.gref_domid = cpu_to_le32(peer_grant ? import_domid : 0);
 
             vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
             {
@@ -3183,7 +3425,9 @@ import_respond:
                 g_autofree uint32_t *grefs = g_new(uint32_t, gref_count);
 
                 for (i = 0; i < gref_count; i++) {
-                    grefs[i] = cpu_to_le32(s->grefs[gref_start + i]);
+                    grefs[i] = cpu_to_le32(peer_grant ?
+                                           peer_grant->grefs[i] :
+                                           s->grefs[gref_start + i]);
                 }
                 vmedia_iov_write(elem->in_sg, elem->in_num, sizeof(resp),
                                  grefs, gref_count * sizeof(uint32_t));
@@ -3385,6 +3629,7 @@ static uint64_t vmedia_get_features(VirtIODevice *vdev, uint64_t f,
 
     if (s->use_grefs) {
         f |= (1ULL << VIRTIO_MEDIA_F_GNTREF);
+        f |= (1ULL << VIRTIO_MEDIA_F_PEER_GREF_IMPORT);
     }
     f |= (1ULL << VIRTIO_MEDIA_F_EXPORT_IMPORT);
     f |= (1ULL << VIRTIO_MEDIA_F_SHARE_FENCE);
