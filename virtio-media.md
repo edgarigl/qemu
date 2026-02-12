@@ -10,11 +10,11 @@ Implemented extensions:
 1. Xen grant-based MMAP to avoid IOREQ BAR access.
 2. Brokered export/import handles for inter-guest sharing (Option 1 control
    plane).
+3. Guest-side DMABUF fd integration for exported/imported handles.
 
 Not implemented yet:
 
-- Full guest-visible V4L2 DMABUF (`VIDIOC_EXPBUF` and `V4L2_MEMORY_DMABUF`
-  queueing) mapped onto these handles.
+- Full generic DMABUF attach/map backing for non-virtio-media consumers.
 - Explicit fence payload semantics.
 
 ## 1. Xen grant MMAP extension
@@ -115,10 +115,20 @@ The guest driver exposes private ioctls (out-of-tree prototype API):
 
 These ioctls pass handle/mapping metadata between userspace and backend.
 
-Important:
+Additionally implemented:
 
-- This is not yet a full V4L2 DMABUF export/import implementation.
-- No DMABUF fd is created by these private ioctls today.
+- `VIDIOC_EXPBUF` now exports a DMABUF fd backed by an exported handle.
+- Private export/import ioctls also return DMABUF fds in
+  `virtio_media_ioc_export_buffer.dmabuf_fd` and
+  `virtio_media_ioc_import_buffer.dmabuf_fd`.
+- `VIDIOC_QBUF` with `V4L2_MEMORY_DMABUF` is accepted when the fd belongs to a
+  DMABUF previously exported by this driver for the same queue type. The driver
+  translates it to its internal MMAP queueing model.
+
+Current limitation:
+
+- DMABUFs are currently handle-oriented objects for virtio-media control flow;
+  generic DMA attachment/map operations are not implemented yet.
 
 ## 4. Compatibility and deviations
 
