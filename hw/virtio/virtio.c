@@ -1633,7 +1633,11 @@ static bool virtqueue_map_desc(VirtIODevice *vdev, unsigned int *p_num_sg,
                                               DMA_DIRECTION_TO_DEVICE,
                                               MEMTXATTRS_UNSPECIFIED);
         if (!iov[num_sg].iov_base) {
-            virtio_error(vdev, "virtio: bogus descriptor or out of resources");
+            virtio_error(vdev,
+                         "virtio: bogus descriptor or out of resources "
+                         "(addr=0x%" HWADDR_PRIx ", len=0x%" HWADDR_PRIx ", dir=%s)",
+                         pa, (hwaddr)sz,
+                         is_write ? "from-device" : "to-device");
             goto out;
         }
 
@@ -1684,7 +1688,10 @@ static void virtqueue_map_iovec(VirtIODevice *vdev, struct iovec *sg,
                                         DMA_DIRECTION_TO_DEVICE,
                                         MEMTXATTRS_UNSPECIFIED);
         if (!sg[i].iov_base) {
-            error_report("virtio: error trying to map MMIO memory");
+            error_report("virtio: error trying to map MMIO memory "
+                         "(addr=0x%" HWADDR_PRIx ", len=0x%" HWADDR_PRIx ", dir=%s)",
+                         addr[i], (hwaddr)sg[i].iov_len,
+                         is_write ? "from-device" : "to-device");
             exit(1);
         }
         if (len != sg[i].iov_len) {
