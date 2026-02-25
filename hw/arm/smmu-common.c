@@ -852,14 +852,36 @@ void smmu_init_sdev(SMMUState *s, SMMUDevice *sdev, PCIBus *bus, int devfn)
     static unsigned int index;
     g_autofree char *name = g_strdup_printf("%s-%d-%d", s->mrtypename, devfn,
                                             index++);
+
+    g_assert(bus);
     sdev->smmu = s;
     sdev->bus = bus;
     sdev->devfn = devfn;
+    sdev->sid = PCI_BUILD_BDF(pci_bus_num(bus), devfn);
 
     memory_region_init_iommu(&sdev->iommu, sizeof(sdev->iommu),
                              s->mrtypename, OBJECT(s), name, UINT64_MAX);
     address_space_init(&sdev->as, MEMORY_REGION(&sdev->iommu), name);
     trace_smmu_add_mr(name);
+}
+
+void smmu_init_sdev_sid(SMMUState *s, SMMUDevice *sdev, uint32_t sid)
+{
+    static unsigned int index;
+    g_autofree char *name = g_strdup_printf("%s-sid-0x%x-%d", s->mrtypename,
+                                            sid, index++);
+
+    sdev->smmu = s;
+    sdev->bus = NULL;
+    sdev->devfn = -1;
+    sdev->sid = sid;
+
+    memory_region_init_iommu(&sdev->iommu, sizeof(sdev->iommu),
+                             s->mrtypename, OBJECT(s), name, UINT64_MAX);
+    address_space_init(&sdev->as, MEMORY_REGION(&sdev->iommu), name);
+    trace_smmu_add_mr(name);
+
+    g_hash_table_insert(s->smmu_sdev_by_sid, GUINT_TO_POINTER(sid), sdev);
 }
 
 SMMUPciBus *smmu_get_sbus(SMMUState *s, PCIBus *bus)
@@ -897,8 +919,14 @@ static const PCIIOMMUOps smmu_ops = {
 
 SMMUDevice *smmu_find_sdev(SMMUState *s, uint32_t sid)
 {
+    SMMUDevice *sdev;
     uint8_t bus_n, devfn;
     SMMUPciBus *smmu_bus;
+
+    sdev = g_hash_table_lookup(s->smmu_sdev_by_sid, GUINT_TO_POINTER(sid));
+    if (sdev) {
+        return sdev;
+    }
 
     bus_n = PCI_BUS_NUM(sid);
     smmu_bus = smmu_find_smmu_pcibus(s, bus_n);
@@ -946,6 +974,7 @@ static void smmu_base_realize(DeviceState *dev, Error **errp)
     s->iotlb = g_hash_table_new_full(smmu_iotlb_key_hash, smmu_iotlb_key_equal,
                                      g_free, g_free);
     s->smmu_pcibus_by_busptr = g_hash_table_new(NULL, NULL);
+    s->smmu_sdev_by_sid = g_hash_table_new(NULL, NULL);
 
     if (!pci_bus) {
         error_setg(errp, "SMMU is not attached to any PCI bus!");
@@ -1046,4 +1075,3 @@ static void smmu_base_register_types(void)
 }
 
 type_init(smmu_base_register_types)
-

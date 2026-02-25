@@ -122,6 +122,7 @@ typedef struct SMMUDevice {
     void               *smmu;
     PCIBus             *bus;
     int                devfn;
+    uint32_t           sid;
     IOMMUMemoryRegion  iommu;
     AddressSpace       as;
     uint32_t           cfg_cache_hits;
@@ -154,6 +155,7 @@ struct SMMUState {
     MemoryRegion iomem;
 
     GHashTable *smmu_pcibus_by_busptr;
+    GHashTable *smmu_sdev_by_sid;
     GHashTable *configs; /* cache for configuration data */
     GHashTable *iotlb;
     SMMUPciBus *smmu_pcibus_by_bus_num[SMMU_PCI_BUS_MAX];
@@ -191,10 +193,17 @@ SMMUPciBus *smmu_get_sbus(SMMUState *s, PCIBus *bus);
 /* Initialize SMMUDevice handle associated to a SMMUPciBus */
 void smmu_init_sdev(SMMUState *s, SMMUDevice *sdev, PCIBus *bus, int devfn);
 
+/* Initialize SMMUDevice handle associated to a non-PCI stream ID */
+void smmu_init_sdev_sid(SMMUState *s, SMMUDevice *sdev, uint32_t sid);
+
 /* Return the stream ID of an SMMU device */
-static inline uint16_t smmu_get_sid(SMMUDevice *sdev)
+static inline uint32_t smmu_get_sid(SMMUDevice *sdev)
 {
-    return PCI_BUILD_BDF(pci_bus_num(sdev->bus), sdev->devfn);
+    if (sdev->bus) {
+        return PCI_BUILD_BDF(pci_bus_num(sdev->bus), sdev->devfn);
+    }
+
+    return sdev->sid;
 }
 
 /**

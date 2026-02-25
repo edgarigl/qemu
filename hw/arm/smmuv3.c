@@ -1108,29 +1108,47 @@ epilogue:
         trace_smmuv3_translate_success(mr->parent_obj.name, sid, addr,
                                        entry.translated_addr, entry.perm,
                                        cfg->stage);
+        qemu_log_mask(CPU_LOG_MMU,
+                      "%s sid=0x%x iova=0x%" PRIx64
+                      " pa=0x%" PRIx64 " perm=0x%x stage=%u\n",
+                      mr->parent_obj.name, sid, (uint64_t)addr,
+                      (uint64_t)entry.translated_addr, entry.perm,
+                      cfg->stage);
         break;
     case SMMU_TRANS_DISABLE:
         entry.perm = flag;
         entry.addr_mask = ~TARGET_PAGE_MASK;
         trace_smmuv3_translate_disable(mr->parent_obj.name, sid, addr,
                                       entry.perm);
+        qemu_log_mask(CPU_LOG_MMU,
+                      "%s sid=0x%x iova=0x%" PRIx64 " disabled\n",
+                      mr->parent_obj.name, sid, (uint64_t)addr);
         break;
     case SMMU_TRANS_BYPASS:
         entry.perm = flag;
         entry.addr_mask = ~TARGET_PAGE_MASK;
         trace_smmuv3_translate_bypass(mr->parent_obj.name, sid, addr,
                                       entry.perm);
+        qemu_log_mask(CPU_LOG_MMU,
+                      "%s sid=0x%x iova=0x%" PRIx64 " bypassed\n",
+                      mr->parent_obj.name, sid, (uint64_t)addr);
         break;
     case SMMU_TRANS_ABORT:
         /* no event is recorded on abort */
         trace_smmuv3_translate_abort(mr->parent_obj.name, sid, addr,
                                      entry.perm);
+        qemu_log_mask(CPU_LOG_MMU,
+                      "%s sid=0x%x iova=0x%" PRIx64 " aborted\n",
+                      mr->parent_obj.name, sid, (uint64_t)addr);
         break;
     case SMMU_TRANS_ERROR:
         smmuv3_fixup_event(&event, addr);
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s translation failed for iova=0x%"PRIx64" (%s)\n",
                       mr->parent_obj.name, addr, smmu_event_string(event.type));
+        qemu_log_mask(CPU_LOG_MMU,
+                      "%s sid=0x%x iova=0x%" PRIx64 " error\n",
+                      mr->parent_obj.name, sid, (uint64_t)addr);
         smmuv3_record_event(s, &event);
         break;
     }
@@ -2164,10 +2182,18 @@ static int smmuv3_notify_flag_changed(IOMMUMemoryRegion *iommu,
     }
 
     if (new & IOMMU_NOTIFIER_MAP) {
-        error_setg(errp,
-                   "device %02x.%02x.%x requires iommu MAP notifier which is "
-                   "not currently supported", pci_bus_num(sdev->bus),
-                   PCI_SLOT(sdev->devfn), PCI_FUNC(sdev->devfn));
+        if (sdev->bus) {
+            error_setg(errp,
+                       "device %02x.%02x.%x requires iommu MAP notifier which "
+                       "is not currently supported",
+                       pci_bus_num(sdev->bus), PCI_SLOT(sdev->devfn),
+                       PCI_FUNC(sdev->devfn));
+        } else {
+            error_setg(errp,
+                       "device sid 0x%x requires iommu MAP notifier which is "
+                       "not currently supported",
+                       smmu_get_sid(sdev));
+        }
         return -EINVAL;
     }
 
@@ -2212,4 +2238,3 @@ static void smmuv3_register_types(void)
 }
 
 type_init(smmuv3_register_types)
-
