@@ -413,12 +413,50 @@ SMMUPciBus *smmu_find_smmu_pcibus(SMMUState *s, uint8_t bus_num)
     return NULL;
 }
 
+void smmu_init_sdev(SMMUState *s, SMMUDevice *sdev, PCIBus *bus, int devfn)
+{
+    static unsigned int index;
+    char *name = g_strdup_printf("%s-%d-%d", s->mrtypename, devfn, index++);
+
+    g_assert(bus);
+    sdev->smmu = s;
+    sdev->bus = bus;
+    sdev->devfn = devfn;
+    sdev->sid = PCI_BUILD_BDF(pci_bus_num(bus), devfn);
+
+    memory_region_init_iommu(&sdev->iommu, sizeof(sdev->iommu),
+                             s->mrtypename,
+                             OBJECT(s), name, 1ULL << SMMU_MAX_VA_BITS);
+    address_space_init(&sdev->as, MEMORY_REGION(&sdev->iommu), name);
+    trace_smmu_add_mr(name);
+    g_free(name);
+}
+
+void smmu_init_sdev_sid(SMMUState *s, SMMUDevice *sdev, uint16_t sid)
+{
+    static unsigned int index;
+    char *name = g_strdup_printf("%s-sid-0x%x-%d", s->mrtypename, sid, index++);
+
+    sdev->smmu = s;
+    sdev->bus = NULL;
+    sdev->devfn = -1;
+    sdev->sid = sid;
+
+    memory_region_init_iommu(&sdev->iommu, sizeof(sdev->iommu),
+                             s->mrtypename,
+                             OBJECT(s), name, 1ULL << SMMU_MAX_VA_BITS);
+    address_space_init(&sdev->as, MEMORY_REGION(&sdev->iommu), name);
+    trace_smmu_add_mr(name);
+    g_free(name);
+
+    g_hash_table_insert(s->smmu_sdev_by_sid, GUINT_TO_POINTER(sid), sdev);
+}
+
 static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
 {
     SMMUState *s = opaque;
     SMMUPciBus *sbus = g_hash_table_lookup(s->smmu_pcibus_by_busptr, bus);
     SMMUDevice *sdev;
-    static unsigned int index;
 
     if (!sbus) {
         sbus = g_malloc0(sizeof(SMMUPciBus) +
@@ -429,21 +467,8 @@ static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
 
     sdev = sbus->pbdev[devfn];
     if (!sdev) {
-        char *name = g_strdup_printf("%s-%d-%d", s->mrtypename, devfn, index++);
-
         sdev = sbus->pbdev[devfn] = g_new0(SMMUDevice, 1);
-
-        sdev->smmu = s;
-        sdev->bus = bus;
-        sdev->devfn = devfn;
-
-        memory_region_init_iommu(&sdev->iommu, sizeof(sdev->iommu),
-                                 s->mrtypename,
-                                 OBJECT(s), name, 1ULL << SMMU_MAX_VA_BITS);
-        address_space_init(&sdev->as,
-                           MEMORY_REGION(&sdev->iommu), name);
-        trace_smmu_add_mr(name);
-        g_free(name);
+        smmu_init_sdev(s, sdev, bus, devfn);
     }
 
     return &sdev->as;
@@ -454,6 +479,11 @@ IOMMUMemoryRegion *smmu_iommu_mr(SMMUState *s, uint32_t sid)
     uint8_t bus_n, devfn;
     SMMUPciBus *smmu_bus;
     SMMUDevice *smmu;
+
+    smmu = g_hash_table_lookup(s->smmu_sdev_by_sid, GUINT_TO_POINTER(sid));
+    if (smmu) {
+        return &smmu->iommu;
+    }
 
     bus_n = PCI_BUS_NUM(sid);
     smmu_bus = smmu_find_smmu_pcibus(s, bus_n);
@@ -517,6 +547,7 @@ static void smmu_base_realize(DeviceState *dev, Error **errp)
     s->iotlb = g_hash_table_new_full(smmu_iotlb_key_hash, smmu_iotlb_key_equal,
                                      g_free, g_free);
     s->smmu_pcibus_by_busptr = g_hash_table_new(NULL, NULL);
+    s->smmu_sdev_by_sid = g_hash_table_new(NULL, NULL);
 
     if (s->primary_bus) {
         pci_setup_iommu(s->primary_bus, smmu_find_add_as, s);
@@ -566,4 +597,3 @@ static void smmu_base_register_types(void)
 }
 
 type_init(smmu_base_register_types)
-

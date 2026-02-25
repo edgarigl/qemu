@@ -1532,10 +1532,18 @@ static int smmuv3_notify_flag_changed(IOMMUMemoryRegion *iommu,
     }
 
     if (new & IOMMU_NOTIFIER_MAP) {
-        error_setg(errp,
-                   "device %02x.%02x.%x requires iommu MAP notifier which is "
-                   "not currently supported", pci_bus_num(sdev->bus),
-                   PCI_SLOT(sdev->devfn), PCI_FUNC(sdev->devfn));
+        if (sdev->bus) {
+            error_setg(errp,
+                       "device %02x.%02x.%x requires iommu MAP notifier which "
+                       "is not currently supported",
+                       pci_bus_num(sdev->bus), PCI_SLOT(sdev->devfn),
+                       PCI_FUNC(sdev->devfn));
+        } else {
+            error_setg(errp,
+                       "device sid 0x%x requires iommu MAP notifier which is "
+                       "not currently supported",
+                       smmu_get_sid(sdev));
+        }
         return -EINVAL;
     }
 
@@ -1580,4 +1588,3 @@ static void smmuv3_register_types(void)
 }
 
 type_init(smmuv3_register_types)
-
