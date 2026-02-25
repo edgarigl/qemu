@@ -82,6 +82,7 @@ enum {
     VIRT_NVDIMM_ACPI,
     VIRT_PVTIME,
     VIRT_ACPI_PCIHP,
+    VIRT_GEM,
     VIRT_LOWMEMMAP_LAST,
 };
 
@@ -174,6 +175,7 @@ struct VirtMachineState {
     int psci_conduit;
     hwaddr highest_gpa;
     DeviceState *gic;
+    DeviceState *smmu_dev;
     DeviceState *acpi_dev;
     Notifier powerdown_notifier;
     Notifier generic_error_notifier;

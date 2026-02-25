@@ -42,6 +42,7 @@
 #include "hw/block/flash.h"
 #include "hw/display/ramfb.h"
 #include "net/net.h"
+#include "hw/net/cadence_gem.h"
 #include "system/device_tree.h"
 #include "system/numa.h"
 #include "system/runstate.h"
@@ -152,6 +153,8 @@ static void arm_virt_compat_default_set(MachineClass *mc)
 
 #define PLATFORM_BUS_NUM_IRQS 64
 
+#define VIRT_GEM_SID PCI_BUILD_BDF(0xff, 0)
+
 /* Legacy RAM limit in GB (< version 4.0) */
 #define LEGACY_RAMLIMIT_GB 255
 #define LEGACY_RAMLIMIT_BYTES (LEGACY_RAMLIMIT_GB * GiB)
@@ -197,6 +200,7 @@ static const MemMapEntry base_memmap[] = {
     [VIRT_PVTIME] =             { 0x090a0000, 0x00010000 },
     [VIRT_SECURE_GPIO] =        { 0x090b0000, 0x00001000 },
     [VIRT_ACPI_PCIHP] =         { 0x090c0000, ACPI_PCIHP_SIZE },
+    [VIRT_GEM] =                { 0x090d0000, 0x00001000 },
     [VIRT_MMIO] =               { 0x0a000000, 0x00000200 },
     /* ...repeating for a total of NUM_VIRTIO_TRANSPORTS, each of that size */
     [VIRT_PLATFORM_BUS] =       { 0x0c000000, 0x02000000 },
@@ -248,6 +252,7 @@ static const int a15irqmap[] = {
     [VIRT_GPIO] = 7,
     [VIRT_UART1] = 8,
     [VIRT_ACPI_GED] = 9,
+    [VIRT_GEM] = 10,
     [VIRT_MMIO] = 16, /* ...to 16 + NUM_VIRTIO_TRANSPORTS - 1 */
     [VIRT_GIC_V2M] = 48, /* ...to 48 + NUM_GICV2M_SPIS - 1 */
     [VIRT_SMMU] = 74,    /* ...to 74 + NUM_SMMU_IRQS - 1 */
@@ -1042,6 +1047,70 @@ static void create_rtc(const VirtMachineState *vms)
     g_free(nodename);
 }
 
+static void create_cadence_gem(VirtMachineState *vms)
+{
+    DeviceState *dev;
+    SysBusDevice *s;
+    MachineState *ms = MACHINE(vms);
+    hwaddr base = vms->memmap[VIRT_GEM].base;
+    hwaddr size = vms->memmap[VIRT_GEM].size;
+    int irq = vms->irqmap[VIRT_GEM];
+    char *node;
+    char *phy_node;
+    uint32_t phy_phandle;
+    const char compat[] = "cdns,zynqmp-gem\0cdns,gem";
+    const char clocknames[] = "pclk\0hclk\0tx_clk\0rx_clk";
+
+    dev = qdev_new(TYPE_CADENCE_GEM);
+    qemu_configure_nic_device(dev, true, NULL);
+
+    if (vms->iommu == VIRT_IOMMU_SMMUV3 && vms->smmu_dev) {
+        SMMUDevice *sdev = g_new0(SMMUDevice, 1);
+
+        smmu_init_sdev_sid(&ARM_SMMUV3(vms->smmu_dev)->smmu_state, sdev,
+                           VIRT_GEM_SID);
+        object_property_set_link(OBJECT(dev), "dma", OBJECT(&sdev->iommu),
+                                 &error_abort);
+    }
+
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    s = SYS_BUS_DEVICE(dev);
+    memory_region_add_subregion(get_system_memory(), base,
+                                sysbus_mmio_get_region(s, 0));
+    sysbus_connect_irq(s, 0, qdev_get_gpio_in(vms->gic, irq));
+
+    node = g_strdup_printf("/ethernet@%" PRIx64, base);
+    qemu_fdt_add_subnode(ms->fdt, node);
+    qemu_fdt_setprop(ms->fdt, node, "compatible", compat, sizeof(compat));
+    qemu_fdt_setprop_sized_cells(ms->fdt, node, "reg", 2, base, 2, size);
+    qemu_fdt_setprop_cells(ms->fdt, node, "interrupts",
+                           GIC_FDT_IRQ_TYPE_SPI, irq,
+                           GIC_FDT_IRQ_FLAGS_LEVEL_HI);
+    qemu_fdt_setprop_cells(ms->fdt, node, "clocks",
+                           vms->clock_phandle, vms->clock_phandle,
+                           vms->clock_phandle, vms->clock_phandle);
+    qemu_fdt_setprop(ms->fdt, node, "clock-names",
+                     clocknames, sizeof(clocknames));
+    qemu_fdt_setprop_string(ms->fdt, node, "phy-mode", "rgmii-id");
+
+    phy_node = g_strdup_printf("%s/fixed-link", node);
+    phy_phandle = qemu_fdt_alloc_phandle(ms->fdt);
+    qemu_fdt_add_subnode(ms->fdt, phy_node);
+    qemu_fdt_setprop_cell(ms->fdt, phy_node, "phandle", phy_phandle);
+    qemu_fdt_setprop(ms->fdt, phy_node, "full-duplex", NULL, 0);
+    qemu_fdt_setprop_cell(ms->fdt, phy_node, "speed", 1000);
+    qemu_fdt_setprop_cell(ms->fdt, node, "phy-handle", phy_phandle);
+
+    if (vms->iommu == VIRT_IOMMU_SMMUV3 && vms->iommu_phandle) {
+        qemu_fdt_setprop_cells(ms->fdt, node, "iommus",
+                               vms->iommu_phandle, VIRT_GEM_SID);
+    }
+
+    qemu_fdt_setprop_string(ms->fdt, "/aliases", "ethernet0", node);
+    g_free(phy_node);
+    g_free(node);
+}
+
 static DeviceState *gpio_key_dev;
 static void virt_powerdown_req(Notifier *n, void *opaque)
 {
@@ -1521,7 +1590,7 @@ static void create_smmuv3_dev_dtb(VirtMachineState *vms, DeviceState *dev,
                            0x0, vms->iommu_phandle, 0x0, 0x10000);
 }
 
-static void create_smmu(const VirtMachineState *vms, PCIBus *bus)
+static void create_smmu(VirtMachineState *vms, PCIBus *bus)
 {
     VirtMachineClass *vmc = VIRT_MACHINE_GET_CLASS(vms);
     int irq =  vms->irqmap[VIRT_SMMU];
@@ -1552,6 +1621,7 @@ static void create_smmu(const VirtMachineState *vms, PCIBus *bus)
                            qdev_get_gpio_in(vms->gic, irq + i));
     }
     create_smmuv3_dt_bindings(vms, base, size, irq);
+    vms->smmu_dev = dev;
 }
 
 static void create_virtio_iommu_dt_bindings(VirtMachineState *vms)
@@ -2566,6 +2636,7 @@ static void machvirt_init(MachineState *machine)
     create_rtc(vms);
 
     create_pcie(vms);
+    create_cadence_gem(vms);
     create_cxl_host_reg_region(vms);
 
     if (aarch64 && firmware_loaded && virt_is_acpi_enabled(vms)) {
