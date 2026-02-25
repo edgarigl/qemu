@@ -756,28 +756,45 @@ epilogue:
         entry.addr_mask = cached_entry->entry.addr_mask;
         trace_smmuv3_translate_success(mr->parent_obj.name, sid, addr,
                                        entry.translated_addr, entry.perm);
+        qemu_log_mask(CPU_LOG_MMU,
+                      "%s sid=0x%x iova=0x%" PRIx64
+                      " pa=0x%" PRIx64 " perm=0x%x\n",
+                      mr->parent_obj.name, sid, (uint64_t)addr,
+                      (uint64_t)entry.translated_addr, entry.perm);
         break;
     case SMMU_TRANS_DISABLE:
         entry.perm = flag;
         entry.addr_mask = ~TARGET_PAGE_MASK;
         trace_smmuv3_translate_disable(mr->parent_obj.name, sid, addr,
                                       entry.perm);
+        qemu_log_mask(CPU_LOG_MMU,
+                      "%s sid=0x%x iova=0x%" PRIx64 " disabled\n",
+                      mr->parent_obj.name, sid, (uint64_t)addr);
         break;
     case SMMU_TRANS_BYPASS:
         entry.perm = flag;
         entry.addr_mask = ~TARGET_PAGE_MASK;
         trace_smmuv3_translate_bypass(mr->parent_obj.name, sid, addr,
                                       entry.perm);
+        qemu_log_mask(CPU_LOG_MMU,
+                      "%s sid=0x%x iova=0x%" PRIx64 " bypassed\n",
+                      mr->parent_obj.name, sid, (uint64_t)addr);
         break;
     case SMMU_TRANS_ABORT:
         /* no event is recorded on abort */
         trace_smmuv3_translate_abort(mr->parent_obj.name, sid, addr,
                                      entry.perm);
+        qemu_log_mask(CPU_LOG_MMU,
+                      "%s sid=0x%x iova=0x%" PRIx64 " aborted\n",
+                      mr->parent_obj.name, sid, (uint64_t)addr);
         break;
     case SMMU_TRANS_ERROR:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s translation failed for iova=0x%"PRIx64"(%s)\n",
                       mr->parent_obj.name, addr, smmu_event_string(event.type));
+        qemu_log_mask(CPU_LOG_MMU,
+                      "%s sid=0x%x iova=0x%" PRIx64 " error\n",
+                      mr->parent_obj.name, sid, (uint64_t)addr);
         smmuv3_record_event(s, &event);
         break;
     }
