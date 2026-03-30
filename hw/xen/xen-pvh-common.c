@@ -293,12 +293,13 @@ static void xen_pvh_init(MachineState *ms)
                        &xen_memory_listener,
                        s->cfg.mapcache);
 
-    if (s->cfg.virtio_mmio_num) {
-        xen_create_virtio_mmio_devices(s);
-    }
-
+    /* Register virtio-msg before virtio-mmio to keep original bus order. */
     if (xpc->has_virtio_msg) {
         xen_create_virtio_msg_devices(s);
+    }
+
+    if (s->cfg.virtio_mmio_num) {
+        xen_create_virtio_mmio_devices(s);
     }
 
 #ifdef CONFIG_TPM
