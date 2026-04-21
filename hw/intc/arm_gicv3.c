@@ -443,6 +443,16 @@ static void gicv3_plugin_irq_inject(void *opaque, int irq, int cpu, bool pulse)
 
     qemu_irq gic_irq;
 
+    if (irq < GIC_NR_SGIS) {
+        assert(cpu < s->num_cpu);
+        /*
+         * SGIs are not board-wired GPIO inputs. Route them through the
+         * redistributor SGI path instead of the PPI input-line path.
+         */
+        gicv3_redist_send_sgi(&s->cpu[cpu], GICV3_G1NS, irq, true);
+        return;
+    }
+
     if (irq >= GIC_INTERNAL) {
         assert(irq < s->num_irq);
 
