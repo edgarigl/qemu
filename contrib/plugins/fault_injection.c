@@ -87,6 +87,63 @@ static void register_mmio_override(FaultConfig *fc);
 
 static void fc_free(FaultConfig *fc);
 
+static const char *fault_trigger_name(FaultTrigger trigger)
+{
+    switch (trigger) {
+    case TRIGGER_ON_PC:
+        return "PC";
+    case TRIGGER_ON_SYSREG:
+        return "SYS_REG";
+    case TRIGGER_ON_RAM:
+        return "RAM";
+    case TRIGGER_ON_MMIO:
+        return "MMIO";
+    case TRIGGER_ON_TIMER:
+        return "TIMER";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static const char *fault_target_name(FaultTarget target)
+{
+    switch (target) {
+    case TARGET_EMPTY:
+        return "EMPTY";
+    case TARGET_CPU_REG:
+        return "CPU_REG";
+    case TARGET_RAM:
+        return "RAM";
+    case TARGET_MMIO:
+        return "MMIO";
+    case TARGET_IRQ:
+        return "IRQ";
+    case TARGET_EXCP:
+        return "EXCP";
+    case TARGET_CUSTOM:
+        return "CUSTOM";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static void log_fault_injection(const FaultConfig *fc)
+{
+    FI_LOG("FI: inject trigger=%s trigger_condition=0x%" PRIx64
+           " target=%s target_data=0x%" PRIx64
+           " fault_data=0x%" PRIx64 " size=%u cpu=%u irq_type=%s"
+           " fault_name=%s\n",
+           fault_trigger_name(fc->trigger),
+           fc->trigger_condition,
+           fault_target_name(fc->target),
+           fc->target_data,
+           fc->fault_data,
+           fc->size,
+           fc->cpu,
+           fc->irq_type ? fc->irq_type : "(none)",
+           fc->fault_name ? fc->fault_name : "(none)");
+}
+
 static bool apply_mmio_override(uint64_t hwaddr, unsigned size, bool is_write,
                              uint64_t *value)
 {
@@ -165,6 +222,8 @@ static void inject_irq(FaultConfig *fc)
 
 static void inject_fault(FaultConfig* fc)
 {
+    log_fault_injection(fc);
+
     switch (fc->target) {
         case TARGET_CPU_REG:
             cpu_write_reg(fc->target_data, fc->fault_data);
