@@ -50,6 +50,7 @@ typedef struct {
     uint64_t fault_data;
     gchar *fault_name;
 
+    uint32_t count;
     uint8_t size;
     uint8_t cpu;
     gchar *irq_type;
@@ -58,6 +59,7 @@ typedef struct {
 typedef struct {
     uint64_t hwaddr;
     uint64_t value;
+    uint32_t count;
     uint8_t  size;
 } MmioOverrideConfig;
 
@@ -131,13 +133,15 @@ static void log_fault_injection(const FaultConfig *fc)
 {
     FI_LOG("FI: inject trigger=%s trigger_condition=0x%" PRIx64
            " target=%s target_data=0x%" PRIx64
-           " fault_data=0x%" PRIx64 " size=%u cpu=%u irq_type=%s"
+           " fault_data=0x%" PRIx64 " count=%" PRIu32
+           " size=%u cpu=%u irq_type=%s"
            " fault_name=%s\n",
            fault_trigger_name(fc->trigger),
            fc->trigger_condition,
            fault_target_name(fc->target),
            fc->target_data,
            fc->fault_data,
+           fc->count,
            fc->size,
            fc->cpu,
            fc->irq_type ? fc->irq_type : "(none)",
@@ -147,17 +151,25 @@ static void log_fault_injection(const FaultConfig *fc)
 static bool apply_mmio_override(uint64_t hwaddr, unsigned size, bool is_write,
                              uint64_t *value)
 {
-    g_rw_lock_reader_lock(&mmio_override_lock);
+    g_rw_lock_writer_lock(&mmio_override_lock);
 
     MmioOverrideConfig *conf = g_hash_table_lookup(mmio_override, &hwaddr);
     if (!conf) {
-        g_rw_lock_reader_unlock(&mmio_override_lock);
+        g_rw_lock_writer_unlock(&mmio_override_lock);
         return false;
     }
 
     *value = conf->value;
 
-    g_rw_lock_reader_unlock(&mmio_override_lock);
+    if (conf->count > 0) {
+        conf->count--;
+        if (conf->count == 0) {
+            g_hash_table_steal(mmio_override, &hwaddr);
+            g_free(conf);
+        }
+    }
+
+    g_rw_lock_writer_unlock(&mmio_override_lock);
 
     return true;
 }
@@ -414,12 +426,14 @@ static void register_mmio_override(FaultConfig *fc)
                                                         &fc->target_data);
     if (curr_conf) {
         curr_conf->value = fc->fault_data;
+        curr_conf->count = fc->count;
         curr_conf->size = fc->size;
     } else {
         MmioOverrideConfig *new_conf = g_new0(MmioOverrideConfig, 1);
 
         new_conf->hwaddr = fc->target_data;
         new_conf->value = fc->fault_data;
+        new_conf->count = fc->count;
         new_conf->size = fc->size;
 
         g_hash_table_insert(mmio_override, &new_conf->hwaddr,
@@ -627,6 +641,8 @@ static void xml_start_elem(GMarkupParseContext *context,
                 fc->trigger_condition = strtoull(value, NULL, 0);
             } else if (!g_strcmp0(key, "fault_data")) {
                 fc->fault_data = strtoull(value, NULL, 0);
+            } else if (!g_strcmp0(key, "count")) {
+                fc->count = strtoul(value, NULL, 0);
             } else if (!g_strcmp0(key, "size")) {
                 fc->size = strtoull(value, NULL, 0);
             } else if (!g_strcmp0(key, "cpu")) {

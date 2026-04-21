@@ -60,6 +60,7 @@ The following attributes can be used in the tag:
 - target            : The system part to corrupt (CPU_REG, IRQ, etc.). This is optional for RAM and MMIO triggers.
 - target_data       : The specific ID or address of the target.
 - fault_data        : The corrupted value to inject.
+- count             : (Optional) Number of times an MMIO override should be applied. `0` means persistent. `1` gives a one-shot override.
 - size              : (Optional) Size in bytes for memory operations. Default is 8.
 - cpu               : (Optional) CPU index for IRQs. Default is 0.
 - irq_type          : (Optional) For IRQs. Can be SPI, PPI, or SGI. Default is SPI.
