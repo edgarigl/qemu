@@ -177,6 +177,7 @@ static const MemMapEntry base_memmap[] = {
     /* GIC distributor and CPU interfaces sit inside the CPU peripheral space */
     [VIRT_GIC_DIST] =           { 0x08000000, 0x00010000 },
     [VIRT_GIC_CPU] =            { 0x08010000, 0x00010000 },
+    [VIRT_GIC_FMU] =            { 0x08050000, 0x00001000 },
     [VIRT_GIC_V2M] =            { 0x08020000, 0x00001000 },
     [VIRT_GIC_HYP] =            { 0x08030000, 0x00010000 },
     [VIRT_GIC_VCPU] =           { 0x08040000, 0x00010000 },
@@ -880,6 +881,9 @@ static void create_gic(VirtMachineState *vms, MemoryRegion *mem)
     if (gicv3_nmi_present(vms)) {
         qdev_prop_set_bit(vms->gic, "has-nmi", true);
     }
+    if (vms->gic_version != VIRT_GIC_VERSION_2 && vms->fmu) {
+        qdev_prop_set_bit(vms->gic, "has-fmu", true);
+    }
 
     gicbusdev = SYS_BUS_DEVICE(vms->gic);
     sysbus_realize_and_unref(gicbusdev, &error_fatal);
@@ -889,6 +893,10 @@ static void create_gic(VirtMachineState *vms, MemoryRegion *mem)
         if (nb_redist_regions == 2) {
             sysbus_mmio_map(gicbusdev, 2,
                             vms->memmap[VIRT_HIGH_GIC_REDIST2].base);
+        }
+        if (vms->fmu) {
+            sysbus_mmio_map(gicbusdev, 1 + nb_redist_regions,
+                            vms->memmap[VIRT_GIC_FMU].base);
         }
     } else {
         sysbus_mmio_map(gicbusdev, 1, vms->memmap[VIRT_GIC_CPU].base);
@@ -2965,6 +2973,20 @@ static void virt_set_mte(Object *obj, bool value, Error **errp)
     vms->mte = value;
 }
 
+static bool virt_get_fmu(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->fmu;
+}
+
+static void virt_set_fmu(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->fmu = value;
+}
+
 static char *virt_get_gic_version(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
@@ -3601,6 +3623,11 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                           "guest CPU which implements the ARM "
                                           "Memory Tagging Extension");
 
+    object_class_property_add_bool(oc, "x-fmu", virt_get_fmu, virt_set_fmu);
+    object_class_property_set_description(oc, "x-fmu",
+                                          "Experimental: enable a minimal "
+                                          "GIC-600AE-inspired FMU register window");
+
     object_class_property_add_bool(oc, "its", virt_get_its,
                                    virt_set_its);
     object_class_property_set_description(oc, "its",
@@ -3684,6 +3711,9 @@ static void virt_instance_init(Object *obj)
 
     /* MTE is disabled by default.  */
     vms->mte = false;
+
+    /* FMU is disabled by default. */
+    vms->fmu = false;
 
     /* Supply kaslr-seed and rng-seed by default */
     vms->dtb_randomness = true;
