@@ -44,6 +44,9 @@ struct PL011State {
     uint32_t ibrd;
     uint32_t fbrd;
     uint32_t ifl;
+    uint32_t tcr;
+    uint32_t itip;
+    uint32_t itop;
     int read_pos;
     int read_count;
     int read_trigger;
