@@ -90,6 +90,18 @@ DeviceState *pl011_create(hwaddr addr, qemu_irq irq, Chardev *chr)
 #define CR_LBE      (1 << 7)
 #define CR_UARTEN   (1 << 0)
 
+/* Test registers */
+#define TCR_ITEN        (1 << 0)
+#define TCR_TESTFIFO    (1 << 1)
+#define TCR_SIRTEST     (1 << 2)
+
+#define ITOP_UARTINTR       (1 << 6)
+#define ITOP_UARTEINTR      (1 << 7)
+#define ITOP_UARTRTINTR     (1 << 8)
+#define ITOP_UARTTXINTR     (1 << 9)
+#define ITOP_UARTRXINTR     (1 << 10)
+#define ITOP_UARTMSINTR     (1 << 11)
+
 /* Integer Baud Rate Divider, UARTIBRD */
 #define IBRD_MASK 0xffff
 
@@ -107,6 +119,7 @@ static const char *pl011_regname(hwaddr offset)
         [0] = "DR", [1] = "RSR", [6] = "FR", [8] = "ILPR", [9] = "IBRD",
         [10] = "FBRD", [11] = "LCRH", [12] = "CR", [13] = "IFLS", [14] = "IMSC",
         [15] = "RIS", [16] = "MIS", [17] = "ICR", [18] = "DMACR",
+        [0x20] = "TCR", [0x21] = "ITIP", [0x22] = "ITOP", [0x23] = "TDR",
     };
     unsigned idx = offset >> 2;
 
@@ -133,6 +146,22 @@ static void pl011_update(PL011State *s)
 {
     uint32_t flags;
     int i;
+
+    if (s->tcr & TCR_ITEN) {
+        const uint32_t test_irqmask[] = {
+            [0] = ITOP_UARTINTR,
+            [1] = ITOP_UARTRXINTR,
+            [2] = ITOP_UARTTXINTR,
+            [3] = ITOP_UARTRTINTR,
+            [4] = ITOP_UARTMSINTR,
+            [5] = ITOP_UARTEINTR,
+        };
+
+        for (i = 0; i < ARRAY_SIZE(s->irq); i++) {
+            qemu_set_irq(s->irq[i], !!(s->itop & test_irqmask[i]));
+        }
+        return;
+    }
 
     flags = s->int_level & s->int_enabled;
     trace_pl011_irq_state(flags != 0);
@@ -330,6 +359,18 @@ static uint64_t pl011_read(void *opaque, hwaddr offset,
     case 18: /* UARTDMACR */
         r = s->dmacr;
         break;
+    case 0x20: /* UARTTCR */
+        r = s->tcr;
+        break;
+    case 0x21: /* UARTITIP */
+        r = s->itip;
+        break;
+    case 0x22: /* UARTITOP */
+        r = s->itop;
+        break;
+    case 0x23: /* UARTTDR */
+        r = 0;
+        break;
     case 0x3f8 ... 0x400:
         r = s->id[(offset - 0xfe0) >> 2];
         break;
@@ -497,6 +538,22 @@ static void pl011_write(void *opaque, hwaddr offset,
             qemu_log_mask(LOG_UNIMP, "pl011: DMA not implemented\n");
         }
         break;
+    case 0x20: /* UARTTCR */
+        s->tcr = value & (TCR_ITEN | TCR_TESTFIFO | TCR_SIRTEST);
+        pl011_update(s);
+        break;
+    case 0x21: /* UARTITIP */
+        s->itip = value & 0xff;
+        break;
+    case 0x22: /* UARTITOP */
+        s->itop = value & 0x3fff;
+        pl011_update(s);
+        break;
+    case 0x23: /* UARTTDR */
+        if (s->tcr & TCR_TESTFIFO) {
+            pl011_fifo_rx_put(s, value & 0x7ff);
+        }
+        break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "pl011_write: Bad offset 0x%x\n", (int)offset);
@@ -609,7 +666,7 @@ static int pl011_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_pl011 = {
     .name = "pl011",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 2,
     .post_load = pl011_post_load,
     .fields = (const VMStateField[]) {
@@ -626,6 +683,9 @@ static const VMStateDescription vmstate_pl011 = {
         VMSTATE_UINT32(ibrd, PL011State),
         VMSTATE_UINT32(fbrd, PL011State),
         VMSTATE_UINT32(ifl, PL011State),
+        VMSTATE_UINT32(tcr, PL011State),
+        VMSTATE_UINT32(itip, PL011State),
+        VMSTATE_UINT32(itop, PL011State),
         VMSTATE_INT32(read_pos, PL011State),
         VMSTATE_INT32(read_count, PL011State),
         VMSTATE_INT32(read_trigger, PL011State),
@@ -682,6 +742,9 @@ static void pl011_reset(DeviceState *dev)
     s->fbrd = 0;
     s->read_trigger = 1;
     s->ifl = 0x12;
+    s->tcr = 0;
+    s->itip = 0;
+    s->itop = 0;
     s->cr = 0x300;
     s->flags = 0;
     s->logged_disabled_uart = false;
