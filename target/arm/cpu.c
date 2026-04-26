@@ -52,6 +52,7 @@
 #include "cpregs.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
+#include "qapi/visitor.h"
 
 #include "trace.h"
 
@@ -1376,6 +1377,63 @@ static void arm_cpu_propagate_feature_implications(ARMCPU *cpu)
     }
 }
 
+static void arm_cpu_get_gic_num_lrs(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    ARMCPU *cpu = ARM_CPU(obj);
+    uint32_t value = cpu->gic_num_lrs;
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void arm_cpu_set_gic_num_lrs(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    ARMCPU *cpu = ARM_CPU(obj);
+    uint32_t value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+
+    if (value > 16) {
+        error_setg(errp, "invalid value for x-gic-num-lrs");
+        error_append_hint(errp, "valid values are in the range [0-16]\n");
+        return;
+    }
+
+    cpu->gic_num_lrs = value;
+}
+
+static void arm_cpu_get_gic_vpribits(Object *obj, Visitor *v, const char *name,
+                                     void *opaque, Error **errp)
+{
+    ARMCPU *cpu = ARM_CPU(obj);
+    uint32_t value = cpu->gic_vpribits;
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void arm_cpu_set_gic_vpribits(Object *obj, Visitor *v,
+                                     const char *name, void *opaque,
+                                     Error **errp)
+{
+    ARMCPU *cpu = ARM_CPU(obj);
+    uint32_t value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+
+    if (value != 0 && (value < 5 || value > 8)) {
+        error_setg(errp, "invalid value for x-gic-vpribits");
+        error_append_hint(errp, "valid values are 0 or in the range [5-8]\n");
+        return;
+    }
+
+    cpu->gic_vpribits = value;
+}
+
 static void arm_cpu_post_init(Object *obj)
 {
     ARMCPU *cpu = ARM_CPU(obj);
@@ -1425,6 +1483,20 @@ static void arm_cpu_post_init(Object *obj)
 
     if (arm_feature(&cpu->env, ARM_FEATURE_EL2)) {
         qdev_property_add_static(DEVICE(obj), &arm_cpu_has_el2_property);
+        object_property_add(obj, "x-gic-num-lrs", "uint32",
+                            arm_cpu_get_gic_num_lrs,
+                            arm_cpu_set_gic_num_lrs,
+                            NULL, NULL);
+        object_property_set_description(obj, "x-gic-num-lrs",
+                                        "Experimental: override the GICv3 CPU "
+                                        "interface list register count");
+        object_property_add(obj, "x-gic-vpribits", "uint32",
+                            arm_cpu_get_gic_vpribits,
+                            arm_cpu_set_gic_vpribits,
+                            NULL, NULL);
+        object_property_set_description(obj, "x-gic-vpribits",
+                                        "Experimental: override the GICv3 CPU "
+                                        "interface virtual priority bit count");
     }
 #endif
 
