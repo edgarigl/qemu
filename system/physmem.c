@@ -38,6 +38,7 @@
 #include "exec/translation-block.h"
 #include "hw/core/qdev.h"
 #include "hw/core/qdev-properties.h"
+#include "system/qtest.h"
 #include "hw/core/boards.h"
 #include "system/xen.h"
 #include "system/kvm.h"
@@ -3412,6 +3413,12 @@ static MemTxResult flatview_read(FlatView *fv, hwaddr addr,
     hwaddr l;
     hwaddr mr_addr;
     MemoryRegion *mr;
+    uint64_t value;
+
+    if (qtest_mmio_override_check(addr, len, false, &value)) {
+        stn_he_p(buf, len, value);
+        return MEMTX_OK;
+    }
 
     l = len;
     mr = flatview_translate(fv, addr, &mr_addr, &l, false, attrs);
