@@ -14,6 +14,7 @@
 #ifndef QTEST_H
 #define QTEST_H
 
+#include <stdint.h>
 #include "chardev/char.h"
 
 extern bool qtest_allowed;
@@ -32,5 +33,7 @@ void qtest_server_init(const char *qtest_chrdev, const char *qtest_log, Error **
 void qtest_server_set_send_handler(void (*send)(void *, const char *),
                                  void *opaque);
 void qtest_server_inproc_recv(void *opaque, const char *buf);
+bool qtest_mmio_override_check(uint64_t hwaddr, unsigned size, bool is_write,
+                               uint64_t *value);
 
 #endif
