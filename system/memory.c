@@ -35,6 +35,7 @@
 #include "hw/core/boards.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
+#include "system/qtest.h"
 
 #include "memory-internal.h"
 
@@ -1477,6 +1478,28 @@ MemTxResult memory_region_dispatch_read(MemoryRegion *mr,
                                            mr->alias_offset + addr,
                                            pval, op, attrs);
     }
+
+    /*
+     * qtest mmio_override_read intercepts the read before the device model
+     * sees it. flatview_read() already consults the same hook for DMA-style
+     * reads; do the same here so guest CPU MMIO loads (both TCG and KVM
+     * accelerators) honour the override too.
+     */
+    {
+        MemoryRegion *root = mr;
+        hwaddr abs_addr = addr + mr->addr;
+
+        while (root->container) {
+            root = root->container;
+            abs_addr += root->addr;
+        }
+
+        if (qtest_mmio_override_check(abs_addr, size, false, pval)) {
+            adjust_endianness(mr, pval, op);
+            return MEMTX_OK;
+        }
+    }
+
     if (!memory_region_access_valid(mr, addr, size, false, attrs)) {
         *pval = unassigned_mem_read(mr, addr, size);
         return MEMTX_DECODE_ERROR;
