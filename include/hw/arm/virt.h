@@ -58,6 +58,7 @@ enum {
     VIRT_CPUPERIPHS,
     VIRT_GIC_DIST,
     VIRT_GIC_CPU,
+    VIRT_GIC_FMU,
     VIRT_GIC_V2M,
     VIRT_GIC_HYP,
     VIRT_GIC_VCPU,
@@ -154,6 +155,7 @@ struct VirtMachineState {
     bool virt;
     bool ras;
     bool mte;
+    bool fmu;
     bool dtb_randomness;
     bool second_ns_uart_present;
     OnOffAuto acpi;
