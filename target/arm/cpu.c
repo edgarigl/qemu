@@ -37,6 +37,7 @@
 #include "exec/target_page.h"
 #include "hw/core/qdev-properties.h"
 #if !defined(CONFIG_USER_ONLY)
+#include "hw/arm/arm-serror.h"
 #include "hw/core/loader.h"
 #include "hw/core/boards.h"
 #ifdef CONFIG_TCG
@@ -156,7 +157,7 @@ static bool arm_cpu_has_work(CPUState *cs)
                CPU_INTERRUPT_FIQ | CPU_INTERRUPT_HARD
                | CPU_INTERRUPT_NMI | CPU_INTERRUPT_VINMI | CPU_INTERRUPT_VFNMI
                | CPU_INTERRUPT_VFIQ | CPU_INTERRUPT_VIRQ | CPU_INTERRUPT_VSERR
-               | CPU_INTERRUPT_EXITTB);
+               | CPU_INTERRUPT_SERR | CPU_INTERRUPT_EXITTB);
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -755,6 +756,28 @@ static void arm_cpu_set_irq(void *opaque, int irq, int level)
     default:
         g_assert_not_reached();
     }
+}
+
+void arm_cpu_set_serror(CPUState *cs, uint64_t esr, bool has_esr)
+{
+    ARMCPU *cpu;
+    CPUARMState *env;
+
+    if (!cs) {
+        cs = qemu_get_cpu(0);
+    }
+    if (!cs) {
+        return;
+    }
+
+    cpu = ARM_CPU(cs);
+    env = &cpu->env;
+
+    env->serror.pending = 1;
+    env->serror.has_esr = has_esr;
+    env->serror.esr = esr;
+
+    cpu_interrupt(cs, CPU_INTERRUPT_SERR);
 }
 
 static bool arm_cpu_internal_is_big_endian(CPUState *cs)

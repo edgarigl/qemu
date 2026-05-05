@@ -920,6 +920,8 @@ static uint64_t isr_read(CPUARMState *env, const ARMCPRegInfo *ri)
         if (cpu_test_interrupt(cs, CPU_INTERRUPT_VSERR)) {
             ret |= CPSR_A;
         }
+    } else if (cpu_test_interrupt(cs, CPU_INTERRUPT_SERR)) {
+        ret |= CPSR_A;
     }
 
     return ret;
@@ -8509,6 +8511,7 @@ void arm_log_exception(CPUState *cs)
             [EXCP_VINMI] = "Virtual IRQ NMI",
             [EXCP_VFNMI] = "Virtual FIQ NMI",
             [EXCP_MON_TRAP] = "Monitor Trap",
+            [EXCP_SERR] = "SError",
         };
 
         if (idx >= 0 && idx < ARRAY_SIZE(excnames)) {
@@ -9087,6 +9090,28 @@ static void arm_cpu_do_interrupt_aarch32(CPUState *cs)
             offset = 8;
         }
         break;
+    case EXCP_SERR:
+        {
+            ARMMMUFaultInfo fi = { .type = ARMFault_AsyncExternal, };
+
+            if (extended_addresses_enabled(env)) {
+                env->exception.fsr = arm_fi_to_lfsc(&fi);
+            } else {
+                env->exception.fsr = arm_fi_to_sfsc(&fi);
+            }
+            if (env->serror.has_esr) {
+                env->exception.fsr |= env->serror.esr & 0xd000;
+            }
+            A32_BANKED_CURRENT_REG_SET(env, dfsr, env->exception.fsr);
+            qemu_log_mask(CPU_LOG_INT, "...with IFSR 0x%x\n",
+                          env->exception.fsr);
+
+            new_mode = ARM_CPU_MODE_ABT;
+            addr = 0x10;
+            mask = CPSR_A | CPSR_I;
+            offset = 8;
+        }
+        break;
     case EXCP_SMC:
         new_mode = ARM_CPU_MODE_MON;
         addr = 0x08;
@@ -9388,6 +9413,15 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
         addr += 0x180;
         /* Construct the SError syndrome from IDS and ISS fields. */
         env->exception.syndrome = syn_serror(env->cp15.vsesr_el2 & 0x1ffffff);
+        env->cp15.esr_el[new_el] = env->exception.syndrome;
+        break;
+    case EXCP_SERR:
+        addr += 0x180;
+        if (env->serror.has_esr) {
+            env->exception.syndrome = env->serror.esr;
+        } else {
+            env->exception.syndrome = syn_serror(0);
+        }
         env->cp15.esr_el[new_el] = env->exception.syndrome;
         break;
     default:
