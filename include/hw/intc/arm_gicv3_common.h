@@ -228,6 +228,7 @@ struct GICv3State {
     /*< public >*/
 
     MemoryRegion iomem_dist; /* Distributor */
+    MemoryRegion iomem_fmu;  /* Minimal FMU-style inject window */
     GICv3RedistRegion *redist_regions; /* Redistributor Regions */
     uint32_t *redist_region_count; /* redistributor count within each region */
     uint32_t nb_redist_regions; /* number of redist regions */
@@ -238,6 +239,7 @@ struct GICv3State {
     uint32_t revision;
     uint32_t maint_irq;
     bool lpi_enable;
+    bool has_fmu;
     bool nmi_support;
     bool security_extn;
     bool force_8bit_prio;

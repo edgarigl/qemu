@@ -34,6 +34,53 @@
 #include "system/kvm.h"
 #include "system/whpx.h"
 
+/*
+ * Minimal GIC-600AE-inspired FMU window.
+ *
+ * The documented FMU register name is FMU_SMINJERR (Safety Mechanism Inject
+ * Error Register). We implement only that single write-only register here as a
+ * front-end for physical SError injection.
+ */
+#define GICV3_FMU_SIZE            0x1000
+#define FMU_SMINJERR              0x0eb4
+#define FMU_SMINJERR_DEFAULT_ESR  0xbf000002
+
+static MemTxResult gicv3_fmu_read(void *opaque, hwaddr offset,
+                                  uint64_t *data, unsigned size,
+                                  MemTxAttrs attrs)
+{
+    *data = 0;
+    return MEMTX_OK;
+}
+
+static MemTxResult gicv3_fmu_write(void *opaque, hwaddr offset,
+                                   uint64_t value, unsigned size,
+                                   MemTxAttrs attrs)
+{
+    GICv3State *s = opaque;
+
+    switch (offset) {
+    case FMU_SMINJERR:
+        gicv3_cpuif_set_serror(s, value ? value : FMU_SMINJERR_DEFAULT_ESR,
+                               true);
+        break;
+    default:
+        break;
+    }
+
+    return MEMTX_OK;
+}
+
+static const MemoryRegionOps gicv3_fmu_ops = {
+    .read_with_attrs = gicv3_fmu_read,
+    .write_with_attrs = gicv3_fmu_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+    .impl.min_access_size = 4,
+    .impl.max_access_size = 4,
+};
+
 
 static void gicv3_gicd_no_migration_shift_bug_post_load(GICv3State *cs)
 {
@@ -365,6 +412,12 @@ void gicv3_init_irqs_and_mmio(GICv3State *s, qemu_irq_handler handler,
         sysbus_init_mmio(sbd, &region->iomem);
         g_free(name);
     }
+
+    if (s->has_fmu) {
+        memory_region_init_io(&s->iomem_fmu, OBJECT(s), &gicv3_fmu_ops, s,
+                              "gicv3_fmu", GICV3_FMU_SIZE);
+        sysbus_init_mmio(sbd, &s->iomem_fmu);
+    }
 }
 
 static void arm_gicv3_common_realize(DeviceState *dev, Error **errp)
@@ -604,6 +657,7 @@ static const Property arm_gicv3_common_properties[] = {
     DEFINE_PROP_UINT32("num-irq", GICv3State, num_irq, 32),
     DEFINE_PROP_UINT32("revision", GICv3State, revision, 3),
     DEFINE_PROP_BOOL("has-lpi", GICv3State, lpi_enable, 0),
+    DEFINE_PROP_BOOL("has-fmu", GICv3State, has_fmu, 0),
     DEFINE_PROP_BOOL("has-nmi", GICv3State, nmi_support, 0),
     DEFINE_PROP_BOOL("has-security-extensions", GICv3State, security_extn, 0),
     DEFINE_PROP_UINT32("maintenance-interrupt-id", GICv3State, maint_irq, 0),

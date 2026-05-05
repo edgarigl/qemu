@@ -723,6 +723,7 @@ void gicv3_redist_vinvall(GICv3CPUState *cs, uint64_t vptaddr);
 
 void gicv3_redist_send_sgi(GICv3CPUState *cs, int grp, int irq, bool ns);
 void gicv3_init_cpuif(GICv3State *s);
+void gicv3_cpuif_set_serror(GICv3State *s, uint64_t esr, bool has_esr);
 
 /**
  * gicv3_cpuif_update:
