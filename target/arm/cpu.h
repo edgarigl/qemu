@@ -64,6 +64,7 @@
 #define EXCP_VINMI          27
 #define EXCP_VFNMI          28
 #define EXCP_MON_TRAP       29   /* AArch32 trap to Monitor mode */
+#define EXCP_SERR           30
 /* NB: add new EXCP_ defines to the array in arm_log_exception() too */
 
 #define ARMV7M_EXCP_RESET   1
@@ -86,6 +87,7 @@
 #define CPU_INTERRUPT_NMI   CPU_INTERRUPT_TGT_EXT_4
 #define CPU_INTERRUPT_VINMI CPU_INTERRUPT_TGT_EXT_0
 #define CPU_INTERRUPT_VFNMI CPU_INTERRUPT_TGT_INT_1
+#define CPU_INTERRUPT_SERR  CPU_INTERRUPT_TGT_INT_2
 
 /* The usual mapping for an AArch64 system register to its AArch32
  * counterpart is for the 32 bit world to have access to the lower

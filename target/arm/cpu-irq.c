@@ -59,6 +59,10 @@ static inline bool arm_excp_unmasked(CPUState *cs, unsigned int excp_idx,
         pstate_unmasked = (!(env->daif & PSTATE_F)) && (!allIntMask);
         break;
 
+    case EXCP_SERR:
+        pstate_unmasked = !(env->daif & PSTATE_A);
+        break;
+
     case EXCP_IRQ:
         pstate_unmasked = (!(env->daif & PSTATE_I)) && (!allIntMask);
         break;
@@ -229,6 +233,16 @@ bool arm_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
             goto found;
         }
     }
+    if (interrupt_request & CPU_INTERRUPT_SERR) {
+        excp_idx = EXCP_SERR;
+        target_el = arm_phys_excp_target_el(cs, excp_idx, cur_el, secure);
+        if (arm_excp_unmasked(cs, excp_idx, target_el,
+                              cur_el, secure, hcr_el2)) {
+            env->serror.pending = 0;
+            cpu_reset_interrupt(cs, CPU_INTERRUPT_SERR);
+            goto found;
+        }
+    }
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         excp_idx = EXCP_IRQ;
         target_el = arm_phys_excp_target_el(cs, excp_idx, cur_el, secure);
@@ -378,4 +392,3 @@ void arm_cpu_update_vserr(ARMCPU *cpu)
         }
     }
 }
-
