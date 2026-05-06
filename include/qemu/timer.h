@@ -871,13 +871,13 @@ static inline int64_t cpu_get_host_ticks(void)
 
 static inline int64_t cpu_get_host_ticks(void)
 {
-    uint32_t low,high;
-    int64_t val;
-    asm volatile("rdtsc" : "=a" (low), "=d" (high));
-    val = high;
-    val <<= 32;
-    val |= low;
-    return val;
+    /*
+     * Avoid host rdtsc: on hosts with unstable/non-monotonic TSC the
+     * guest's emulated TSC inherits those glitches and breaks timer-driven
+     * guests (e.g. Xen PVH dom0). CLOCK_MONOTONIC via get_clock() matches
+     * the behaviour of hosts (arm64 etc.) where this path already works.
+     */
+    return get_clock();
 }
 
 #elif defined(__hppa__)
