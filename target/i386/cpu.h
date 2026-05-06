@@ -3081,7 +3081,7 @@ static inline bool ctl_has_irq(CPUX86State *env)
         return (env->int_ctl & V_IRQ_MASK);
     }
 
-    return (env->int_ctl & V_IRQ_MASK) && (int_prio >= tpr);
+    return (env->int_ctl & V_IRQ_MASK) && (int_prio > tpr);
 }
 
 #if defined(TARGET_X86_64) && \
