@@ -3555,6 +3555,7 @@ static void gen_RDMSR(DisasContext *s, X86DecodedInsn *decode)
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
     gen_set_nrip(s);
+    translator_io_start(&s->base);
     gen_helper_rdmsr(tcg_env);
 }
 #else
