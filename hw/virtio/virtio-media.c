@@ -86,6 +86,30 @@ static uint8_t *vmedia_hostmem_base(VirtIOMedia *s)
                           : memory_region_get_ram_ptr(&s->hostmem);
 }
 
+static uint64_t vmedia_format_sizeimage(const struct v4l2_format *fmt)
+{
+    uint64_t sizeimage;
+
+    switch (fmt->type) {
+    case V4L2_BUF_TYPE_VIDEO_CAPTURE:
+        if (fmt->fmt.pix.sizeimage) {
+            return fmt->fmt.pix.sizeimage;
+        }
+        return (uint64_t)fmt->fmt.pix.width * fmt->fmt.pix.height * 2;
+    case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+        sizeimage = 0;
+        for (uint32_t i = 0; i < fmt->fmt.pix_mp.num_planes; i++) {
+            sizeimage += fmt->fmt.pix_mp.plane_fmt[i].sizeimage;
+        }
+        if (sizeimage) {
+            return sizeimage;
+        }
+        return (uint64_t)fmt->fmt.pix_mp.width * fmt->fmt.pix_mp.height * 2;
+    default:
+        return 0;
+    }
+}
+
 static void vmedia_gntalloc_cleanup(VirtIOMedia *s)
 {
     if (s->hostmem_buf && s->hostmem_buf != MAP_FAILED) {
@@ -142,7 +166,9 @@ static bool vmedia_gntalloc_init(VirtIOMedia *s, Error **errp)
     ret = ioctl(fd, IOCTL_GNTALLOC_ALLOC_GREF, alloc);
     if (ret < 0) {
         error_setg_errno(errp, errno,
-                         "virtio-media: gntalloc alloc failed");
+                         "virtio-media: gntalloc alloc failed for %" PRIu64
+                         " bytes (%u grant refs)",
+                         s->hostmem_size, gref_count);
         g_free(alloc);
         close(fd);
         return false;
@@ -1524,22 +1550,7 @@ static int vmedia_proxy_s_fmt(VirtIOMediaSession *session,
         return ret;
     }
 
-    if (fmt.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
-        sizeimage = 0;
-        for (int i = 0; i < fmt.fmt.pix_mp.num_planes; i++) {
-            sizeimage += fmt.fmt.pix_mp.plane_fmt[i].sizeimage;
-        }
-        if (!sizeimage) {
-            sizeimage = (uint64_t)fmt.fmt.pix_mp.width *
-                        (uint64_t)fmt.fmt.pix_mp.height * 2;
-        }
-    } else {
-        sizeimage = fmt.fmt.pix.sizeimage;
-        if (!sizeimage) {
-            sizeimage = (uint64_t)fmt.fmt.pix.width *
-                        (uint64_t)fmt.fmt.pix.height * 2;
-        }
-    }
+    sizeimage = vmedia_format_sizeimage(&fmt);
     if (sizeimage &&
         (uint64_t)session->dev->max_buffers * sizeimage >
         session->dev->hostmem_size) {
@@ -3668,6 +3679,7 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
     struct v4l2_capability cap;
     struct v4l2_format fmt;
     uint64_t buffer_size = VIRTIO_MEDIA_BUFFER_SIZE_MPLANE;
+    bool use_grefs = xen_enabled();
     int caps;
 
     if (s->max_buffers == 0) {
@@ -3703,13 +3715,18 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
 
         memset(&fmt, 0, sizeof(fmt));
         fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        if (vmedia_ioctl_nointr(host_fd, VIDIOC_G_FMT, &fmt) == 0 &&
-            fmt.fmt.pix.sizeimage > 0) {
-            buffer_size = fmt.fmt.pix.sizeimage;
+        if (vmedia_ioctl_nointr(host_fd, VIDIOC_G_FMT, &fmt) == 0) {
+            buffer_size = MAX(buffer_size, vmedia_format_sizeimage(&fmt));
         }
 
-        max_sizeimage = vmedia_proxy_max_sizeimage(host_fd);
-        if (max_sizeimage > buffer_size) {
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        if (vmedia_ioctl_nointr(host_fd, VIDIOC_G_FMT, &fmt) == 0) {
+            buffer_size = MAX(buffer_size, vmedia_format_sizeimage(&fmt));
+        }
+
+        max_sizeimage = use_grefs ? 0 : vmedia_proxy_max_sizeimage(host_fd);
+        if (!use_grefs && max_sizeimage > buffer_size) {
             buffer_size = max_sizeimage;
         }
 
@@ -3759,7 +3776,7 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
 
     s->hostmem_size = pow2ceil((uint64_t)s->max_buffers * buffer_size);
     s->hostmem_buf = NULL;
-    s->use_grefs = xen_enabled();
+    s->use_grefs = use_grefs;
     s->gntalloc_fd = -1;
     s->gntalloc_index = 0;
     s->gref_count = 0;
