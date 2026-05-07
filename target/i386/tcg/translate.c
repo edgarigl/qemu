@@ -530,6 +530,18 @@ static void gen_update_eip_cur(DisasContext *s)
     s->pc_save = s->base.pc_next;
 }
 
+/*
+ * Store the rIP of the instruction following the current one into
+ * env->next_rip, so that an SVM #VMEXIT triggered by this instruction
+ * can populate VMCB control.next_rip (CPUID Fn8000_000A_EDX[NRIPS]).
+ */
+static void gen_set_nrip(DisasContext *s)
+{
+    target_ulong nrip = CODE64(s) ? s->pc : (uint32_t)(s->pc - s->cs_base);
+    tcg_gen_st_tl(tcg_constant_tl(nrip), tcg_env,
+                  offsetof(CPUX86State, next_rip));
+}
+
 static int cur_insn_len(DisasContext *s)
 {
     return s->pc - s->base.pc_next;
@@ -764,6 +776,7 @@ static bool gen_check_io(DisasContext *s, MemOp ot, TCGv_i32 port,
     if (GUEST(s)) {
         gen_update_cc_op(s);
         gen_update_eip_cur(s);
+        gen_set_nrip(s);
         if (s->prefix & (PREFIX_REPZ | PREFIX_REPNZ)) {
             svm_flags |= SVM_IOIO_REP_MASK;
         }
@@ -1813,6 +1826,7 @@ static void gen_svm_check_intercept(DisasContext *s, uint32_t type)
     if (likely(!GUEST(s))) {
         return;
     }
+    gen_set_nrip(s);
     gen_helper_svm_check_intercept(tcg_env, tcg_constant_i32(type));
 }
 
@@ -2842,6 +2856,7 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_update_eip_cur(s);
+            gen_set_nrip(s);
             gen_lea_v_seg(s, cpu_regs[R_EAX], R_DS, s->override);
             gen_helper_monitor(tcg_env, s->A0);
             break;
@@ -2852,6 +2867,7 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_update_eip_cur(s);
+            gen_set_nrip(s);
             gen_helper_mwait(tcg_env, cur_insn_len_i32(s));
             s->base.is_jmp = DISAS_NORETURN;
             break;
@@ -2931,6 +2947,7 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_update_eip_cur(s);
+            gen_set_nrip(s);
             /*
              * Reloads INHIBIT_IRQ mask as well as TF and RF with guest state.
              * The usual gen_eob() handling is performed on vmexit after
@@ -2948,6 +2965,7 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_update_eip_cur(s);
+            gen_set_nrip(s);
             gen_helper_vmmcall(tcg_env);
             break;
 
@@ -2960,6 +2978,7 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_update_eip_cur(s);
+            gen_set_nrip(s);
             gen_helper_vmload(tcg_env, tcg_constant_i32(s->aflag - 1));
             break;
 
@@ -2972,6 +2991,7 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_update_eip_cur(s);
+            gen_set_nrip(s);
             gen_helper_vmsave(tcg_env, tcg_constant_i32(s->aflag - 1));
             break;
 
@@ -2984,6 +3004,7 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
                 break;
             }
             gen_update_cc_op(s);
+            gen_set_nrip(s);
             gen_helper_stgi(tcg_env);
             s->base.is_jmp = DISAS_EOB_NEXT;
             break;
@@ -2997,6 +3018,7 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_update_eip_cur(s);
+            gen_set_nrip(s);
             gen_helper_clgi(tcg_env);
             break;
 
@@ -3144,6 +3166,7 @@ static void gen_multi0F(DisasContext *s, X86DecodedInsn *decode)
             }
             gen_update_cc_op(s);
             gen_update_eip_cur(s);
+            gen_set_nrip(s);
             translator_io_start(&s->base);
             gen_helper_rdtsc(tcg_env);
             gen_helper_rdpid(s->T0, tcg_env);
