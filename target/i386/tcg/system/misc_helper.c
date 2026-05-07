@@ -149,6 +149,15 @@ void helper_wrmsr(CPUX86State *env)
     case MSR_IA32_SYSENTER_EIP:
         env->sysenter_eip = val;
         break;
+    case MSR_IA32_TSC:
+        /*
+         * WRMSR(IA32_TSC) writes the architectural TSC. Store the offset in
+         * env->tsc (unused by TCG, only consumed by KVM/HVF/WHPX paths) so we
+         * leave env->tsc_offset alone — that field is the SVM nested TSC
+         * offset and is overwritten on VMRUN/VMEXIT.
+         */
+        env->tsc = val - cpu_get_tsc(env);
+        break;
     case MSR_IA32_APICBASE: {
         int ret;
 
@@ -342,6 +351,9 @@ void helper_rdmsr(CPUX86State *env)
         break;
     case MSR_IA32_SYSENTER_EIP:
         val = env->sysenter_eip;
+        break;
+    case MSR_IA32_TSC:
+        val = cpu_get_tsc(env) + env->tsc + env->tsc_offset;
         break;
     case MSR_IA32_APICBASE:
         val = cpu_get_apic_base(env_archcpu(env)->apic_state);

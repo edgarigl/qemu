@@ -1004,7 +1004,14 @@ void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
 #define TCG_7_1_ECX_FEATURES 0
 #define TCG_7_1_EDX_FEATURES 0
 #define TCG_7_2_EDX_FEATURES 0
-#define TCG_APM_FEATURES 0
+/*
+ * TCG advertises an invariant TSC: the guest TSC is derived from
+ * QEMU's monotonic timebase, so its rate never changes regardless of
+ * the host's actual rdtsc behaviour. Without this bit, hypervisors
+ * (Xen in particular) take a slow RDTSC-intercept path for nested
+ * guests, killing performance.
+ */
+#define TCG_APM_FEATURES CPUID_APM_INVTSC
 #define TCG_6_EAX_FEATURES CPUID_6_EAX_ARAT
 #define TCG_XSAVE_FEATURES (CPUID_XSAVE_XSAVEOPT | CPUID_XSAVE_XGETBV1)
           /* missing:
@@ -3555,6 +3562,7 @@ static const X86CPUDefinition builtin_x86_defs[] = {
             CPUID_EXT2_LM | CPUID_EXT2_SYSCALL | CPUID_EXT2_NX,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_LAHF_LM | CPUID_EXT3_SVM,
+        .features[FEAT_8000_0007_EDX] = CPUID_APM_INVTSC,
         .xlevel = 0x8000000A,
         .model_id = "QEMU Virtual CPU version " QEMU_HW_VERSION,
     },

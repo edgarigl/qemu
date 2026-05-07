@@ -70,7 +70,12 @@ void helper_rdtsc(CPUX86State *env)
     }
     cpu_svm_check_intercept_param(env, SVM_EXIT_RDTSC, 0, GETPC());
 
-    val = cpu_get_tsc(env) + env->tsc_offset;
+    /*
+     * env->tsc holds the L1 architectural TSC adjustment from
+     * WRMSR(IA32_TSC); env->tsc_offset is the SVM nested TSC offset added
+     * when running an L2 guest. cpu_get_tsc() is the host stable clock.
+     */
+    val = cpu_get_tsc(env) + env->tsc + env->tsc_offset;
     env->regs[R_EAX] = (uint32_t)(val);
     env->regs[R_EDX] = (uint32_t)(val >> 32);
 }
