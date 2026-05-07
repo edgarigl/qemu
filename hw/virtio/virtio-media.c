@@ -867,11 +867,13 @@ static void vmedia_emit_dqbuf(VirtIOMedia *s, VirtIOMediaSession *session,
     buffer->m.planes = NULL;
 
     if (session->mplane) {
-        buf->planes[0].bytesused = buf->plane_lengths[0];
-        buf->planes[1].bytesused = buf->plane_lengths[1];
-        buf->planes[2].bytesused = buf->plane_lengths[2];
+        if (!s->use_host_device) {
+            buf->planes[0].bytesused = buf->plane_lengths[0];
+            buf->planes[1].bytesused = buf->plane_lengths[1];
+            buf->planes[2].bytesused = buf->plane_lengths[2];
+        }
         memcpy(evt.planes, buf->planes, sizeof(buf->planes));
-    } else {
+    } else if (!s->use_host_device) {
         buffer->bytesused = session->buffer_size;
     }
     vmedia_queue_event(s, &evt, sizeof(evt));
