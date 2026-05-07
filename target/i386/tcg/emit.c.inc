@@ -1907,6 +1907,7 @@ static void gen_CPUID(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
+    gen_set_nrip(s);
     gen_helper_cpuid(tcg_env);
 }
 
@@ -2053,6 +2054,7 @@ static void gen_HLT(DisasContext *s, X86DecodedInsn *decode)
 {
 #ifdef CONFIG_SYSTEM_ONLY
     gen_update_cc_op(s);
+    gen_set_nrip(s);
     gen_update_eip_next(s);
     gen_helper_hlt(tcg_env);
     s->base.is_jmp = DISAS_NORETURN;
@@ -3552,6 +3554,7 @@ static void gen_RDMSR(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
+    gen_set_nrip(s);
     gen_helper_rdmsr(tcg_env);
 }
 #else
@@ -3562,6 +3565,7 @@ static void gen_RDPMC(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
+    gen_set_nrip(s);
     translator_io_start(&s->base);
     gen_helper_rdpmc(tcg_env);
     s->base.is_jmp = DISAS_NORETURN;
@@ -3571,6 +3575,7 @@ static void gen_RDTSC(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
+    gen_set_nrip(s);
     translator_io_start(&s->base);
     gen_helper_rdtsc(tcg_env);
 }
@@ -4692,6 +4697,7 @@ static void gen_WRMSR(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
     gen_update_eip_cur(s);
+    gen_set_nrip(s);
     gen_helper_wrmsr(tcg_env);
     s->base.is_jmp = DISAS_EOB_NEXT;
 }

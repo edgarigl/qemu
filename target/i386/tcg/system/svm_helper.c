@@ -747,6 +747,18 @@ void cpu_vmexit(CPUX86State *env, uint64_t exit_code, uint64_t exit_info_1,
     x86_stq_phys(cs, env->vm_vmcb + offsetof(struct vmcb,
                                              control.exit_info_1), exit_info_1);
 
+    /*
+     * SVM nrip-save: for VMEXITs triggered by an instruction intercept,
+     * write the rIP of the instruction following the intercepted one.
+     * env->next_rip is set by the translator just before the helper call
+     * that may VMEXIT.
+     */
+    if (env->features[FEAT_SVM] & CPUID_SVM_NRIPSAVE) {
+        x86_stq_phys(cs, env->vm_vmcb + offsetof(struct vmcb,
+                                                 control.next_rip),
+                     env->next_rip);
+    }
+
     /* remove any pending exception */
     env->old_exception = -1;
     cpu_loop_exit(cs);
