@@ -3068,6 +3068,7 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
         }
     }
     if (decode.e.has_intercept && unlikely(GUEST(s))) {
+        gen_set_nrip(s);
         gen_helper_svm_check_intercept(tcg_env,
                                        tcg_constant_i32(decode.e.intercept));
     }

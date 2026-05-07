@@ -178,7 +178,10 @@ struct QEMU_PACKED vmcb_control_area {
 	uint32_t event_inj_err;
 	uint64_t nested_cr3;
 	uint64_t lbr_ctl;
-	uint8_t reserved_5[832];
+	uint32_t clean;
+	uint32_t reserved_5;
+	uint64_t next_rip;
+	uint8_t reserved_6[816];
 };
 
 struct QEMU_PACKED vmcb_seg {
