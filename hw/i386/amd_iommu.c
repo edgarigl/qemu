@@ -1109,9 +1109,7 @@ static void amdvi_iommu_address_space_sync_all(AMDVIState *s)
  */
 static void amdvi_switch_address_space(AMDVIAddressSpace *amdvi_as)
 {
-    AMDVIState *s = amdvi_as->iommu_state;
-
-    if (s->dma_remap && amdvi_as->addr_translation) {
+    if (amdvi_as->addr_translation) {
         /* Enabling DMA region */
         memory_region_set_enabled(&amdvi_as->iommu_nodma, false);
         memory_region_set_enabled(MEMORY_REGION(&amdvi_as->iommu), true);
@@ -1253,12 +1251,11 @@ static void amdvi_inval_devtab_entry(AMDVIState *s, uint64_t *cmd)
     }
 
     /*
-     * When DMA remapping capability is enabled, check if updated DTE is setup
-     * for paging or not, and configure the corresponding memory regions.
+     * Check if the updated DTE is set up for paging and configure the
+     * corresponding memory regions. This is needed for emulated devices even
+     * when dma-remap=off, since dma-remap only controls MAP notifier support.
      */
-    if (s->dma_remap) {
-        amdvi_update_addr_translation_mode(s, devid);
-    }
+    amdvi_update_addr_translation_mode(s, devid);
 }
 
 static void amdvi_complete_ppr(AMDVIState *s, uint64_t *cmd)
@@ -2352,6 +2349,11 @@ static AddressSpace *amdvi_host_dma_iommu(PCIBus *bus, void *opaque, int devfn)
          * |  amdvi-iommu_nodma  | 00000000-ffffffff |       0 |
          * |  amdvi-iommu_ir     | fee00000-feefffff |       1 |
          * |--------------------+-------------------+----------|
+         *
+         * Keep interrupt remapping under the root region, not under
+         * amdvi-iommu. DMA address translation can be disabled for
+         * passthrough mode, but MSI remapping must remain active when
+         * interrupt remapping is enabled.
          */
         memory_region_init_iommu(&amdvi_dev_as->iommu,
                                  sizeof(amdvi_dev_as->iommu),
@@ -2376,7 +2378,7 @@ static AddressSpace *amdvi_host_dma_iommu(PCIBus *bus, void *opaque, int devfn)
         memory_region_init_alias(&amdvi_dev_as->iommu_ir, OBJECT(s),
                                  "amdvi-ir", &s->mr_ir, 0,
                                  memory_region_size(&s->mr_ir));
-        memory_region_add_subregion_overlap(MEMORY_REGION(&amdvi_dev_as->iommu),
+        memory_region_add_subregion_overlap(&amdvi_dev_as->root,
                                             AMDVI_INT_ADDR_FIRST,
                                             &amdvi_dev_as->iommu_ir, 1);
 
