@@ -27,6 +27,23 @@
 
 /* Secure Virtual Machine helpers */
 
+static G_NORETURN void cpu_vmexit_nrip(CPUX86State *env, uint64_t exit_code,
+                                       uint64_t exit_info_1,
+                                       target_ulong nrip, uintptr_t retaddr);
+static G_NORETURN void cpu_vmexit_restored_nrip(CPUX86State *env,
+                                                uint64_t exit_code,
+                                                uint64_t exit_info_1,
+                                                target_ulong nrip);
+static void cpu_svm_check_intercept_param_nrip(CPUX86State *env, uint32_t type,
+                                               uint64_t param,
+                                               target_ulong nrip,
+                                               uintptr_t retaddr);
+static void cpu_svm_check_intercept_param_addend(CPUX86State *env,
+                                                 uint32_t type,
+                                                 uint64_t param,
+                                                 uint32_t next_eip_addend,
+                                                 uintptr_t retaddr);
+
 static void svm_save_seg(CPUX86State *env, int mmu_idx, hwaddr addr,
                          const SegmentCache *sc)
 {
@@ -130,17 +147,17 @@ static inline bool virtual_gif_enabled(CPUX86State *env)
 
 static inline bool virtual_vm_load_save_enabled(CPUX86State *env, uint64_t exit_code, uintptr_t retaddr)
 {
-    uint64_t lbr_ctl;
+    uint64_t virt_ext;
 
     if (likely(env->hflags & HF_GUEST_MASK)) {
         if (likely(!(env->hflags2 & HF2_NPT_MASK)) || !(env->efer & MSR_EFER_LMA)) {
             cpu_vmexit(env, exit_code, 0, retaddr);
         }
 
-        lbr_ctl = x86_ldl_phys(env_cpu(env), env->vm_vmcb + offsetof(struct vmcb,
-                                                  control.lbr_ctl));
+        virt_ext = x86_ldq_phys(env_cpu(env), env->vm_vmcb + offsetof(struct vmcb,
+                                                  control.virt_ext));
         return (env->features[FEAT_SVM] & CPUID_SVM_V_VMSAVE_VMLOAD)
-                && (lbr_ctl & V_VMLOAD_VMSAVE_ENABLED_MASK);
+                && (virt_ext & V_VMLOAD_VMSAVE_ENABLED_MASK);
 
     }
 
@@ -177,7 +194,8 @@ void helper_vmrun(CPUX86State *env, int aflag, int next_eip_addend)
         raise_exception_err_ra(env, EXCP0D_GPF, 0, GETPC());
     }
 
-    cpu_svm_check_intercept_param(env, SVM_EXIT_VMRUN, 0, GETPC());
+    cpu_svm_check_intercept_param_addend(env, SVM_EXIT_VMRUN, 0,
+                                         next_eip_addend, GETPC());
 
     qemu_log_mask(CPU_LOG_TB_IN_ASM, "vmrun! " TARGET_FMT_lx "\n", addr);
 
@@ -650,8 +668,10 @@ bool cpu_svm_has_intercept(CPUX86State *env, uint32_t type)
     return false;
 }
 
-void cpu_svm_check_intercept_param(CPUX86State *env, uint32_t type,
-                                   uint64_t param, uintptr_t retaddr)
+static void cpu_svm_check_intercept_param_nrip(CPUX86State *env, uint32_t type,
+                                               uint64_t param,
+                                               target_ulong nrip,
+                                               uintptr_t retaddr)
 {
     CPUState *cs = env_cpu(env);
 
@@ -686,23 +706,91 @@ void cpu_svm_check_intercept_param(CPUX86State *env, uint32_t type,
             t0 %= 8;
             break;
         default:
-            cpu_vmexit(env, type, param, retaddr);
+            cpu_vmexit_nrip(env, type, param, nrip, retaddr);
             t0 = 0;
             t1 = 0;
             break;
         }
         if (x86_ldub_phys(cs, addr + t1) & ((1 << param) << t0)) {
-            cpu_vmexit(env, type, param, retaddr);
+            cpu_vmexit_nrip(env, type, param, nrip, retaddr);
         }
         return;
     }
 
-    cpu_vmexit(env, type, param, retaddr);
+    cpu_vmexit_nrip(env, type, param, nrip, retaddr);
 }
 
-void helper_svm_check_intercept(CPUX86State *env, uint32_t type)
+static void cpu_svm_check_intercept_param_addend(CPUX86State *env,
+                                                 uint32_t type,
+                                                 uint64_t param,
+                                                 uint32_t next_eip_addend,
+                                                 uintptr_t retaddr)
 {
-    cpu_svm_check_intercept_param(env, type, 0, GETPC());
+    CPUState *cs = env_cpu(env);
+
+    if (likely(!(env->hflags & HF_GUEST_MASK))) {
+        return;
+    }
+
+    if (!cpu_svm_has_intercept(env, type)) {
+        return;
+    }
+
+    /*
+     * TCG may still have env->eip pointing at the TB start here.  Restore the
+     * architectural state before deriving NRIP from the current instruction.
+     */
+    cpu_restore_state(cs, retaddr);
+
+    if (type == SVM_EXIT_MSR) {
+        /* FIXME: this should be read in at vmrun (faster this way?) */
+        uint64_t addr = x86_ldq_phys(cs, env->vm_vmcb +
+                                     offsetof(struct vmcb,
+                                             control.msrpm_base_pa));
+        uint32_t t0, t1;
+
+        switch ((uint32_t)env->regs[R_ECX]) {
+        case 0 ... 0x1fff:
+            t0 = (env->regs[R_ECX] * 2) % 8;
+            t1 = (env->regs[R_ECX] * 2) / 8;
+            break;
+        case 0xc0000000 ... 0xc0001fff:
+            t0 = (8192 + env->regs[R_ECX] - 0xc0000000) * 2;
+            t1 = (t0 / 8);
+            t0 %= 8;
+            break;
+        case 0xc0010000 ... 0xc0011fff:
+            t0 = (16384 + env->regs[R_ECX] - 0xc0010000) * 2;
+            t1 = (t0 / 8);
+            t0 %= 8;
+            break;
+        default:
+            cpu_vmexit_restored_nrip(env, type, param,
+                                     env->eip + next_eip_addend);
+            t0 = 0;
+            t1 = 0;
+            break;
+        }
+        if (x86_ldub_phys(cs, addr + t1) & ((1 << param) << t0)) {
+            cpu_vmexit_restored_nrip(env, type, param,
+                                     env->eip + next_eip_addend);
+        }
+        return;
+    }
+
+    cpu_vmexit_restored_nrip(env, type, param, env->eip + next_eip_addend);
+}
+
+void cpu_svm_check_intercept_param(CPUX86State *env, uint32_t type,
+                                   uint64_t param, uintptr_t retaddr)
+{
+    cpu_svm_check_intercept_param_nrip(env, type, param, env->next_rip, retaddr);
+}
+
+void helper_svm_check_intercept(CPUX86State *env, uint32_t type,
+                                uint32_t next_eip_addend)
+{
+    cpu_svm_check_intercept_param_addend(env, type, 0, next_eip_addend, GETPC());
 }
 
 void helper_svm_check_io(CPUX86State *env, uint32_t port, uint32_t param,
@@ -717,21 +805,21 @@ void helper_svm_check_io(CPUX86State *env, uint32_t port, uint32_t param,
         uint16_t mask = (1 << ((param >> 4) & 7)) - 1;
 
         if (x86_lduw_phys(cs, addr + port / 8) & (mask << (port & 7))) {
+            cpu_restore_state(cs, GETPC());
             /* next env->eip */
             x86_stq_phys(cs,
                      env->vm_vmcb + offsetof(struct vmcb, control.exit_info_2),
                      env->eip + next_eip_addend);
-            cpu_vmexit(env, SVM_EXIT_IOIO, param | (port << 16), GETPC());
+            cpu_vmexit_restored_nrip(env, SVM_EXIT_IOIO, param | (port << 16),
+                                     env->eip + next_eip_addend);
         }
     }
 }
 
-void cpu_vmexit(CPUX86State *env, uint64_t exit_code, uint64_t exit_info_1,
-                uintptr_t retaddr)
+static void cpu_vmexit_restored_nrip(CPUX86State *env, uint64_t exit_code,
+                                     uint64_t exit_info_1, target_ulong nrip)
 {
     CPUState *cs = env_cpu(env);
-
-    cpu_restore_state(cs, retaddr);
 
     qemu_log_mask(CPU_LOG_TB_IN_ASM, "vmexit(%08x, %016" PRIx64 ", %016"
                   PRIx64 ", " TARGET_FMT_lx ")!\n",
@@ -747,21 +835,30 @@ void cpu_vmexit(CPUX86State *env, uint64_t exit_code, uint64_t exit_info_1,
     x86_stq_phys(cs, env->vm_vmcb + offsetof(struct vmcb,
                                              control.exit_info_1), exit_info_1);
 
-    /*
-     * SVM nrip-save: for VMEXITs triggered by an instruction intercept,
-     * write the rIP of the instruction following the intercepted one.
-     * env->next_rip is set by the translator just before the helper call
-     * that may VMEXIT.
-     */
-    if (env->features[FEAT_SVM] & CPUID_SVM_NRIPSAVE) {
-        x86_stq_phys(cs, env->vm_vmcb + offsetof(struct vmcb,
-                                                 control.next_rip),
-                     env->next_rip);
-    }
+    x86_stq_phys(cs, env->vm_vmcb + offsetof(struct vmcb, control.nrip), nrip);
 
     /* remove any pending exception */
     env->old_exception = -1;
     cpu_loop_exit(cs);
+}
+
+static void cpu_vmexit_nrip(CPUX86State *env, uint64_t exit_code,
+                            uint64_t exit_info_1, target_ulong nrip,
+                            uintptr_t retaddr)
+{
+    CPUState *cs = env_cpu(env);
+
+    cpu_restore_state(cs, retaddr);
+    cpu_vmexit_restored_nrip(env, exit_code, exit_info_1, nrip);
+}
+
+void cpu_vmexit(CPUX86State *env, uint64_t exit_code, uint64_t exit_info_1,
+                uintptr_t retaddr)
+{
+    CPUState *cs = env_cpu(env);
+
+    cpu_restore_state(cs, retaddr);
+    cpu_vmexit_restored_nrip(env, exit_code, exit_info_1, env->eip);
 }
 
 void do_vmexit(CPUX86State *env)
