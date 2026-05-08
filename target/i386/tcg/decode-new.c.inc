@@ -3070,7 +3070,8 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
     if (decode.e.has_intercept && unlikely(GUEST(s))) {
         gen_set_nrip(s);
         gen_helper_svm_check_intercept(tcg_env,
-                                       tcg_constant_i32(decode.e.intercept));
+                                       tcg_constant_i32(decode.e.intercept),
+                                       cur_insn_len_i32(s));
     }
     if (decode.e.check) {
         if ((decode.e.check & X86_CHECK_smm) && !(s->flags & HF_SMM_MASK)) {

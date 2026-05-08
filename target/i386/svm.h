@@ -177,11 +177,12 @@ struct QEMU_PACKED vmcb_control_area {
 	uint32_t event_inj;
 	uint32_t event_inj_err;
 	uint64_t nested_cr3;
-	uint64_t lbr_ctl;
-	uint32_t clean;
-	uint32_t reserved_5;
-	uint64_t next_rip;
-	uint8_t reserved_6[816];
+	uint64_t virt_ext;       /* offset 0xB8 - Virtual Extensions (VGIF, etc) */
+	uint64_t clean_bits;     /* offset 0xC0 */
+	uint64_t nrip;           /* offset 0xC8 - Next RIP */
+	uint8_t guest_ins_len;   /* offset 0xD0 */
+	uint8_t guest_ins[15];   /* offset 0xD1 */
+	uint8_t reserved_5[800]; /* offset 0xE0 to 0x400 */
 };
 
 struct QEMU_PACKED vmcb_seg {

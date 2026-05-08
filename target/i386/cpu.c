@@ -955,14 +955,14 @@ void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
 
 #define TCG_EXT4_FEATURES 0
 
-#if defined CONFIG_USER_ONLY
-#define CPUID_SVM_KERNEL_FEATURES (CPUID_SVM_NRIPSAVE | CPUID_SVM_VNMI)
-#else
-#define CPUID_SVM_KERNEL_FEATURES 0
-#endif
+/*
+ * NRIPSAVE (Next RIP Save) is required by Xen when running as an SVM guest.
+ * TCG can trivially provide this feature since the next RIP is always known
+ * during instruction emulation. Enable it unconditionally for both user-mode
+ * and system emulation so that Xen can boot under TCG.
+ */
 #define TCG_SVM_FEATURES (CPUID_SVM_NPT | CPUID_SVM_VGIF | \
-          CPUID_SVM_SVME_ADDR_CHK | CPUID_SVM_NRIPSAVE | \
-          CPUID_SVM_KERNEL_FEATURES)
+          CPUID_SVM_SVME_ADDR_CHK | CPUID_SVM_NRIPSAVE)
 
 #define TCG_KVM_FEATURES 0
 

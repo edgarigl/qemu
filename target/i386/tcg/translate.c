@@ -530,14 +530,10 @@ static void gen_update_eip_cur(DisasContext *s)
     s->pc_save = s->base.pc_next;
 }
 
-/*
- * Store the rIP of the instruction following the current one into
- * env->next_rip, so that an SVM #VMEXIT triggered by this instruction
- * can populate VMCB control.next_rip (CPUID Fn8000_000A_EDX[NRIPS]).
- */
 static void gen_set_nrip(DisasContext *s)
 {
     target_ulong nrip = CODE64(s) ? s->pc : (uint32_t)(s->pc - s->cs_base);
+
     tcg_gen_st_tl(tcg_constant_tl(nrip), tcg_env,
                   offsetof(CPUX86State, next_rip));
 }
@@ -1827,7 +1823,8 @@ static void gen_svm_check_intercept(DisasContext *s, uint32_t type)
         return;
     }
     gen_set_nrip(s);
-    gen_helper_svm_check_intercept(tcg_env, tcg_constant_i32(type));
+    gen_helper_svm_check_intercept(tcg_env, tcg_constant_i32(type),
+                                   cur_insn_len_i32(s));
 }
 
 static inline void gen_stack_update(DisasContext *s, int addend)

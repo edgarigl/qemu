@@ -2186,7 +2186,7 @@ typedef struct CPUArchState {
 
     uint64_t vm_vmcb;
     uint64_t tsc_offset;
-    target_ulong next_rip;       /* SVM nrip-save: rIP of insn after intercepted one */
+    target_ulong next_rip;       /* SVM NRIP save: rIP after intercepted insn */
     uint64_t intercept;
     uint16_t intercept_cr_read;
     uint16_t intercept_cr_write;
