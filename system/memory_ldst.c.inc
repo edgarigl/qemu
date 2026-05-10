@@ -34,6 +34,13 @@ uint64_t glue(address_space_ldm_internal, SUFFIX)(ARG1_DECL, MemOp mop,
     MemTxResult r;
     bool release_lock = false;
 
+    if (QTEST_IOPORT_OVERRIDE(addr, size, &val)) {
+        if (result) {
+            *result = MEMTX_OK;
+        }
+        return val;
+    }
+
     RCU_READ_LOCK();
     mr = TRANSLATE(addr, &addr1, &l, false, attrs);
     if (l < size || !memory_access_is_direct(mr, false, attrs)) {
