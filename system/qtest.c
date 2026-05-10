@@ -60,13 +60,14 @@ static bool qtest_opened;
 static void (*qtest_server_send)(void*, const char*);
 static void *qtest_server_send_opaque;
 static GHashTable *qtest_mmio_read_override;
+static GHashTable *qtest_ioport_read_override;
 
-typedef struct QTestMmioOverride {
-    uint64_t hwaddr;
+typedef struct QTestReadOverride {
+    uint64_t addr;
     uint64_t value;
     uint32_t count;
     uint8_t size;
-} QTestMmioOverride;
+} QTestReadOverride;
 
 #define FMT_timeval "%.06f"
 
@@ -210,6 +211,23 @@ typedef struct QTestMmioOverride {
  *
  * .. code-block:: none
  *
+ *  > ioport_override_read PORT SIZE VALUE [COUNT]
+ *  < OK
+ *
+ * Register a host-side I/O port read override for the exact PORT and access
+ * SIZE. VALUE is returned instead of consulting the device model. COUNT
+ * defaults to 1 if omitted. A COUNT of 0 keeps the override active until it
+ * is explicitly cleared.
+ *
+ * .. code-block:: none
+ *
+ *  > ioport_override_clear PORT
+ *  < OK
+ *
+ * Remove any I/O port read override registered for PORT.
+ *
+ * .. code-block:: none
+ *
  *  > read ADDR SIZE
  *  < OK DATA
  *
@@ -295,50 +313,52 @@ static int hex2nib(char ch)
     }
 }
 
-static void qtest_mmio_override_free(gpointer data)
+static void qtest_read_override_free(gpointer data)
 {
     g_free(data);
 }
 
-static void qtest_mmio_override_register(uint64_t hwaddr, unsigned size,
+static void qtest_read_override_register(GHashTable **table,
+                                         uint64_t addr, unsigned size,
                                          uint64_t value, uint32_t count)
 {
-    QTestMmioOverride *entry = g_new(QTestMmioOverride, 1);
+    QTestReadOverride *entry = g_new(QTestReadOverride, 1);
 
-    entry->hwaddr = hwaddr;
+    entry->addr = addr;
     entry->value = value;
     entry->count = count;
     entry->size = size;
 
-    if (!qtest_mmio_read_override) {
-        qtest_mmio_read_override = g_hash_table_new_full(g_int64_hash,
-                                                         g_int64_equal,
-                                                         NULL,
-                                                         qtest_mmio_override_free);
+    if (!*table) {
+        *table = g_hash_table_new_full(g_int64_hash,
+                                       g_int64_equal,
+                                       NULL,
+                                       qtest_read_override_free);
     }
 
-    g_hash_table_replace(qtest_mmio_read_override, &entry->hwaddr, entry);
+    g_hash_table_replace(*table, &entry->addr, entry);
 }
 
-static void qtest_mmio_override_clear(uint64_t hwaddr)
+static void qtest_read_override_clear(GHashTable *table, uint64_t addr)
 {
-    if (!qtest_mmio_read_override) {
+    if (!table) {
         return;
     }
 
-    g_hash_table_remove(qtest_mmio_read_override, &hwaddr);
+    g_hash_table_remove(table, &addr);
 }
 
-bool qtest_mmio_override_check(uint64_t hwaddr, unsigned size, bool is_write,
-                               uint64_t *value)
+static bool qtest_read_override_check(GHashTable *table, uint64_t addr,
+                                      unsigned size, bool is_write,
+                                      uint64_t *value)
 {
-    QTestMmioOverride *entry;
+    QTestReadOverride *entry;
 
-    if (is_write || !qtest_mmio_read_override) {
+    if (is_write || !table) {
         return false;
     }
 
-    entry = g_hash_table_lookup(qtest_mmio_read_override, &hwaddr);
+    entry = g_hash_table_lookup(table, &addr);
     if (!entry || entry->size != size) {
         return false;
     }
@@ -348,11 +368,49 @@ bool qtest_mmio_override_check(uint64_t hwaddr, unsigned size, bool is_write,
     if (entry->count > 0) {
         entry->count--;
         if (entry->count == 0) {
-            g_hash_table_remove(qtest_mmio_read_override, &hwaddr);
+            g_hash_table_remove(table, &addr);
         }
     }
 
     return true;
+}
+
+static void qtest_mmio_override_register(uint64_t hwaddr, unsigned size,
+                                         uint64_t value, uint32_t count)
+{
+    qtest_read_override_register(&qtest_mmio_read_override, hwaddr, size,
+                                 value, count);
+}
+
+static void qtest_mmio_override_clear(uint64_t hwaddr)
+{
+    qtest_read_override_clear(qtest_mmio_read_override, hwaddr);
+}
+
+bool qtest_mmio_override_check(uint64_t hwaddr, unsigned size, bool is_write,
+                               uint64_t *value)
+{
+    return qtest_read_override_check(qtest_mmio_read_override, hwaddr, size,
+                                     is_write, value);
+}
+
+static void qtest_ioport_override_register(uint64_t port, unsigned size,
+                                           uint64_t value, uint32_t count)
+{
+    qtest_read_override_register(&qtest_ioport_read_override, port, size,
+                                 value, count);
+}
+
+static void qtest_ioport_override_clear(uint64_t port)
+{
+    qtest_read_override_clear(qtest_ioport_read_override, port);
+}
+
+bool qtest_ioport_override_check(uint64_t port, unsigned size, bool is_write,
+                                 uint64_t *value)
+{
+    return qtest_read_override_check(qtest_ioport_read_override, port, size,
+                                     is_write, value);
 }
 
 static void qtest_log_timestamp(void)
@@ -691,6 +749,49 @@ static void qtest_process_command(CharFrontend *chr, gchar **words)
         g_assert(ret == 0);
 
         qtest_mmio_override_clear(addr);
+        qtest_send(chr, "OK\n");
+    } else if (strcmp(words[0], "ioport_override_read") == 0) {
+        unsigned long port;
+        unsigned long size;
+        uint64_t value;
+        unsigned long count = 1;
+        int ret;
+
+        g_assert(words[1] && words[2] && words[3]);
+        ret = qemu_strtoul(words[1], NULL, 0, &port);
+        g_assert(ret == 0);
+        ret = qemu_strtoul(words[2], NULL, 0, &size);
+        g_assert(ret == 0);
+        ret = qemu_strtou64(words[3], NULL, 0, &value);
+        g_assert(ret == 0);
+        if (words[4]) {
+            ret = qemu_strtoul(words[4], NULL, 0, &count);
+            g_assert(ret == 0);
+        }
+        if (port > 0xffff) {
+            qtest_send(chr, "FAIL invalid I/O port\n");
+            return;
+        }
+        if (!(size == 1 || size == 2 || size == 4)) {
+            qtest_send(chr, "FAIL invalid I/O port override size\n");
+            return;
+        }
+
+        qtest_ioport_override_register(port, size, value, count);
+        qtest_send(chr, "OK\n");
+    } else if (strcmp(words[0], "ioport_override_clear") == 0) {
+        unsigned long port;
+        int ret;
+
+        g_assert(words[1]);
+        ret = qemu_strtoul(words[1], NULL, 0, &port);
+        g_assert(ret == 0);
+        if (port > 0xffff) {
+            qtest_send(chr, "FAIL invalid I/O port\n");
+            return;
+        }
+
+        qtest_ioport_override_clear(port);
         qtest_send(chr, "OK\n");
     } else if (strcmp(words[0], "read") == 0) {
         g_autoptr(GString) enc = NULL;

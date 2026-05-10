@@ -35,5 +35,7 @@ void qtest_server_set_send_handler(void (*send)(void *, const char *),
 void qtest_server_inproc_recv(void *opaque, const char *buf);
 bool qtest_mmio_override_check(uint64_t hwaddr, unsigned size, bool is_write,
                                uint64_t *value);
+bool qtest_ioport_override_check(uint64_t port, unsigned size, bool is_write,
+                                 uint64_t *value);
 
 #endif
