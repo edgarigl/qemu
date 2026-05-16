@@ -1145,7 +1145,7 @@ void cpu_single_step(CPUState *cpu, int enabled);
 #define BP_MEM_WRITE          0x02
 #define BP_MEM_ACCESS         (BP_MEM_READ | BP_MEM_WRITE)
 #define BP_STOP_BEFORE_ACCESS 0x04
-/* 0x08 currently unused */
+#define BP_PHYS               0x08    /* watchpoint is phys-addressed */
 #define BP_GDB                0x10
 #define BP_CPU                0x20
 #define BP_ANY                (BP_GDB | BP_CPU)

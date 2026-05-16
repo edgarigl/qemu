@@ -3849,6 +3849,10 @@ int kvm_insert_breakpoint(CPUState *cpu, int type, vaddr addr, vaddr len)
     struct kvm_sw_breakpoint *bp;
     int err;
 
+    if (GDB_TYPE_PHYS(type)) {
+        return -ENOSYS;
+    }
+
     if (type == GDB_BREAKPOINT_SW) {
         bp = kvm_find_sw_breakpoint(cpu, addr);
         if (bp) {
@@ -3886,6 +3890,10 @@ int kvm_remove_breakpoint(CPUState *cpu, int type, vaddr addr, vaddr len)
 {
     struct kvm_sw_breakpoint *bp;
     int err;
+
+    if (GDB_TYPE_PHYS(type)) {
+        return -ENOSYS;
+    }
 
     if (type == GDB_BREAKPOINT_SW) {
         bp = kvm_find_sw_breakpoint(cpu, addr);

@@ -18,4 +18,12 @@
 #define GDB_WATCHPOINT_READ      3
 #define GDB_WATCHPOINT_ACCESS    4
 
+/*
+ * QEMU vendor flag.  ORed onto GDB_WATCHPOINT_* by the qemu.PhyWatch
+ * packets to request a watchpoint keyed on guest physical addresses.
+ */
+#define GDB_PHY_WATCHPOINT_FLAG  0x10
+#define GDB_TYPE_PHYS(t)         ((t) & GDB_PHY_WATCHPOINT_FLAG)
+#define GDB_TYPE_BASE(t)         ((t) & ~GDB_PHY_WATCHPOINT_FLAG)
+
 #endif /* GDBSTUB_ENUMS_H */

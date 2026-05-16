@@ -226,6 +226,29 @@ The memory mode can be checked by sending the following command:
 ``maintenance packet Qqemu.PhyMemMode:0``
     This will change it back to normal memory mode.
 
+Physical watchpoints and read overrides (TCG only)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Beyond the standard GDB ``watch``/``rwatch``/``awatch`` commands, the
+QEMU gdbstub can install watchpoints keyed on guest **physical**
+addresses on every CPU.  These are intended for tests that observe or
+steer accesses to a known device window without caring about how the
+guest mapped it.
+
+``maintenance packet Qqemu.PhyWatch:TYPE,ADDR,LEN``
+    Insert a phys watchpoint.  ``TYPE`` follows the standard GDB
+    Z2/Z3/Z4 mapping (2=write, 3=read, 4=access).  ``ADDR`` and
+    ``LEN`` are hexadecimal.  Stop replies use ``phywatch``,
+    ``phyrwatch`` or ``phyawatch`` instead of the plain ``watch``
+    variants so clients can tell physical and virtual hits apart.
+
+``maintenance packet Qqemu.PhyWatchClear:TYPE,ADDR,LEN``
+    Remove a previously installed phys watchpoint.  ``E.notfound`` if
+    no matching watchpoint exists.
+
+Phys watchpoints are TCG-only today; on KVM accelerators the packet
+will be accepted but the hardware will not honour the trap.
+
 Security considerations
 =======================
 

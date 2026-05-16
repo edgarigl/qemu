@@ -17,6 +17,7 @@
 #include "exec/gdbstub.h"
 #include "gdbstub/syscalls.h"
 #include "gdbstub/commands.h"
+#include "gdbstub/enums.h"
 #include "exec/hwaddr.h"
 #include "accel/accel-ops.h"
 #include "accel/accel-cpu-ops.h"
@@ -150,6 +151,7 @@ static void gdb_vm_state_change(void *opaque, bool running, RunState state)
     switch (state) {
     case RUN_STATE_DEBUG:
         if (cpu->watchpoint_hit) {
+            bool phys = cpu->watchpoint_hit->flags & BP_PHYS;
             switch (cpu->watchpoint_hit->flags & BP_MEM_ACCESS) {
             case BP_MEM_READ:
                 type = "r";
@@ -164,9 +166,11 @@ static void gdb_vm_state_change(void *opaque, bool running, RunState state)
             trace_gdbstub_hit_watchpoint(type,
                                          gdb_get_cpu_index(cpu),
                                          cpu->watchpoint_hit->vaddr);
-            g_string_printf(buf, "T%02xthread:%s;%swatch:%" VADDR_PRIx ";",
-                            GDB_SIGNAL_TRAP, tid->str, type,
-                            cpu->watchpoint_hit->vaddr);
+            g_string_printf(buf,
+                            "T%02xthread:%s;%s%swatch:%" VADDR_PRIx ";",
+                            GDB_SIGNAL_TRAP, tid->str,
+                            phys ? "phy" : "",
+                            type, cpu->watchpoint_hit->vaddr);
             cpu->watchpoint_hit = NULL;
             goto send_packet;
         } else {
@@ -507,6 +511,58 @@ void gdb_handle_set_qemu_phy_mem_mode(GArray *params, void *ctx)
         phy_memory_mode = 1;
     }
     gdb_put_packet("OK");
+}
+
+/*
+ * QEMU-vendor watchpoint / memory-override packets.
+ *
+ * Qqemu.PhyWatch and Qqemu.PhyWatchClear piggy-back on the standard
+ * Z2/Z3/Z4 dispatch by ORing GDB_PHY_WATCHPOINT_FLAG onto the type,
+ * so insertion / removal goes through the same accel ops as a normal
+ * watchpoint.
+ */
+
+static void qemu_phy_watch_op(GArray *params,
+                              int (*op)(CPUState *, int, vaddr, vaddr),
+                              const char *not_found)
+{
+    unsigned long type;
+    uint64_t addr, len;
+    int ret;
+
+    if (params->len != 3) {
+        gdb_put_packet("E22");
+        return;
+    }
+
+    type = gdb_get_cmd_param(params, 0)->val_ul;
+    if (type < GDB_WATCHPOINT_WRITE || type > GDB_WATCHPOINT_ACCESS) {
+        gdb_put_packet("E22");
+        return;
+    }
+
+    addr = gdb_get_cmd_param(params, 1)->val_ull;
+    len  = gdb_get_cmd_param(params, 2)->val_ull;
+
+    ret = op(gdbserver_state.c_cpu,
+             type | GDB_PHY_WATCHPOINT_FLAG, addr, len);
+    if (ret == -ENOENT && not_found) {
+        gdb_put_packet(not_found);
+    } else if (ret) {
+        gdb_put_packet("E01");
+    } else {
+        gdb_put_packet("OK");
+    }
+}
+
+void gdb_handle_set_qemu_phy_watch(GArray *params, void *ctx)
+{
+    qemu_phy_watch_op(params, gdb_breakpoint_insert, NULL);
+}
+
+void gdb_handle_set_qemu_phy_watch_clear(GArray *params, void *ctx)
+{
+    qemu_phy_watch_op(params, gdb_breakpoint_remove, "E.notfound");
 }
 
 void gdb_handle_query_rcmd(GArray *params, void *ctx)

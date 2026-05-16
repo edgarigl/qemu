@@ -57,6 +57,9 @@ int cpu_watchpoint_address_matches(CPUState *cpu, vaddr addr, vaddr len)
     int ret = 0;
 
     QTAILQ_FOREACH(wp, &cpu->watchpoints, entry) {
+        if (wp->flags & BP_PHYS) {
+            continue;
+        }
         if (watchpoint_address_matches(wp, addr, len)) {
             ret |= wp->flags;
         }
@@ -64,9 +67,26 @@ int cpu_watchpoint_address_matches(CPUState *cpu, vaddr addr, vaddr len)
     return ret;
 }
 
-/* Generate a debug exception if a watchpoint has been hit.  */
-void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
-                          MemTxAttrs attrs, int flags, uintptr_t ra)
+int cpu_watchpoint_phys_matches(CPUState *cpu, hwaddr paddr, vaddr len)
+{
+    CPUWatchpoint *wp;
+    int ret = 0;
+
+    QTAILQ_FOREACH(wp, &cpu->watchpoints, entry) {
+        if (!(wp->flags & BP_PHYS)) {
+            continue;
+        }
+        if (watchpoint_address_matches(wp, paddr, len)) {
+            ret |= wp->flags;
+        }
+    }
+    return ret;
+}
+
+/* Common per-watchpoint hit handling, used by both v/p variants below. */
+static void check_watchpoint_list(CPUState *cpu, vaddr addr, vaddr len,
+                                  MemTxAttrs attrs, int flags, uintptr_t ra,
+                                  bool phys)
 {
     CPUWatchpoint *wp;
 
@@ -83,7 +103,7 @@ void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
         return;
     }
 
-    if (cpu->cc->tcg_ops->adjust_watchpoint_address) {
+    if (!phys && cpu->cc->tcg_ops->adjust_watchpoint_address) {
         /* this is currently used only by ARM BE32 */
         addr = cpu->cc->tcg_ops->adjust_watchpoint_address(cpu, addr, len);
     }
@@ -92,6 +112,9 @@ void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
     QTAILQ_FOREACH(wp, &cpu->watchpoints, entry) {
         int hit_flags = wp->flags & flags;
 
+        if (phys != !!(wp->flags & BP_PHYS)) {
+            continue;
+        }
         if (hit_flags && watchpoint_address_matches(wp, addr, len)) {
             if (replay_running_debug()) {
                 /*
@@ -138,4 +161,18 @@ void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
             wp->flags &= ~BP_WATCHPOINT_HIT;
         }
     }
+}
+
+/* Generate a debug exception if a virtual watchpoint has been hit. */
+void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
+                          MemTxAttrs attrs, int flags, uintptr_t ra)
+{
+    check_watchpoint_list(cpu, addr, len, attrs, flags, ra, false);
+}
+
+/* Generate a debug exception if a phys watchpoint has been hit. */
+void cpu_check_watchpoint_phys(CPUState *cpu, hwaddr paddr, vaddr len,
+                               MemTxAttrs attrs, int flags, uintptr_t ra)
+{
+    check_watchpoint_list(cpu, paddr, len, attrs, flags, ra, true);
 }
