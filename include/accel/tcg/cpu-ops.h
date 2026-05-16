@@ -297,6 +297,21 @@ void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
                           MemTxAttrs attrs, int flags, uintptr_t ra);
 
 /**
+ * cpu_check_watchpoint_phys:
+ * @cpu: cpu context
+ * @paddr: guest physical address being accessed
+ * @len: access length
+ * @attrs: memory attributes
+ * @flags: watchpoint access type (BP_MEM_READ / BP_MEM_WRITE)
+ * @ra: unwind return address
+ *
+ * Like cpu_check_watchpoint() but matches BP_PHYS watchpoints against
+ * the supplied guest physical address.
+ */
+void cpu_check_watchpoint_phys(CPUState *cpu, hwaddr paddr, vaddr len,
+                               MemTxAttrs attrs, int flags, uintptr_t ra);
+
+/**
  * cpu_watchpoint_address_matches:
  * @cpu: cpu context
  * @addr: guest virtual address
@@ -306,6 +321,17 @@ void cpu_check_watchpoint(CPUState *cpu, vaddr addr, vaddr len,
  * If no watchpoint is registered for the range, the result is 0.
  */
 int cpu_watchpoint_address_matches(CPUState *cpu, vaddr addr, vaddr len);
+
+/**
+ * cpu_watchpoint_phys_matches:
+ * @cpu: cpu context
+ * @paddr: guest physical address
+ * @len: access length
+ *
+ * Like cpu_watchpoint_address_matches() but for BP_PHYS watchpoints
+ * keyed on guest physical addresses.
+ */
+int cpu_watchpoint_phys_matches(CPUState *cpu, hwaddr paddr, vaddr len);
 
 /*
  * Common pointer_wrap implementations.

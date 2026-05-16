@@ -122,7 +122,11 @@ static inline int xlat_gdb_type(CPUState *cpu, int gdbtype)
         [GDB_WATCHPOINT_ACCESS] = BP_GDB | BP_MEM_ACCESS,
     };
 
-    int cputype = xlat[gdbtype];
+    int cputype = xlat[GDB_TYPE_BASE(gdbtype)];
+
+    if (GDB_TYPE_PHYS(gdbtype)) {
+        cputype |= BP_PHYS;
+    }
 
     if (cpu->cc->gdb_stop_before_watchpoint) {
         cputype |= BP_STOP_BEFORE_ACCESS;
@@ -135,9 +139,12 @@ static int tcg_insert_breakpoint(CPUState *cs, int type, vaddr addr, vaddr len)
     CPUState *cpu;
     int err = 0;
 
-    switch (type) {
+    switch (GDB_TYPE_BASE(type)) {
     case GDB_BREAKPOINT_SW:
     case GDB_BREAKPOINT_HW:
+        if (GDB_TYPE_PHYS(type)) {
+            return -EINVAL;
+        }
         CPU_FOREACH(cpu) {
             err = cpu_breakpoint_insert(cpu, addr, BP_GDB, NULL);
             if (err) {
@@ -166,9 +173,12 @@ static int tcg_remove_breakpoint(CPUState *cs, int type, vaddr addr, vaddr len)
     CPUState *cpu;
     int err = 0;
 
-    switch (type) {
+    switch (GDB_TYPE_BASE(type)) {
     case GDB_BREAKPOINT_SW:
     case GDB_BREAKPOINT_HW:
+        if (GDB_TYPE_PHYS(type)) {
+            return -EINVAL;
+        }
         CPU_FOREACH(cpu) {
             err = cpu_breakpoint_remove(cpu, addr, BP_GDB);
             if (err) {

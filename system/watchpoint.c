@@ -51,7 +51,19 @@ int cpu_watchpoint_insert(CPUState *cpu, vaddr addr, vaddr len,
     }
 
     in_page = -(addr | TARGET_PAGE_MASK);
-    if (len <= in_page) {
+    if (flags & BP_PHYS) {
+        /*
+         * Phys watchpoints key on the resolved guest physical address.
+         * The soft-MMU TLB is keyed by virtual address and offers no
+         * reverse-lookup table, so flush the whole TLB to make sure any
+         * pre-existing entries that map the watched physical page get
+         * refilled with TLB_WATCHPOINT set.  Watchpoint insert is a
+         * rare debug operation so the cost is fine, and KVM/HVF reject
+         * BP_PHYS in their insert hooks, leaving TCG as the only
+         * accelerator that needs this.
+         */
+        tlb_flush(cpu);
+    } else if (len <= in_page) {
         tlb_flush_page(cpu, addr);
     } else {
         tlb_flush(cpu);
@@ -84,7 +96,12 @@ void cpu_watchpoint_remove_by_ref(CPUState *cpu, CPUWatchpoint *watchpoint)
 {
     QTAILQ_REMOVE(&cpu->watchpoints, watchpoint, entry);
 
-    tlb_flush_page(cpu, watchpoint->vaddr);
+    if (watchpoint->flags & BP_PHYS) {
+        /* See cpu_watchpoint_insert(): vaddr holds a phys address. */
+        tlb_flush(cpu);
+    } else {
+        tlb_flush_page(cpu, watchpoint->vaddr);
+    }
 
     g_free(watchpoint);
 }

@@ -1776,6 +1776,7 @@ static void handle_query_qemu_supported(GArray *params, void *user_ctx)
     g_string_printf(gdbserver_state.str_buf, "sstepbits;sstep");
 #ifndef CONFIG_USER_ONLY
     g_string_append(gdbserver_state.str_buf, ";PhyMemMode");
+    g_string_append(gdbserver_state.str_buf, ";PhyWatch");
 #endif
     gdb_put_strbuf();
 }
@@ -1970,6 +1971,18 @@ static const GdbCmdParseEntry gdb_gen_set_table[] = {
         .cmd = "qemu.PhyMemMode:",
         .cmd_startswith = true,
         .schema = "l0"
+    },
+    {
+        .handler = gdb_handle_set_qemu_phy_watch,
+        .cmd = "qemu.PhyWatch:",
+        .cmd_startswith = true,
+        .schema = "l,L,L0"
+    },
+    {
+        .handler = gdb_handle_set_qemu_phy_watch_clear,
+        .cmd = "qemu.PhyWatchClear:",
+        .cmd_startswith = true,
+        .schema = "l,L,L0"
     },
 #endif
 #if defined(CONFIG_USER_ONLY)
@@ -2520,4 +2533,3 @@ void gdb_create_default_process(GDBState *s)
     process->attached = false;
     process->target_xml = NULL;
 }
-
