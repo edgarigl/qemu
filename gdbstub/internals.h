@@ -205,6 +205,7 @@ void gdb_handle_query_qemu_phy_mem_mode(GArray *params, void *ctx);
 void gdb_handle_set_qemu_phy_mem_mode(GArray *params, void *ctx);
 void gdb_handle_set_qemu_phy_watch(GArray *params, void *ctx);
 void gdb_handle_set_qemu_phy_watch_clear(GArray *params, void *ctx);
+void gdb_handle_set_qemu_mem_fulfill(GArray *params, void *ctx);
 
 /* sycall handling */
 void gdb_handle_file_io(GArray *params, void *user_ctx);

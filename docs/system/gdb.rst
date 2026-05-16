@@ -246,6 +246,14 @@ guest mapped it.
     Remove a previously installed phys watchpoint.  ``E.notfound`` if
     no matching watchpoint exists.
 
+``maintenance packet Qqemu.MemFulfill:VALUE``
+    While the CPU is stopped on a phys watchpoint, arm a single-shot
+    override so that on the next access matching the watchpoint hit's
+    address and length the memory dispatch returns ``VALUE`` instead of
+    consulting the device model.  The override clears itself once
+    consumed and is rejected with ``E.no-pending`` if no phys
+    watchpoint stop is pending on the selected thread.
+
 Phys watchpoints are TCG-only today; on KVM accelerators the packet
 will be accepted but the hardware will not honour the trap.
 

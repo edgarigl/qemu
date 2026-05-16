@@ -171,6 +171,17 @@ static void gdb_vm_state_change(void *opaque, bool running, RunState state)
                             GDB_SIGNAL_TRAP, tid->str,
                             phys ? "phy" : "",
                             type, cpu->watchpoint_hit->vaddr);
+            if (phys) {
+                /*
+                 * Latch phys-WP hit details so the Qqemu.MemFulfill
+                 * handler can still find them after watchpoint_hit
+                 * is cleared below.
+                 */
+                cpu->phy_wp_hit.hitaddr = cpu->watchpoint_hit->hitaddr;
+                cpu->phy_wp_hit.len = cpu->watchpoint_hit->len;
+                cpu->phy_wp_hit.flags = cpu->watchpoint_hit->flags;
+                cpu->phy_wp_hit.valid = true;
+            }
             cpu->watchpoint_hit = NULL;
             goto send_packet;
         } else {
@@ -519,7 +530,8 @@ void gdb_handle_set_qemu_phy_mem_mode(GArray *params, void *ctx)
  * Qqemu.PhyWatch and Qqemu.PhyWatchClear piggy-back on the standard
  * Z2/Z3/Z4 dispatch by ORing GDB_PHY_WATCHPOINT_FLAG onto the type,
  * so insertion / removal goes through the same accel ops as a normal
- * watchpoint.
+ * watchpoint.  Qqemu.MemFulfill:value arms a single-shot read override
+ * on the current CPU that the next matching memory dispatch consumes.
  */
 
 static void qemu_phy_watch_op(GArray *params,
@@ -565,6 +577,28 @@ void gdb_handle_set_qemu_phy_watch_clear(GArray *params, void *ctx)
     qemu_phy_watch_op(params, gdb_breakpoint_remove, "E.notfound");
 }
 
+void gdb_handle_set_qemu_mem_fulfill(GArray *params, void *ctx)
+{
+    CPUState *cpu;
+
+    if (params->len != 1) {
+        gdb_put_packet("E22");
+        return;
+    }
+
+    cpu = gdbserver_state.c_cpu;
+    if (!cpu || !cpu->phy_wp_hit.valid) {
+        gdb_put_packet("E.no-pending");
+        return;
+    }
+
+    cpu->mem_override.addr = cpu->phy_wp_hit.hitaddr;
+    cpu->mem_override.size = cpu->phy_wp_hit.len;
+    cpu->mem_override.value = gdb_get_cmd_param(params, 0)->val_ull;
+    cpu->mem_override.valid = true;
+    gdb_put_packet("OK");
+}
+
 void gdb_handle_query_rcmd(GArray *params, void *ctx)
 {
     const guint8 zero = 0;
@@ -603,6 +637,11 @@ void gdb_handle_query_attached(GArray *params, void *ctx)
 void gdb_continue(void)
 {
     if (!runstate_needs_reset()) {
+        CPUState *cs;
+
+        CPU_FOREACH(cs) {
+            cs->phy_wp_hit.valid = false;
+        }
         trace_gdbstub_op_continue();
         vm_start();
     }
@@ -638,11 +677,13 @@ int gdb_continue_partial(char *newstates)
             case 's':
                 trace_gdbstub_op_stepping(cpu->cpu_index);
                 cpu_single_step(cpu, gdbserver_state.sstep_flags);
+                cpu->phy_wp_hit.valid = false;
                 cpu_resume(cpu);
                 flag = 1;
                 break;
             case 'c':
                 trace_gdbstub_op_continue_cpu(cpu->cpu_index);
+                cpu->phy_wp_hit.valid = false;
                 cpu_resume(cpu);
                 flag = 1;
                 break;

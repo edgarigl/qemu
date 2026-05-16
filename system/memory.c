@@ -1494,6 +1494,20 @@ MemTxResult memory_region_dispatch_read(MemoryRegion *mr,
             abs_addr += root->addr;
         }
 
+        /*
+         * gdbstub Qqemu.MemFulfill override armed while stopped on a
+         * phys watchpoint takes precedence over the qtest override and
+         * the device model.  Single-shot, matched on (addr, size).
+         */
+        if (current_cpu && current_cpu->mem_override.valid &&
+            current_cpu->mem_override.addr == abs_addr &&
+            current_cpu->mem_override.size == size) {
+            *pval = current_cpu->mem_override.value;
+            current_cpu->mem_override.valid = false;
+            adjust_endianness(mr, pval, op);
+            return MEMTX_OK;
+        }
+
         if (qtest_mmio_override_check(abs_addr, size, false, pval)) {
             adjust_endianness(mr, pval, op);
             return MEMTX_OK;
