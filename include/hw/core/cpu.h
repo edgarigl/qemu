@@ -537,6 +537,33 @@ struct CPUState {
     QTAILQ_HEAD(, CPUWatchpoint) watchpoints;
     CPUWatchpoint *watchpoint_hit;
 
+    /*
+     * Latched details of the last BP_PHYS watchpoint hit on this CPU,
+     * stashed by the gdbstub when it builds the stop reply (which
+     * clears cpu->watchpoint_hit).  Consumed by the Qqemu.MemFulfill
+     * packet to arm the read override below, and cleared on resume.
+     */
+    struct {
+        bool valid;
+        uint8_t len;
+        int flags;
+        hwaddr hitaddr;
+    } phy_wp_hit;
+
+    /*
+     * Single-shot memory-read override armed by the gdbstub via the
+     * Qqemu.MemFulfill packet while the CPU is stopped on a BP_PHYS
+     * watchpoint.  On the next read that matches (mem_override.addr,
+     * mem_override.size) the memory dispatch returns mem_override.value
+     * instead of consulting the device model, and the slot self-clears.
+     */
+    struct {
+        bool valid;
+        uint8_t size;
+        hwaddr addr;
+        uint64_t value;
+    } mem_override;
+
     void *opaque;
 
     /* In order to avoid passing too many arguments to the MMIO helpers,
