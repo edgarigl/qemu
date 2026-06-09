@@ -548,6 +548,7 @@ static void xen_invalidate_map_cache_entry_unlocked(MapCache *mc,
     MapCacheRev *reventry;
     hwaddr paddr_index;
     hwaddr size;
+    bool was_dma;
     int found = 0;
     int rc;
 
@@ -569,6 +570,7 @@ static void xen_invalidate_map_cache_entry_unlocked(MapCache *mc,
         }
         return;
     }
+    was_dma = reventry->dma;
     QTAILQ_REMOVE(&mc->locked_entries, reventry, next);
     g_free(reventry);
 
@@ -588,6 +590,19 @@ static void xen_invalidate_map_cache_entry_unlocked(MapCache *mc,
     }
     entry->lock--;
     if (entry->lock > 0) {
+        return;
+    }
+
+    /*
+     * EXPERIMENT: for transient DMA mappings (e.g. virtqueue descriptor access
+     * via address_space_map/unmap), keep the bucket resident instead of
+     * munmapping it. The normal LRU path in xen_map_cache_unlocked() reuses
+     * unlocked-but-resident entries, so the next access avoids a fresh
+     * privcmd MMAPBATCH hypercall. Non-DMA invalidations (RAM block resize,
+     * balloon, unplug) still tear down immediately for correctness.
+     * Grant-backed entries are also torn down (handle lifetime).
+     */
+    if (was_dma && !(entry->flags & XEN_MAPCACHE_ENTRY_GRANT)) {
         return;
     }
 
