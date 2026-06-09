@@ -57,6 +57,9 @@
 #define VIRTIO_MEDIA_MAX_EXT_CTRLS 1024
 #define VIRTIO_MEDIA_MAX_EXT_CTRL_SIZE (1u << 20)
 
+/* Bound the pending event backlog when the guest stops posting buffers. */
+#define VIRTIO_MEDIA_MAX_PENDING_EVENTS 256
+
 #define VIRTIO_MEDIA_F_GNTREF 63
 #define VIRTIO_MEDIA_F_EXPORT_IMPORT 62
 #define VIRTIO_MEDIA_F_SHARE_FENCE 61
@@ -612,11 +615,28 @@ static void vmedia_write_resp_header(struct virtio_media_resp_header *resp,
 
 static void vmedia_queue_event(VirtIOMedia *s, const void *data, size_t len)
 {
-    VirtIOMediaEvent *evt = g_new0(VirtIOMediaEvent, 1);
+    VirtIOMediaEvent *evt;
 
+    /*
+     * Bound the backlog: if the guest is not posting event buffers we must not
+     * grow pending_events without limit (host DoS). Drop the oldest event to
+     * make room, matching the lossy nature of the V4L2 event/dqbuf path.
+     */
+    if (s->pending_events_count >= VIRTIO_MEDIA_MAX_PENDING_EVENTS) {
+        VirtIOMediaEvent *old = QTAILQ_FIRST(&s->pending_events);
+
+        if (old) {
+            QTAILQ_REMOVE(&s->pending_events, old, next);
+            g_free(old);
+            s->pending_events_count--;
+        }
+    }
+
+    evt = g_new0(VirtIOMediaEvent, 1);
     evt->len = MIN(len, sizeof(evt->data));
     memcpy(evt->data, data, evt->len);
     QTAILQ_INSERT_TAIL(&s->pending_events, evt, next);
+    s->pending_events_count++;
 }
 
 static void vmedia_set_host_handler(VirtIOMediaSession *session, bool enable)
@@ -759,6 +779,7 @@ static void vmedia_flush_events(VirtIOMedia *s)
         virtio_notify(&s->parent_obj, vq);
         QTAILQ_REMOVE(&s->pending_events, evt, next);
         g_free(evt);
+        s->pending_events_count--;
     }
 }
 
@@ -3820,29 +3841,63 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
                                    vmedia_handle_event);
 }
 
-static void vmedia_unrealize(DeviceState *dev)
+static void vmedia_drain_pending_events(VirtIOMedia *s)
 {
-    VirtIOMedia *s = VIRTIO_MEDIA(dev);
-    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
+    while (!QTAILQ_EMPTY(&s->pending_events)) {
+        VirtIOMediaEvent *evt = QTAILQ_FIRST(&s->pending_events);
+
+        QTAILQ_REMOVE(&s->pending_events, evt, next);
+        g_free(evt);
+    }
+    s->pending_events_count = 0;
+}
+
+/*
+ * Tear down all per-session state (host fds, host maps, buffers, grants) and
+ * the pending event backlog. Called on device reset (guest reboot) and reused
+ * by unrealize. Without this, a guest reset would leak host fds/grants and
+ * leave stale sessions that the next guest could reference.
+ */
+static void vmedia_free_all_sessions(VirtIOMedia *s)
+{
     GHashTableIter iter;
     gpointer key;
     gpointer value;
-    VirtIOMediaEvent *evt;
+
+    if (!s->sessions) {
+        return;
+    }
 
     g_hash_table_iter_init(&iter, s->sessions);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
         vmedia_session_free(s, value);
     }
+    g_hash_table_remove_all(s->sessions);
+}
+
+static void vmedia_reset(VirtIODevice *vdev)
+{
+    VirtIOMedia *s = VIRTIO_MEDIA(vdev);
+
+    vmedia_free_all_sessions(s);
+    if (s->share_handles) {
+        g_hash_table_remove_all(s->share_handles);
+    }
+    vmedia_drain_pending_events(s);
+}
+
+static void vmedia_unrealize(DeviceState *dev)
+{
+    VirtIOMedia *s = VIRTIO_MEDIA(dev);
+    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
+
+    vmedia_free_all_sessions(s);
     g_hash_table_destroy(s->sessions);
     s->sessions = NULL;
     g_hash_table_destroy(s->share_handles);
     s->share_handles = NULL;
 
-    while (!QTAILQ_EMPTY(&s->pending_events)) {
-        evt = QTAILQ_FIRST(&s->pending_events);
-        QTAILQ_REMOVE(&s->pending_events, evt, next);
-        g_free(evt);
-    }
+    vmedia_drain_pending_events(s);
 
     virtio_del_queue(vdev, VIRTIO_MEDIA_EVENT_VQ);
     virtio_del_queue(vdev, VIRTIO_MEDIA_COMMAND_VQ);
@@ -3868,6 +3923,7 @@ static void vmedia_class_init(ObjectClass *klass, const void *data)
     dc->vmsd = &vmstate_virtio_media;
     vdc->realize = vmedia_realize;
     vdc->unrealize = vmedia_unrealize;
+    vdc->reset = vmedia_reset;
     vdc->get_config = vmedia_get_config;
     vdc->get_features = vmedia_get_features;
 }
