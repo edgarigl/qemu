@@ -550,6 +550,7 @@ static void xen_invalidate_map_cache_entry_unlocked(MapCache *mc,
     MapCacheRev *reventry;
     hwaddr paddr_index;
     hwaddr size;
+    bool was_dma;
     int found = 0;
     int rc;
 
@@ -571,6 +572,7 @@ static void xen_invalidate_map_cache_entry_unlocked(MapCache *mc,
         }
         return;
     }
+    was_dma = reventry->dma;
     QTAILQ_REMOVE(&mc->locked_entries, reventry, next);
     g_free(reventry);
 
@@ -590,6 +592,12 @@ static void xen_invalidate_map_cache_entry_unlocked(MapCache *mc,
     }
     entry->lock--;
     if (entry->lock > 0) {
+        return;
+    }
+
+    /* Keep valid foreign DMA mappings available for subsequent requests. */
+    if (was_dma && !(entry->flags & (XEN_MAPCACHE_ENTRY_GRANT |
+                                     XEN_MAPCACHE_ENTRY_DUMMY))) {
         return;
     }
 
