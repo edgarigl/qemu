@@ -3574,9 +3574,9 @@ release_respond:
 
             gref_start = addr / VIRTIO_MEDIA_GREF_PAGE_SIZE;
             gref_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
-            needed = sizeof(resp) + gref_count * sizeof(uint32_t);
+            needed = sizeof(resp) + (size_t)gref_count * sizeof(uint32_t);
             if (in_len < needed ||
-                gref_start + gref_count > s->gref_count) {
+                (uint64_t)gref_start + gref_count > s->gref_count) {
                 vmedia_write_resp_header(&resp.hdr, ENOSPC);
                 vmedia_iov_write(elem->in_sg, elem->in_num, 0,
                                  &resp, sizeof(resp));
