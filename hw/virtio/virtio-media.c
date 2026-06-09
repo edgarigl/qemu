@@ -53,6 +53,10 @@
 
 #define VIRTIO_MEDIA_MAX_PLANES VIDEO_MAX_PLANES
 
+/* Caps on guest-supplied ext-control counts/sizes to bound host allocation. */
+#define VIRTIO_MEDIA_MAX_EXT_CTRLS 1024
+#define VIRTIO_MEDIA_MAX_EXT_CTRL_SIZE (1u << 20)
+
 #define VIRTIO_MEDIA_F_GNTREF 63
 #define VIRTIO_MEDIA_F_EXPORT_IMPORT 62
 #define VIRTIO_MEDIA_F_SHARE_FENCE 61
@@ -319,10 +323,10 @@ typedef struct VirtIOMediaBuffer {
     bool queued;
     uint32_t sequence;
     uint64_t base_offset;
-    uint64_t plane_offsets[3];
-    uint32_t plane_lengths[3];
+    uint64_t plane_offsets[VIRTIO_MEDIA_MAX_PLANES];
+    uint32_t plane_lengths[VIRTIO_MEDIA_MAX_PLANES];
     struct v4l2_buffer buffer;
-    struct v4l2_plane planes[3];
+    struct v4l2_plane planes[VIRTIO_MEDIA_MAX_PLANES];
 } VirtIOMediaBuffer;
 
 typedef struct VirtIOMediaSession {
@@ -693,7 +697,7 @@ static void vmedia_host_fd_handler(void *opaque)
                            session->host_maps[idx],
                            copy_len);
                 }
-                session->buffers[buf.index].planes[p].bytesused = bytes;
+                session->buffers[buf.index].planes[p].bytesused = copy_len;
             }
         } else if (session->host_memory == V4L2_MEMORY_MMAP) {
             memcpy(vmedia_hostmem_base(s) +
@@ -965,6 +969,11 @@ static int vmedia_alloc_buffers(VirtIOMedia *s, VirtIOMediaSession *session,
             buf_size = session->buffer_size;
         }
 
+        if (offset + buf_size > s->hostmem_size) {
+            vmedia_reset_buffers(session);
+            return -ENOMEM;
+        }
+
         memset(&buf->buffer, 0, sizeof(buf->buffer));
         buf->buffer.index = i;
         buf->buffer.type = session->mplane ?
@@ -987,10 +996,6 @@ static int vmedia_alloc_buffers(VirtIOMedia *s, VirtIOMediaSession *session,
         offset += buf_size;
     }
 
-    if (offset > s->hostmem_size) {
-        return -ENOMEM;
-    }
-
     return 0;
 }
 
@@ -1001,7 +1006,7 @@ static int vmedia_find_plane(VirtIOMediaSession *session, uint32_t offset,
 
     for (i = 0; i < session->num_buffers; i++) {
         VirtIOMediaBuffer *buf = &session->buffers[i];
-        int p;
+        uint32_t p;
 
         if (!session->mplane) {
             if (buf->plane_offsets[0] == offset) {
@@ -1012,7 +1017,7 @@ static int vmedia_find_plane(VirtIOMediaSession *session, uint32_t offset,
             continue;
         }
 
-        for (p = 0; p < 3; p++) {
+        for (p = 0; p < buf->buffer.length && p < VIRTIO_MEDIA_MAX_PLANES; p++) {
             if (buf->plane_offsets[p] == offset) {
                 *addr = buf->plane_offsets[p];
                 *len = buf->plane_lengths[p];
@@ -2365,9 +2370,16 @@ static int vmedia_proxy_ext_ctrls(VirtIOMediaSession *session,
         buf = g_malloc0(total);
         memcpy(buf, &ctrls, sizeof(ctrls));
     } else {
-        size_t controls_size = ctrls.count * sizeof(*controls);
-        size_t base = sizeof(ctrls) + controls_size;
+        size_t controls_size;
+        size_t base;
         size_t out_len = iov_size(out_sg, out_num);
+
+        if (ctrls.count > VIRTIO_MEDIA_MAX_EXT_CTRLS) {
+            return -EINVAL;
+        }
+
+        controls_size = ctrls.count * sizeof(*controls);
+        base = sizeof(ctrls) + controls_size;
 
         if (out_len < out_off + base) {
             return -EINVAL;
@@ -2381,6 +2393,10 @@ static int vmedia_proxy_ext_ctrls(VirtIOMediaSession *session,
         }
 
         for (i = 0; i < ctrls.count; i++) {
+            if (controls[i].size > VIRTIO_MEDIA_MAX_EXT_CTRL_SIZE) {
+                g_free(controls);
+                return -EINVAL;
+            }
             data_size += controls[i].size;
         }
         g_free(controls);
@@ -3300,13 +3316,6 @@ static void vmedia_handle_command(VirtIODevice *vdev, VirtQueue *vq)
             goto export_respond;
         }
 
-        if (!s->share_handles) {
-            s->share_handles = g_hash_table_new_full(g_int64_hash,
-                                                     g_int64_equal,
-                                                     g_free,
-                                                     vmedia_share_free);
-        }
-
         {
             guint64 *key = g_new(guint64, 1);
             *key = share->handle_id;
@@ -3419,9 +3428,10 @@ import_respond:
                 gref_start = addr / VIRTIO_MEDIA_GREF_PAGE_SIZE;
                 gref_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
             }
-            needed = sizeof(resp) + gref_count * sizeof(uint32_t);
+            needed = sizeof(resp) + (size_t)gref_count * sizeof(uint32_t);
             if (in_len < needed ||
-                (!peer_grant && gref_start + gref_count > s->gref_count)) {
+                (!peer_grant &&
+                 (uint64_t)gref_start + gref_count > s->gref_count)) {
                 vmedia_write_resp_header(&resp.hdr, ENOSPC);
                 vmedia_iov_write(elem->in_sg, elem->in_num, 0,
                                  &resp, sizeof(resp));
