@@ -2788,6 +2788,9 @@ config_host_data.set('HAVE_SIGEV_NOTIFY_THREAD_ID',
 config_host_data.set('HAVE_STRUCT_STAT_ST_ATIM',
                      cc.has_member('struct stat', 'st_atim',
                                    prefix: '#include <sys/stat.h>'))
+config_host_data.set('CONFIG_V4L2_REQBUFS_FLAGS',
+                     cc.has_member('struct v4l2_requestbuffers', 'flags',
+                                   prefix: '#include <linux/videodev2.h>'))
 config_host_data.set('HAVE_BLK_ZONE_REP_CAPACITY',
                      cc.has_member('struct blk_zone', 'capacity',
                                    prefix: '#include <linux/blkzoned.h>'))
