@@ -30,13 +30,27 @@ struct VirtIOMedia {
     VirtIOMediaConfig config;
     MemoryRegion hostmem;
     uint8_t *hostmem_buf;
+    bool use_grefs;
+    /* regrant-only Mode A: no device gntalloc/hostmem pool */
+    bool regrant_only;
+    int gntalloc_fd;
+    uint64_t gntalloc_index;
+    uint32_t gref_count;
+    uint32_t *grefs;
 
     uint64_t hostmem_size;
     uint32_t max_buffers;
     bool use_hostmem;
     char *host_device;
     char *host_v4l2_mem;
+    /* enable Xen grant-ref zero-copy extensions (default on) */
+    bool xen_grants;
     bool use_host_device;
+    bool host_userptr_capture;
+    bool host_userptr_mplane;
+    uint8_t host_v4l2_mem_mode;
+    uint64_t next_share_handle;
+    GHashTable *share_handles;
 
     uint32_t session_next_id;
     GHashTable *sessions;

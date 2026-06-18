@@ -31,18 +31,29 @@ static void vmedia_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
 
     vpci_dev->msix_bar_idx = 1;
     vpci_dev->modern_mem_bar_idx = 2;
+    /*
+     * Default to one MSI-X vector per virtqueue (commandq + eventq) plus one
+     * for the config change interrupt. Without MSI-X the device falls back to
+     * legacy INTx, whose emulated IO-APIC EOI round-trip under Xen adds
+     * milliseconds of latency to every command.
+     */
+    if (vpci_dev->nvectors == DEV_NVECTORS_UNSPECIFIED) {
+        vpci_dev->nvectors = 3;
+    }
     virtio_pci_force_virtio_1(vpci_dev);
 
     if (!qdev_realize(vdev, BUS(&vpci_dev->bus), errp)) {
         return;
     }
 
-    pci_register_bar(&vpci_dev->pci_dev, 4,
-                     PCI_BASE_ADDRESS_SPACE_MEMORY |
-                     PCI_BASE_ADDRESS_MEM_PREFETCH |
-                     PCI_BASE_ADDRESS_MEM_TYPE_64,
-                     &mdev->hostmem);
-    virtio_pci_add_shm_cap(vpci_dev, 4, 0, mdev->hostmem_size, 0);
+    if (!mdev->use_grefs) {
+        pci_register_bar(&vpci_dev->pci_dev, 4,
+                         PCI_BASE_ADDRESS_SPACE_MEMORY |
+                         PCI_BASE_ADDRESS_MEM_PREFETCH |
+                         PCI_BASE_ADDRESS_MEM_TYPE_64,
+                         &mdev->hostmem);
+        virtio_pci_add_shm_cap(vpci_dev, 4, 0, mdev->hostmem_size, 0);
+    }
 }
 
 static void vmedia_initfn(Object *obj)
@@ -53,13 +64,20 @@ static void vmedia_initfn(Object *obj)
                                 TYPE_VIRTIO_MEDIA);
 }
 
+static const Property vmedia_pci_properties[] = {
+    DEFINE_PROP_UINT32("vectors", VirtIOPCIProxy, nvectors,
+                       DEV_NVECTORS_UNSPECIFIED),
+};
+
 static void vmedia_pci_class_init(ObjectClass *klass, const void *data)
 {
     VirtioPCIClass *k = VIRTIO_PCI_CLASS(klass);
     PCIDeviceClass *pcidev_k = PCI_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
     k->realize = vmedia_pci_realize;
     pcidev_k->class_id = PCI_CLASS_MULTIMEDIA_VIDEO;
+    device_class_set_props(dc, vmedia_pci_properties);
 }
 
 static const VirtioPCIDeviceTypeInfo virtio_media_pci_info = {

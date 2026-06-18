@@ -17,7 +17,9 @@
 #include "qemu/queue.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-media.h"
+#include "hw/xen/xen.h"
 #include "standard-headers/linux/virtio_ids.h"
+#include "system/xen.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -28,6 +30,28 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
+#include <xen/gntalloc.h>
+
+/*
+ * gntdev dma-buf import ABI (from xen/gntdev.h). Defined locally because the
+ * system header pulls in Xen public types (grant_ref_t, domid_t) that are not
+ * available in the QEMU build include path.
+ */
+struct vmedia_gntdev_dmabuf_imp_to_refs {
+    uint32_t fd;
+    uint32_t count;
+    uint32_t domid;
+    uint32_t reserved;
+    uint32_t refs[1];
+};
+struct vmedia_gntdev_dmabuf_imp_release {
+    uint32_t fd;
+    uint32_t reserved;
+};
+#define VMEDIA_IOCTL_GNTDEV_DMABUF_IMP_TO_REFS \
+    _IOC(_IOC_NONE, 'G', 11, sizeof(struct vmedia_gntdev_dmabuf_imp_to_refs))
+#define VMEDIA_IOCTL_GNTDEV_DMABUF_IMP_RELEASE \
+    _IOC(_IOC_NONE, 'G', 12, sizeof(struct vmedia_gntdev_dmabuf_imp_release))
 
 #define VIRTIO_MEDIA_COMMAND_VQ 0
 #define VIRTIO_MEDIA_EVENT_VQ   1
@@ -41,6 +65,9 @@
 #define VIRTIO_MEDIA_CMD_IOCTL  3
 #define VIRTIO_MEDIA_CMD_MMAP   4
 #define VIRTIO_MEDIA_CMD_MUNMAP 5
+#define VIRTIO_MEDIA_CMD_EXPORT_BUFFER 6
+#define VIRTIO_MEDIA_CMD_IMPORT_BUFFER 7
+#define VIRTIO_MEDIA_CMD_RELEASE_HANDLE 8
 
 #define VIRTIO_MEDIA_EVT_ERROR  0
 #define VIRTIO_MEDIA_EVT_DQBUF  1
@@ -49,6 +76,23 @@
 #define VIRTIO_MEDIA_MMAP_FLAG_RW (1 << 0)
 
 #define VIRTIO_MEDIA_MAX_PLANES VIDEO_MAX_PLANES
+
+/* Caps on guest-supplied ext-control counts/sizes to bound host allocation. */
+#define VIRTIO_MEDIA_MAX_EXT_CTRLS 1024
+#define VIRTIO_MEDIA_MAX_EXT_CTRL_SIZE (1u << 20)
+
+/* Bound the pending event backlog when the guest stops posting buffers. */
+#define VIRTIO_MEDIA_MAX_PENDING_EVENTS 256
+
+#define VIRTIO_MEDIA_F_GNTREF 63
+#define VIRTIO_MEDIA_F_EXPORT_IMPORT 62
+#define VIRTIO_MEDIA_F_SHARE_FENCE 61
+#define VIRTIO_MEDIA_F_PEER_GREF_IMPORT 60
+#define VIRTIO_MEDIA_GREF_PAGE_SIZE 4096u
+
+#define VIRTIO_MEDIA_IMPORT_F_TARGET_DOMID (1U << 1)
+#define VIRTIO_MEDIA_IMPORT_DOMID_SHIFT 16
+#define VIRTIO_MEDIA_IMPORT_DOMID_MASK 0xffffU
 
 #define VIRTIO_MEDIA_WIDTH  640u
 #define VIRTIO_MEDIA_HEIGHT 480u
@@ -59,7 +103,129 @@
 #define VIRTIO_MEDIA_BUFFER_SIZE_SINGLE \
     (VIRTIO_MEDIA_WIDTH * VIRTIO_MEDIA_HEIGHT * 2)
 
+typedef enum VirtIOMediaHostV4L2MemMode {
+    VMEDIA_HOST_V4L2_MEM_AUTO = 0,
+    VMEDIA_HOST_V4L2_MEM_MMAP,
+    VMEDIA_HOST_V4L2_MEM_USERPTR,
+    /* Mode A: host MMAP + EXPBUF + gntdev re-grant */
+    VMEDIA_HOST_V4L2_MEM_REGRANT,
+} VirtIOMediaHostV4L2MemMode;
+
 static int vmedia_ioctl_nointr(int fd, unsigned long req, void *arg);
+
+static uint8_t *vmedia_hostmem_base(VirtIOMedia *s)
+{
+    return s->hostmem_buf ? s->hostmem_buf
+                          : memory_region_get_ram_ptr(&s->hostmem);
+}
+
+static uint64_t vmedia_format_sizeimage(const struct v4l2_format *fmt)
+{
+    uint64_t sizeimage;
+
+    switch (fmt->type) {
+    case V4L2_BUF_TYPE_VIDEO_CAPTURE:
+        if (fmt->fmt.pix.sizeimage) {
+            return fmt->fmt.pix.sizeimage;
+        }
+        return (uint64_t)fmt->fmt.pix.width * fmt->fmt.pix.height * 2;
+    case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
+        sizeimage = 0;
+        for (uint32_t i = 0; i < fmt->fmt.pix_mp.num_planes; i++) {
+            sizeimage += fmt->fmt.pix_mp.plane_fmt[i].sizeimage;
+        }
+        if (sizeimage) {
+            return sizeimage;
+        }
+        return (uint64_t)fmt->fmt.pix_mp.width * fmt->fmt.pix_mp.height * 2;
+    default:
+        return 0;
+    }
+}
+
+static void vmedia_gntalloc_cleanup(VirtIOMedia *s)
+{
+    if (s->hostmem_buf && s->hostmem_buf != MAP_FAILED) {
+        munmap(s->hostmem_buf, s->hostmem_size);
+        s->hostmem_buf = NULL;
+    }
+
+    if (s->gntalloc_fd >= 0 && s->gref_count) {
+        struct ioctl_gntalloc_dealloc_gref dealloc = {
+            .index = s->gntalloc_index,
+            .count = s->gref_count,
+        };
+
+        ioctl(s->gntalloc_fd, IOCTL_GNTALLOC_DEALLOC_GREF, &dealloc);
+    }
+
+    if (s->gntalloc_fd >= 0) {
+        close(s->gntalloc_fd);
+        s->gntalloc_fd = -1;
+    }
+
+    g_free(s->grefs);
+    s->grefs = NULL;
+    s->gref_count = 0;
+}
+
+static bool vmedia_gntalloc_init(VirtIOMedia *s, Error **errp)
+{
+    struct ioctl_gntalloc_alloc_gref *alloc;
+    size_t alloc_sz;
+    uint32_t gref_count;
+    int fd;
+    int ret;
+
+    gref_count = DIV_ROUND_UP(s->hostmem_size, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+    if (!gref_count) {
+        error_setg(errp, "virtio-media: invalid gref count");
+        return false;
+    }
+
+    fd = open("/dev/xen/gntalloc", O_RDWR);
+    if (fd < 0) {
+        error_setg_errno(errp, errno,
+                         "virtio-media: failed to open /dev/xen/gntalloc");
+        return false;
+    }
+
+    alloc_sz = sizeof(*alloc) + (gref_count - 1) * sizeof(uint32_t);
+    alloc = g_malloc0(alloc_sz);
+    alloc->domid = xen_domid;
+    alloc->flags = GNTALLOC_FLAG_WRITABLE;
+    alloc->count = gref_count;
+
+    ret = ioctl(fd, IOCTL_GNTALLOC_ALLOC_GREF, alloc);
+    if (ret < 0) {
+        error_setg_errno(errp, errno,
+                         "virtio-media: gntalloc alloc failed for %" PRIu64
+                         " bytes (%u grant refs)",
+                         s->hostmem_size, gref_count);
+        g_free(alloc);
+        close(fd);
+        return false;
+    }
+
+    s->gref_count = gref_count;
+    s->grefs = g_new(uint32_t, gref_count);
+    memcpy(s->grefs, alloc->gref_ids, gref_count * sizeof(uint32_t));
+    s->gntalloc_index = alloc->index;
+    g_free(alloc);
+
+    s->hostmem_buf = mmap(NULL, s->hostmem_size, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, fd, s->gntalloc_index);
+    if (s->hostmem_buf == MAP_FAILED) {
+        error_setg_errno(errp, errno,
+                         "virtio-media: gntalloc mmap failed");
+        close(fd);
+        s->gntalloc_fd = -1;
+        return false;
+    }
+
+    s->gntalloc_fd = fd;
+    return true;
+}
 
 struct virtio_media_cmd_header {
     uint32_t cmd;
@@ -104,11 +270,25 @@ struct virtio_media_cmd_mmap {
     uint32_t offset;
 };
 
+/*
+ * The spec response is {hdr, driver_addr, len}. The grant fields below are a
+ * QEMU/Xen extension only emitted when the VIRTIO_MEDIA_F_GNTREF feature is
+ * negotiated. A grant-unaware driver posts a response buffer of only
+ * VIRTIO_MEDIA_RESP_MMAP_BASE_SIZE bytes, so the non-gref path MUST write
+ * exactly that many bytes -- never sizeof(struct virtio_media_resp_mmap).
+ */
 struct virtio_media_resp_mmap {
     struct virtio_media_resp_header hdr;
     uint64_t driver_addr;
     uint64_t len;
+    uint32_t gref_count;
+    uint32_t gref_page_size;
+    uint32_t gref_domid;
+    uint32_t pad;
+    uint32_t gref_ids[0];
 };
+#define VIRTIO_MEDIA_RESP_MMAP_BASE_SIZE \
+    offsetof(struct virtio_media_resp_mmap, gref_count)
 
 struct virtio_media_cmd_munmap {
     struct virtio_media_cmd_header hdr;
@@ -116,6 +296,51 @@ struct virtio_media_cmd_munmap {
 };
 
 struct virtio_media_resp_munmap {
+    struct virtio_media_resp_header hdr;
+};
+
+struct virtio_media_cmd_export_buffer {
+    struct virtio_media_cmd_header hdr;
+    uint32_t session_id;
+    uint32_t queue_type;
+    uint32_t buffer_index;
+    uint32_t plane_index;
+    uint32_t flags;
+    uint32_t reserved;
+};
+
+struct virtio_media_resp_export_buffer {
+    struct virtio_media_resp_header hdr;
+    uint64_t handle_id;
+    uint64_t len;
+    uint32_t plane_count;
+    uint32_t reserved;
+};
+
+struct virtio_media_cmd_import_buffer {
+    struct virtio_media_cmd_header hdr;
+    uint32_t session_id;
+    uint32_t flags;
+    uint64_t handle_id;
+};
+
+struct virtio_media_resp_import_buffer {
+    struct virtio_media_resp_header hdr;
+    uint64_t driver_addr;
+    uint64_t len;
+    uint32_t gref_count;
+    uint32_t gref_page_size;
+    uint32_t gref_domid;
+    uint32_t pad;
+    uint32_t gref_ids[0];
+};
+
+struct virtio_media_cmd_release_handle {
+    struct virtio_media_cmd_header hdr;
+    uint64_t handle_id;
+};
+
+struct virtio_media_resp_release_handle {
     struct virtio_media_resp_header hdr;
 };
 
@@ -141,10 +366,10 @@ typedef struct VirtIOMediaBuffer {
     bool queued;
     uint32_t sequence;
     uint64_t base_offset;
-    uint64_t plane_offsets[3];
-    uint32_t plane_lengths[3];
+    uint64_t plane_offsets[VIRTIO_MEDIA_MAX_PLANES];
+    uint32_t plane_lengths[VIRTIO_MEDIA_MAX_PLANES];
     struct v4l2_buffer buffer;
-    struct v4l2_plane planes[3];
+    struct v4l2_plane planes[VIRTIO_MEDIA_MAX_PLANES];
 } VirtIOMediaBuffer;
 
 typedef struct VirtIOMediaSession {
@@ -157,6 +382,7 @@ typedef struct VirtIOMediaSession {
     uint32_t num_buffers;
     VirtIOMediaBuffer *buffers;
     int host_fd;
+    uint32_t host_memory;
     bool host_streaming;
     void **host_maps;
     uint32_t *host_lengths;
@@ -165,6 +391,18 @@ typedef struct VirtIOMediaSession {
     uint32_t host_num_planes;
     uint32_t host_plane_lengths[VIRTIO_MEDIA_MAX_PLANES];
 
+    /*
+     * Mode A (zero-copy re-grant): when true, host MMAP buffers are exported
+     * via VIDIOC_EXPBUF and re-granted to the guest with gntdev IMP_TO_REFS,
+     * so the guest maps the host driver's own capture pages (no per-frame
+     * memcpy). Per (buffer,plane) we keep the EXPBUF fd, the gntdev import fd,
+     * and the grant refs returned to the guest.
+     */
+    bool host_regrant;
+    int *host_dmabuf_fds;     /* EXPBUF fd per (buffer*planes + plane) */
+    int *host_import_fds;     /* gntdev import fd per (buffer*planes + plane) */
+    uint32_t **host_gref_ids; /* gref array per (buffer*planes + plane) */
+    uint32_t *host_gref_cnts; /* gref count per (buffer*planes + plane) */
     uint32_t host_event_subs; /* number of active host event subscriptions */
     QTAILQ_HEAD(, VirtIOMediaBuffer) queued_buffers;
 } VirtIOMediaSession;
@@ -175,6 +413,143 @@ struct VirtIOMediaEvent {
     uint8_t data[sizeof(struct virtio_media_event_dqbuf)];
 };
 
+typedef struct VirtIOMediaShare {
+    uint64_t handle_id;
+    uint32_t owner_session_id;
+    uint32_t queue_type;
+    uint32_t buffer_index;
+    uint32_t plane_index;
+    uint64_t driver_addr;
+    uint64_t len;
+    uint32_t plane_count;
+    GHashTable *peer_grants;
+} VirtIOMediaShare;
+
+typedef struct VirtIOMediaPeerGrant {
+    uint32_t domid;
+    uint32_t gref_count;
+    uint64_t gntalloc_index;
+    uint64_t map_len;
+    uint64_t len;
+    int gntalloc_fd;
+    uint8_t *map;
+    uint32_t *grefs;
+} VirtIOMediaPeerGrant;
+
+static void vmedia_peer_grant_free(gpointer opaque)
+{
+    VirtIOMediaPeerGrant *pg = opaque;
+
+    if (!pg) {
+        return;
+    }
+
+    if (pg->map && pg->map != MAP_FAILED) {
+        munmap(pg->map, pg->map_len);
+        pg->map = NULL;
+    }
+
+    if (pg->gntalloc_fd >= 0 && pg->gref_count) {
+        struct ioctl_gntalloc_dealloc_gref dealloc = {
+            .index = pg->gntalloc_index,
+            .count = pg->gref_count,
+        };
+
+        ioctl(pg->gntalloc_fd, IOCTL_GNTALLOC_DEALLOC_GREF, &dealloc);
+    }
+
+    if (pg->gntalloc_fd >= 0) {
+        close(pg->gntalloc_fd);
+        pg->gntalloc_fd = -1;
+    }
+
+    g_free(pg->grefs);
+    g_free(pg);
+}
+
+static VirtIOMediaPeerGrant *vmedia_peer_grant_new(uint32_t domid, uint64_t len,
+                                                   int *status)
+{
+    struct ioctl_gntalloc_alloc_gref *alloc = NULL;
+    VirtIOMediaPeerGrant *pg = NULL;
+    size_t alloc_sz;
+    int fd = -1;
+    int ret;
+
+    if (!len) {
+        *status = -EINVAL;
+        return NULL;
+    }
+
+    pg = g_new0(VirtIOMediaPeerGrant, 1);
+    pg->domid = domid;
+    pg->len = len;
+    pg->gref_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+    pg->map_len = (uint64_t)pg->gref_count * VIRTIO_MEDIA_GREF_PAGE_SIZE;
+    pg->gntalloc_fd = -1;
+
+    fd = open("/dev/xen/gntalloc", O_RDWR);
+    if (fd < 0) {
+        *status = -errno;
+        goto err;
+    }
+
+    alloc_sz = sizeof(*alloc) + (pg->gref_count - 1) * sizeof(uint32_t);
+    alloc = g_malloc0(alloc_sz);
+    alloc->domid = domid;
+    alloc->flags = GNTALLOC_FLAG_WRITABLE;
+    alloc->count = pg->gref_count;
+
+    ret = ioctl(fd, IOCTL_GNTALLOC_ALLOC_GREF, alloc);
+    if (ret < 0) {
+        *status = -errno;
+        goto err;
+    }
+
+    pg->grefs = g_new(uint32_t, pg->gref_count);
+    memcpy(pg->grefs, alloc->gref_ids, pg->gref_count * sizeof(uint32_t));
+    pg->gntalloc_index = alloc->index;
+    pg->gntalloc_fd = fd;
+    g_free(alloc);
+    alloc = NULL;
+
+    pg->map = mmap(NULL, pg->map_len, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, pg->gntalloc_index);
+    if (pg->map == MAP_FAILED) {
+        *status = -errno;
+        pg->map = NULL;
+        goto err;
+    }
+
+    pg->gntalloc_fd = fd;
+    *status = 0;
+    return pg;
+
+err:
+    g_free(alloc);
+    if (fd >= 0 && pg && pg->gntalloc_fd < 0) {
+        close(fd);
+    }
+    vmedia_peer_grant_free(pg);
+    return NULL;
+}
+
+static void vmedia_share_free(gpointer opaque)
+{
+    VirtIOMediaShare *share = opaque;
+
+    if (!share) {
+        return;
+    }
+
+    if (share->peer_grants) {
+        g_hash_table_destroy(share->peer_grants);
+        share->peer_grants = NULL;
+    }
+
+    g_free(share);
+}
+
 static void vmedia_host_fd_handler(void *opaque);
 static void vmedia_emit_dqbuf(VirtIOMedia *s, VirtIOMediaSession *session,
                               VirtIOMediaBuffer *buf);
@@ -182,6 +557,10 @@ static void vmedia_flush_events(VirtIOMedia *s);
 static void vmedia_drain_host_events(VirtIOMedia *s,
                                      VirtIOMediaSession *session);
 static void vmedia_proxy_stop(VirtIOMediaSession *session);
+static void vmedia_share_remove_for_owner(VirtIOMedia *s, uint32_t owner_id);
+static void vmedia_share_sync_for_buffer(VirtIOMedia *s,
+                                         VirtIOMediaSession *session,
+                                         uint32_t buffer_index);
 
 static void vmedia_reset_buffers(VirtIOMediaSession *session)
 {
@@ -200,6 +579,47 @@ static void vmedia_reset_buffers(VirtIOMediaSession *session)
     session->num_buffers = 0;
 }
 
+static void vmedia_regrant_teardown(VirtIOMediaSession *session)
+{
+    uint32_t planes = session->host_num_planes ? session->host_num_planes : 1;
+    uint32_t n = session->host_num_buffers * planes;
+    uint32_t idx;
+
+    if (!session->host_regrant) {
+        return;
+    }
+
+    for (idx = 0; idx < n; idx++) {
+        if (session->host_import_fds && session->host_import_fds[idx] >= 0) {
+            struct vmedia_gntdev_dmabuf_imp_release rel = {
+                .fd = session->host_import_fds[idx],
+            };
+            int gfd = open("/dev/xen/gntdev", O_RDWR | O_CLOEXEC);
+            if (gfd >= 0) {
+                ioctl(gfd, VMEDIA_IOCTL_GNTDEV_DMABUF_IMP_RELEASE, &rel);
+                close(gfd);
+            }
+            close(session->host_import_fds[idx]);
+        }
+        if (session->host_dmabuf_fds && session->host_dmabuf_fds[idx] >= 0) {
+            close(session->host_dmabuf_fds[idx]);
+        }
+        if (session->host_gref_ids && session->host_gref_ids[idx]) {
+            g_free(session->host_gref_ids[idx]);
+        }
+    }
+
+    g_free(session->host_dmabuf_fds);
+    g_free(session->host_import_fds);
+    g_free(session->host_gref_ids);
+    g_free(session->host_gref_cnts);
+    session->host_dmabuf_fds = NULL;
+    session->host_import_fds = NULL;
+    session->host_gref_ids = NULL;
+    session->host_gref_cnts = NULL;
+    session->host_regrant = false;
+}
+
 static void vmedia_proxy_release_buffers(VirtIOMedia *s,
                                          VirtIOMediaSession *session)
 {
@@ -207,7 +627,15 @@ static void vmedia_proxy_release_buffers(VirtIOMedia *s,
     uint32_t p;
     uint32_t planes;
 
-    if (!s->use_host_device || !session->host_maps) {
+    if (!s->use_host_device) {
+        return;
+    }
+
+    vmedia_regrant_teardown(session);
+
+    if (!session->host_maps) {
+        session->host_num_buffers = 0;
+        session->host_num_planes = 0;
         return;
     }
 
@@ -238,6 +666,8 @@ static void vmedia_session_free(VirtIOMedia *s, VirtIOMediaSession *session)
         return;
     }
 
+    vmedia_share_remove_for_owner(s, session->id);
+
     /* Closing the owner releases the capture queue. */
     if (s->capture_owner_session_id == session->id) {
         s->capture_owner_session_id = 0;
@@ -263,6 +693,7 @@ static VirtIOMediaSession *vmedia_session_new(VirtIOMedia *s, uint32_t id)
     session->mplane = false;
     session->buffer_size = VIRTIO_MEDIA_BUFFER_SIZE_SINGLE;
     session->host_fd = -1;
+    session->host_memory = V4L2_MEMORY_MMAP;
     session->host_streaming = false;
     session->host_maps = NULL;
     session->host_lengths = NULL;
@@ -319,11 +750,28 @@ static void vmedia_write_resp_header(struct virtio_media_resp_header *resp,
 
 static void vmedia_queue_event(VirtIOMedia *s, const void *data, size_t len)
 {
-    VirtIOMediaEvent *evt = g_new0(VirtIOMediaEvent, 1);
+    VirtIOMediaEvent *evt;
 
+    /*
+     * Bound the backlog: if the guest is not posting event buffers we must not
+     * grow pending_events without limit (host DoS). Drop the oldest event to
+     * make room, matching the lossy nature of the V4L2 event/dqbuf path.
+     */
+    if (s->pending_events_count >= VIRTIO_MEDIA_MAX_PENDING_EVENTS) {
+        VirtIOMediaEvent *old = QTAILQ_FIRST(&s->pending_events);
+
+        if (old) {
+            QTAILQ_REMOVE(&s->pending_events, old, next);
+            g_free(old);
+            s->pending_events_count--;
+        }
+    }
+
+    evt = g_new0(VirtIOMediaEvent, 1);
     evt->len = MIN(len, sizeof(evt->data));
     memcpy(evt->data, data, evt->len);
     QTAILQ_INSERT_TAIL(&s->pending_events, evt, next);
+    s->pending_events_count++;
 }
 
 static void vmedia_set_host_handler(VirtIOMediaSession *session, bool enable)
@@ -365,7 +813,7 @@ static void vmedia_host_fd_handler(void *opaque)
         memset(planes, 0, sizeof(planes));
         buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
                                      V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
+        buf.memory = session->host_memory;
         if (session->mplane) {
             buf.length = session->host_num_planes;
             buf.m.planes = planes;
@@ -384,25 +832,48 @@ static void vmedia_host_fd_handler(void *opaque)
             continue;
         }
 
+        if (!session->buffers[buf.index].queued) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "virtio-media: host dqbuf for unqueued buffer idx=%u session=%u\n",
+                          buf.index, session->id);
+            continue;
+        }
+
         if (session->mplane && session->host_num_planes) {
             uint32_t num_planes =
                 MIN(session->host_num_planes,
                     session->buffers[buf.index].buffer.length);
             for (uint32_t p = 0; p < num_planes; p++) {
                 uint32_t idx = buf.index * session->host_num_planes + p;
-                uint32_t bytes = planes[p].bytesused ?
-                    planes[p].bytesused : session->host_lengths[idx];
+                uint32_t bytes;
+                uint32_t fallback_len;
                 uint32_t max_len = session->buffers[buf.index].plane_lengths[p];
-                uint32_t copy_len = MIN(bytes, max_len);
+                uint32_t copy_len;
 
-                memcpy(memory_region_get_ram_ptr(&s->hostmem) +
-                       session->buffers[buf.index].plane_offsets[p],
-                       session->host_maps[idx],
-                       copy_len);
-                session->buffers[buf.index].planes[p].bytesused = bytes;
+                if (session->host_memory == V4L2_MEMORY_MMAP) {
+                    fallback_len = session->host_lengths[idx];
+                } else {
+                    fallback_len = session->buffers[buf.index].plane_lengths[p];
+                }
+                bytes = planes[p].bytesused ? planes[p].bytesused :
+                                              fallback_len;
+                copy_len = MIN(bytes, max_len);
+                /*
+                 * Mode A (regrant): the host driver DMAs straight into the
+                 * EXPBUF'd pages the guest maps, so there is no copy here.
+                 */
+                if (session->host_memory == V4L2_MEMORY_MMAP &&
+                    !session->host_regrant) {
+                    memcpy(vmedia_hostmem_base(s) +
+                           session->buffers[buf.index].plane_offsets[p],
+                           session->host_maps[idx],
+                           copy_len);
+                }
+                session->buffers[buf.index].planes[p].bytesused = copy_len;
             }
-        } else {
-            memcpy(memory_region_get_ram_ptr(&s->hostmem) +
+        } else if (session->host_memory == V4L2_MEMORY_MMAP &&
+                   !session->host_regrant) {
+            memcpy(vmedia_hostmem_base(s) +
                    session->buffers[buf.index].base_offset,
                    session->host_maps[buf.index],
                    MIN(buf.bytesused, session->host_lengths[buf.index]));
@@ -415,6 +886,7 @@ static void vmedia_host_fd_handler(void *opaque)
         }
         session->buffers[buf.index].buffer.timestamp = buf.timestamp;
 
+        vmedia_share_sync_for_buffer(s, session, buf.index);
         vmedia_emit_dqbuf(s, session, &session->buffers[buf.index]);
     }
 
@@ -460,6 +932,7 @@ static void vmedia_flush_events(VirtIOMedia *s)
         virtio_notify(&s->parent_obj, vq);
         QTAILQ_REMOVE(&s->pending_events, evt, next);
         g_free(evt);
+        s->pending_events_count--;
     }
 }
 
@@ -516,7 +989,7 @@ static void vmedia_fill_format(struct v4l2_format *fmt, uint32_t type)
 static void vmedia_generate_frame(VirtIOMedia *s, VirtIOMediaSession *session,
                                   VirtIOMediaBuffer *buf)
 {
-    uint8_t *base = memory_region_get_ram_ptr(&s->hostmem);
+    uint8_t *base = vmedia_hostmem_base(s);
     uint8_t *ptr = base + buf->base_offset;
     static const uint8_t yuv_bars[8][3] = {
         { 235, 128, 128 }, /* white */
@@ -618,11 +1091,13 @@ static void vmedia_emit_dqbuf(VirtIOMedia *s, VirtIOMediaSession *session,
     buffer->m.planes = NULL;
 
     if (session->mplane) {
-        buf->planes[0].bytesused = buf->plane_lengths[0];
-        buf->planes[1].bytesused = buf->plane_lengths[1];
-        buf->planes[2].bytesused = buf->plane_lengths[2];
+        if (!s->use_host_device) {
+            buf->planes[0].bytesused = buf->plane_lengths[0];
+            buf->planes[1].bytesused = buf->plane_lengths[1];
+            buf->planes[2].bytesused = buf->plane_lengths[2];
+        }
         memcpy(evt.planes, buf->planes, sizeof(buf->planes));
-    } else {
+    } else if (!s->use_host_device) {
         buffer->bytesused = session->buffer_size;
     }
     vmedia_queue_event(s, &evt, sizeof(evt));
@@ -703,17 +1178,42 @@ static int vmedia_alloc_buffers(VirtIOMedia *s, VirtIOMediaSession *session,
 
             buf->plane_offsets[0] = offset;
             for (uint32_t p = 0; p < num_planes; p++) {
+                uint32_t plen = plane_lengths[p];
+
                 if (p > 0) {
                     buf->plane_offsets[p] =
-                        buf->plane_offsets[p - 1] + plane_lengths[p - 1];
+                        buf->plane_offsets[p - 1] +
+                        (session->host_regrant ?
+                         ROUND_UP(plane_lengths[p - 1],
+                                  VIRTIO_MEDIA_GREF_PAGE_SIZE) :
+                         plane_lengths[p - 1]);
                 }
-                buf->plane_lengths[p] = plane_lengths[p];
-                buf_size += plane_lengths[p];
+                buf->plane_lengths[p] = plen;
+                /*
+                 * In regrant mode each plane is re-granted as a whole number of
+                 * pages; advance the synthetic layout by the page-rounded size
+                 * so plane/buffer offsets align with gref boundaries and never
+                 * overlap.
+                 */
+                buf_size += session->host_regrant ?
+                    ROUND_UP(plen, VIRTIO_MEDIA_GREF_PAGE_SIZE) : plen;
             }
         } else {
             buf->plane_offsets[0] = offset;
             buf->plane_lengths[0] = session->buffer_size;
-            buf_size = session->buffer_size;
+            buf_size = session->host_regrant ?
+                ROUND_UP(session->buffer_size, VIRTIO_MEDIA_GREF_PAGE_SIZE) :
+                session->buffer_size;
+        }
+
+        /*
+         * The synthetic plane offsets only index into the device hostmem pool
+         * in non-regrant modes. In regrant mode there is no pool (buffers are
+         * re-granted from the host EXPBUF dma-bufs), so skip the bounds check.
+         */
+        if (!session->host_regrant && offset + buf_size > s->hostmem_size) {
+            vmedia_reset_buffers(session);
+            return -ENOMEM;
         }
 
         memset(&buf->buffer, 0, sizeof(buf->buffer));
@@ -738,10 +1238,6 @@ static int vmedia_alloc_buffers(VirtIOMedia *s, VirtIOMediaSession *session,
         offset += buf_size;
     }
 
-    if (offset > s->hostmem_size) {
-        return -ENOMEM;
-    }
-
     return 0;
 }
 
@@ -752,7 +1248,7 @@ static int vmedia_find_plane(VirtIOMediaSession *session, uint32_t offset,
 
     for (i = 0; i < session->num_buffers; i++) {
         VirtIOMediaBuffer *buf = &session->buffers[i];
-        int p;
+        uint32_t p;
 
         if (!session->mplane) {
             if (buf->plane_offsets[0] == offset) {
@@ -763,7 +1259,8 @@ static int vmedia_find_plane(VirtIOMediaSession *session, uint32_t offset,
             continue;
         }
 
-        for (p = 0; p < 3; p++) {
+        for (p = 0; p < buf->buffer.length &&
+                    p < VIRTIO_MEDIA_MAX_PLANES; p++) {
             if (buf->plane_offsets[p] == offset) {
                 *addr = buf->plane_offsets[p];
                 *len = buf->plane_lengths[p];
@@ -773,6 +1270,198 @@ static int vmedia_find_plane(VirtIOMediaSession *session, uint32_t offset,
     }
 
     return -EINVAL;
+}
+
+/*
+ * Like vmedia_find_plane but also returns the (buffer, plane) indices, used by
+ * Mode A to locate the per-buffer re-granted gref array for a guest offset.
+ */
+static int vmedia_find_plane_index(VirtIOMediaSession *session, uint32_t offset,
+                                   uint32_t *buf_index, uint32_t *plane_index)
+{
+    uint32_t i;
+
+    for (i = 0; i < session->num_buffers; i++) {
+        VirtIOMediaBuffer *buf = &session->buffers[i];
+        uint32_t p;
+
+        if (!session->mplane) {
+            if (buf->plane_offsets[0] == offset) {
+                *buf_index = i;
+                *plane_index = 0;
+                return 0;
+            }
+            continue;
+        }
+
+        for (p = 0; p < buf->buffer.length &&
+                    p < VIRTIO_MEDIA_MAX_PLANES; p++) {
+            if (buf->plane_offsets[p] == offset) {
+                *buf_index = i;
+                *plane_index = p;
+                return 0;
+            }
+        }
+    }
+
+    return -EINVAL;
+}
+
+static gboolean vmedia_share_remove_for_owner_cb(gpointer key, gpointer value,
+                                                 gpointer user_data)
+{
+    VirtIOMediaShare *share = value;
+    uint32_t owner_id = *(uint32_t *)user_data;
+
+    return share->owner_session_id == owner_id;
+}
+
+static void vmedia_share_remove_for_owner(VirtIOMedia *s, uint32_t owner_id)
+{
+    if (!s->share_handles) {
+        return;
+    }
+
+    g_hash_table_foreach_remove(s->share_handles,
+                                vmedia_share_remove_for_owner_cb,
+                                &owner_id);
+}
+
+static VirtIOMediaShare *vmedia_share_lookup(VirtIOMedia *s, uint64_t handle_id)
+{
+    return g_hash_table_lookup(s->share_handles, &handle_id);
+}
+
+static void vmedia_share_sync_peer_grants(VirtIOMedia *s,
+                                          VirtIOMediaShare *share)
+{
+    GHashTableIter iter;
+    gpointer key;
+    gpointer value;
+    uint8_t *src;
+
+    if (!share->peer_grants || g_hash_table_size(share->peer_grants) == 0) {
+        return;
+    }
+
+    src = vmedia_hostmem_base(s) + share->driver_addr;
+    g_hash_table_iter_init(&iter, share->peer_grants);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        VirtIOMediaPeerGrant *pg = value;
+
+        memcpy(pg->map, src, share->len);
+    }
+}
+
+typedef struct VirtIOMediaShareSyncCtx {
+    VirtIOMedia *s;
+    uint32_t owner_session_id;
+    uint32_t buffer_index;
+} VirtIOMediaShareSyncCtx;
+
+static void vmedia_share_sync_cb(gpointer key, gpointer value,
+                                 gpointer user_data)
+{
+    VirtIOMediaShare *share = value;
+    VirtIOMediaShareSyncCtx *ctx = user_data;
+
+    if (share->owner_session_id != ctx->owner_session_id ||
+        share->buffer_index != ctx->buffer_index) {
+        return;
+    }
+
+    vmedia_share_sync_peer_grants(ctx->s, share);
+}
+
+static void vmedia_share_sync_for_buffer(VirtIOMedia *s,
+                                         VirtIOMediaSession *session,
+                                         uint32_t buffer_index)
+{
+    VirtIOMediaShareSyncCtx ctx = {
+        .s = s,
+        .owner_session_id = session->id,
+        .buffer_index = buffer_index,
+    };
+
+    if (!s->share_handles || g_hash_table_size(s->share_handles) == 0) {
+        return;
+    }
+
+    g_hash_table_foreach(s->share_handles, vmedia_share_sync_cb, &ctx);
+}
+
+static VirtIOMediaPeerGrant *
+vmedia_share_get_peer_grant(VirtIOMedia *s, VirtIOMediaShare *share,
+                            uint32_t domid, int *status)
+{
+    VirtIOMediaPeerGrant *pg;
+
+    pg = g_hash_table_lookup(share->peer_grants, GUINT_TO_POINTER(domid));
+    if (pg) {
+        *status = 0;
+        return pg;
+    }
+
+    pg = vmedia_peer_grant_new(domid, share->len, status);
+    if (!pg) {
+        return NULL;
+    }
+
+    memcpy(pg->map, vmedia_hostmem_base(s) + share->driver_addr, share->len);
+    g_hash_table_insert(share->peer_grants, GUINT_TO_POINTER(domid), pg);
+    *status = 0;
+    return pg;
+}
+
+static uint64_t vmedia_share_next_handle(VirtIOMedia *s)
+{
+    if (s->next_share_handle == 0) {
+        s->next_share_handle = 1;
+    }
+
+    return s->next_share_handle++;
+}
+
+static int vmedia_share_from_buffer(VirtIOMedia *s, VirtIOMediaSession *session,
+                                    uint32_t queue_type, uint32_t buffer_index,
+                                    uint32_t plane_index,
+                                    VirtIOMediaShare **out_share)
+{
+    VirtIOMediaBuffer *buf;
+    VirtIOMediaShare *share;
+    uint32_t num_planes;
+
+    if (queue_type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
+        queue_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        return -EINVAL;
+    }
+    if (session->mplane != (queue_type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
+        return -EINVAL;
+    }
+    if (buffer_index >= session->num_buffers) {
+        return -EINVAL;
+    }
+
+    buf = &session->buffers[buffer_index];
+    num_planes = session->mplane ? buf->buffer.length : 1;
+    if (plane_index >= num_planes) {
+        return -EINVAL;
+    }
+
+    share = g_new0(VirtIOMediaShare, 1);
+    share->handle_id = vmedia_share_next_handle(s);
+    share->owner_session_id = session->id;
+    share->queue_type = queue_type;
+    share->buffer_index = buffer_index;
+    share->plane_index = plane_index;
+    share->driver_addr = buf->plane_offsets[plane_index];
+    share->len = buf->plane_lengths[plane_index];
+    share->plane_count = num_planes;
+    share->peer_grants = g_hash_table_new_full(g_direct_hash, g_direct_equal,
+                                                NULL, vmedia_peer_grant_free);
+    *out_share = share;
+
+    return 0;
 }
 
 static int vmedia_read_planes(const struct iovec *iov, int iov_cnt,
@@ -810,6 +1499,169 @@ static int vmedia_ioctl_nointr(int fd, unsigned long req, void *arg)
 static int vmedia_proxy_ioctl(int fd, unsigned long req, void *arg)
 {
     return vmedia_ioctl_nointr(fd, req, arg);
+}
+
+/*
+ * Mode A helper: export host MMAP buffer (index, plane) as a dma-buf via
+ * VIDIOC_EXPBUF, then re-grant its pages to the guest domain with gntdev
+ * IMP_TO_REFS. On success stores the EXPBUF fd, the gntdev import fd, and the
+ * grant-ref array on the session at slot @idx. Returns 0, or negative errno.
+ */
+static int vmedia_regrant_buffer_plane(VirtIOMediaSession *session,
+                                       uint32_t buf_index, uint32_t plane,
+                                       uint32_t idx, uint32_t len)
+{
+    struct v4l2_exportbuffer expbuf;
+    uint32_t page_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+    struct vmedia_gntdev_dmabuf_imp_to_refs *imp;
+    size_t imp_sz;
+    int gntdev_fd = -1;
+    int dmabuf_fd = -1;
+    int ret;
+
+    memset(&expbuf, 0, sizeof(expbuf));
+    expbuf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                                    V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    expbuf.index = buf_index;
+    expbuf.plane = plane;
+    expbuf.flags = O_RDWR | O_CLOEXEC;
+
+    ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_EXPBUF, &expbuf);
+    if (ret < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: regrant EXPBUF failed buf=%u plane=%u: %d\n",
+                      buf_index, plane, ret);
+        return ret;
+    }
+    dmabuf_fd = expbuf.fd;
+
+    gntdev_fd = open("/dev/xen/gntdev", O_RDWR | O_CLOEXEC);
+    if (gntdev_fd < 0) {
+        ret = -errno;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: regrant open gntdev failed: %d\n", ret);
+        goto err_dmabuf;
+    }
+
+    imp_sz = sizeof(*imp) + (size_t)(page_count - 1) * sizeof(uint32_t);
+    imp = g_malloc0(imp_sz);
+    imp->fd = dmabuf_fd;
+    imp->count = page_count;
+    imp->domid = xen_domid;
+
+    ret = ioctl(gntdev_fd, VMEDIA_IOCTL_GNTDEV_DMABUF_IMP_TO_REFS, imp);
+    if (ret < 0) {
+        ret = -errno;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: regrant IMP_TO_REFS failed buf=%u plane=%u "
+                      "pages=%u domid=%u: %d\n",
+                      buf_index, plane, page_count, xen_domid, ret);
+        g_free(imp);
+        goto err_gntdev;
+    }
+
+    session->host_gref_cnts[idx] = page_count;
+    session->host_gref_ids[idx] = g_new(uint32_t, page_count);
+    memcpy(session->host_gref_ids[idx], imp->refs,
+           page_count * sizeof(uint32_t));
+    session->host_dmabuf_fds[idx] = dmabuf_fd;
+    session->host_import_fds[idx] = gntdev_fd;
+    session->host_lengths[idx] = len;
+    g_free(imp);
+    return 0;
+
+err_gntdev:
+    close(gntdev_fd);
+err_dmabuf:
+    close(dmabuf_fd);
+    return ret;
+}
+
+static bool vmedia_type_supports_userptr(int fd, uint32_t type)
+{
+    struct v4l2_requestbuffers reqbufs = { 0 };
+    int ret;
+
+    reqbufs.type = type;
+    reqbufs.memory = V4L2_MEMORY_MMAP;
+    ret = vmedia_proxy_ioctl(fd, VIDIOC_REQBUFS, &reqbufs);
+    if (ret < 0) {
+        return false;
+    }
+
+    if (reqbufs.capabilities &&
+        !(reqbufs.capabilities & V4L2_BUF_CAP_SUPPORTS_USERPTR)) {
+        return false;
+    }
+
+    memset(&reqbufs, 0, sizeof(reqbufs));
+    reqbufs.type = type;
+    reqbufs.memory = V4L2_MEMORY_USERPTR;
+    return vmedia_proxy_ioctl(fd, VIDIOC_REQBUFS, &reqbufs) == 0;
+}
+
+static bool vmedia_userptr_supported_for_type(VirtIOMedia *s, uint32_t type)
+{
+    if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+        return s->host_userptr_mplane;
+    }
+
+    return s->host_userptr_capture;
+}
+
+static int vmedia_get_host_memory_mode(VirtIOMedia *s, uint32_t type,
+                                       uint32_t *memory)
+{
+    bool supports_userptr = vmedia_userptr_supported_for_type(s, type);
+
+    switch (s->host_v4l2_mem_mode) {
+    case VMEDIA_HOST_V4L2_MEM_MMAP:
+        *memory = V4L2_MEMORY_MMAP;
+        return 0;
+    case VMEDIA_HOST_V4L2_MEM_REGRANT:
+        /* Mode A uses host MMAP buffers, then re-grants them. */
+        *memory = V4L2_MEMORY_MMAP;
+        return 0;
+    case VMEDIA_HOST_V4L2_MEM_USERPTR:
+        if (!supports_userptr) {
+            return -EINVAL;
+        }
+        *memory = V4L2_MEMORY_USERPTR;
+        return 0;
+    case VMEDIA_HOST_V4L2_MEM_AUTO:
+        *memory = supports_userptr ? V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP;
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
+static int vmedia_parse_host_v4l2_mem_mode(VirtIOMedia *s, Error **errp)
+{
+    const char *mode = s->host_v4l2_mem ? s->host_v4l2_mem : "auto";
+
+    if (!strcmp(mode, "auto")) {
+        s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_AUTO;
+        return 0;
+    }
+    if (!strcmp(mode, "mmap")) {
+        s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_MMAP;
+        return 0;
+    }
+    if (!strcmp(mode, "userptr")) {
+        s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_USERPTR;
+        return 0;
+    }
+    if (!strcmp(mode, "regrant")) {
+        s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_REGRANT;
+        return 0;
+    }
+
+    error_setg(errp,
+               "virtio-media: invalid host-v4l2-memory '%s' "
+               "(use auto|mmap|userptr|regrant)",
+               mode);
+    return -EINVAL;
 }
 
 static uint64_t vmedia_proxy_max_sizeimage_for_format(int fd,
@@ -1081,27 +1933,14 @@ static int vmedia_proxy_s_fmt(VirtIOMediaSession *session,
         return ret;
     }
 
-    if (fmt.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
-        sizeimage = 0;
-        for (int i = 0; i < fmt.fmt.pix_mp.num_planes; i++) {
-            sizeimage += fmt.fmt.pix_mp.plane_fmt[i].sizeimage;
-        }
-        if (!sizeimage) {
-            sizeimage = (uint64_t)fmt.fmt.pix_mp.width *
-                        (uint64_t)fmt.fmt.pix_mp.height * 2;
-        }
-    } else {
-        sizeimage = fmt.fmt.pix.sizeimage;
-        if (!sizeimage) {
-            sizeimage = (uint64_t)fmt.fmt.pix.width *
-                        (uint64_t)fmt.fmt.pix.height * 2;
-        }
-    }
+    sizeimage = vmedia_format_sizeimage(&fmt);
     /*
-     * Reject formats whose buffers won't fit our bounce pool, but never
+     * Reject formats whose buffers won't fit our bounce pool. Only applies
+     * when we back buffers from the pool: not in regrant-only mode (buffers
+     * are re-granted from the host's dma-bufs, hostmem_size == 0) and never
      * for TRY_FMT, which must not allocate or fail with ENOMEM.
      */
-    if (!is_try && sizeimage &&
+    if (!is_try && !session->dev->regrant_only && sizeimage &&
         (uint64_t)session->dev->max_buffers * sizeimage >
         session->dev->hostmem_size) {
         return -ENOMEM;
@@ -1131,7 +1970,9 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
                                       size_t out_off, size_t in_off)
 {
     struct v4l2_requestbuffers reqbufs;
+    struct v4l2_requestbuffers host_reqbufs;
     struct v4l2_buffer buf;
+    uint32_t host_memory;
     uint32_t i;
     int ret;
 
@@ -1144,6 +1985,14 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
          reqbufs.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ||
         reqbufs.memory != V4L2_MEMORY_MMAP) {
         return -EINVAL;
+    }
+
+    ret = vmedia_get_host_memory_mode(s, reqbufs.type, &host_memory);
+    if (ret < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: host USERPTR not supported for queue type %u\n",
+                      reqbufs.type);
+        return ret;
     }
 
     reqbufs.count = MIN(reqbufs.count, s->max_buffers);
@@ -1178,15 +2027,44 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
 
     vmedia_proxy_release_buffers(s, session);
 
-    ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &reqbufs);
+    host_reqbufs = reqbufs;
+    host_reqbufs.memory = host_memory;
+    if (host_memory == V4L2_MEMORY_USERPTR) {
+        host_reqbufs.count = 0;
+    }
+    ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &host_reqbufs);
+    if (ret < 0 && host_memory == V4L2_MEMORY_USERPTR &&
+        s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_AUTO) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: USERPTR reqbufs failed (%d), falling back to MMAP\n",
+                      ret);
+        host_memory = V4L2_MEMORY_MMAP;
+        host_reqbufs = reqbufs;
+        host_reqbufs.memory = host_memory;
+        ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
+                                 &host_reqbufs);
+    }
     if (ret < 0) {
         return ret;
     }
 
+    session->host_memory = host_memory;
     session->mplane = (reqbufs.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
     session->buffer_size = VIRTIO_MEDIA_BUFFER_SIZE_SINGLE;
     session->host_num_planes = session->mplane ? 0 : 1;
-    session->host_num_buffers = reqbufs.count;
+    /*
+     * Mode A: re-grant the host driver's own MMAP buffers to the guest instead
+     * of mmap+memcpy. Requires Xen grant refs and host MMAP buffers.
+     */
+    session->host_regrant =
+        (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_REGRANT) &&
+        s->use_grefs && host_memory == V4L2_MEMORY_MMAP;
+    if (host_memory == V4L2_MEMORY_MMAP) {
+        session->host_num_buffers = host_reqbufs.count;
+        reqbufs.count = host_reqbufs.count;
+    } else {
+        session->host_num_buffers = reqbufs.count;
+    }
 
     if (reqbufs.count == 0) {
         vmedia_reset_buffers(session);
@@ -1240,110 +2118,144 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
         }
     }
 
-    session->host_maps = g_new0(void *,
-                                reqbufs.count * session->host_num_planes);
-    session->host_lengths = g_new0(uint32_t,
-                                   reqbufs.count * session->host_num_planes);
-    session->host_offsets = g_new0(uint32_t,
-                                   reqbufs.count * session->host_num_planes);
+    if (host_memory == V4L2_MEMORY_MMAP) {
+        uint32_t nslots = reqbufs.count * session->host_num_planes;
 
-    for (i = 0; i < reqbufs.count; i++) {
-        struct v4l2_plane planes[VIRTIO_MEDIA_MAX_PLANES];
+        session->host_maps = g_new0(void *, nslots);
+        session->host_lengths = g_new0(uint32_t, nslots);
+        session->host_offsets = g_new0(uint32_t, nslots);
 
-        memset(&buf, 0, sizeof(buf));
-        memset(planes, 0, sizeof(planes));
-        buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
-                                     V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        buf.index = i;
-        if (session->mplane) {
-            buf.length = session->host_num_planes;
-            buf.m.planes = planes;
+        if (session->host_regrant) {
+            uint32_t k;
+
+            session->host_dmabuf_fds = g_new0(int, nslots);
+            session->host_import_fds = g_new0(int, nslots);
+            session->host_gref_ids = g_new0(uint32_t *, nslots);
+            session->host_gref_cnts = g_new0(uint32_t, nslots);
+            for (k = 0; k < nslots; k++) {
+                session->host_dmabuf_fds[k] = -1;
+                session->host_import_fds[k] = -1;
+            }
         }
 
-        ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QUERYBUF, &buf);
-        if (ret < 0) {
-            vmedia_proxy_release_buffers(s, session);
-            memset(&reqbufs, 0, sizeof(reqbufs));
-            reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-            reqbufs.memory = V4L2_MEMORY_MMAP;
-            vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &reqbufs);
-            return ret;
+        for (i = 0; i < reqbufs.count; i++) {
+            struct v4l2_plane planes[VIRTIO_MEDIA_MAX_PLANES];
+
+            memset(&buf, 0, sizeof(buf));
+            memset(planes, 0, sizeof(planes));
+            buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                                         V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buf.memory = V4L2_MEMORY_MMAP;
+            buf.index = i;
+            if (session->mplane) {
+                buf.length = session->host_num_planes;
+                buf.m.planes = planes;
+            }
+
+            ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QUERYBUF, &buf);
+            if (ret < 0) {
+                vmedia_proxy_release_buffers(s, session);
+                memset(&host_reqbufs, 0, sizeof(host_reqbufs));
+                host_reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                host_reqbufs.memory = V4L2_MEMORY_MMAP;
+                vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
+                                   &host_reqbufs);
+                return ret;
+            }
+
+            if (session->mplane) {
+                uint32_t p;
+
+                for (p = 0; p < session->host_num_planes; p++) {
+                    uint32_t idx = i * session->host_num_planes + p;
+
+                    session->host_offsets[idx] = planes[p].m.mem_offset;
+                    session->host_lengths[idx] = planes[p].length;
+
+                    if (session->host_regrant) {
+                        ret = vmedia_regrant_buffer_plane(session, i, p, idx,
+                                                          planes[p].length);
+                    } else {
+                        session->host_maps[idx] = mmap(NULL, planes[p].length,
+                                                       PROT_READ | PROT_WRITE,
+                                                       MAP_SHARED,
+                                                       session->host_fd,
+                                                       planes[p].m.mem_offset);
+                        ret = (session->host_maps[idx] == MAP_FAILED) ?
+                            -errno : 0;
+                        if (ret) {
+                            session->host_maps[idx] = NULL;
+                        }
+                    }
+                    if (ret) {
+                        vmedia_proxy_release_buffers(s, session);
+                        memset(&host_reqbufs, 0, sizeof(host_reqbufs));
+                        host_reqbufs.type = session->mplane ?
+                            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                            V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                        host_reqbufs.memory = V4L2_MEMORY_MMAP;
+                        vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
+                                           &host_reqbufs);
+                        return ret;
+                    }
+                }
+                if (i == 0) {
+                    uint64_t total = 0;
+
+                    for (p = 0; p < session->host_num_planes; p++) {
+                        total += session->host_lengths[p];
+                    }
+                    session->buffer_size = total ? (uint32_t)total :
+                        VIRTIO_MEDIA_BUFFER_SIZE_MPLANE;
+                }
+            } else {
+                session->host_offsets[i] = buf.m.offset;
+                session->host_lengths[i] = buf.length;
+
+                if (session->host_regrant) {
+                    ret = vmedia_regrant_buffer_plane(session, i, 0, i,
+                                                      buf.length);
+                } else {
+                    session->host_maps[i] = mmap(NULL, buf.length,
+                                                 PROT_READ | PROT_WRITE,
+                                                 MAP_SHARED, session->host_fd,
+                                                 buf.m.offset);
+                    ret = (session->host_maps[i] == MAP_FAILED) ? -errno : 0;
+                    if (ret) {
+                        session->host_maps[i] = NULL;
+                    }
+                }
+                if (ret) {
+                    vmedia_proxy_release_buffers(s, session);
+                    memset(&host_reqbufs, 0, sizeof(host_reqbufs));
+                    host_reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                    host_reqbufs.memory = V4L2_MEMORY_MMAP;
+                    vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
+                                       &host_reqbufs);
+                    return ret;
+                }
+                if (i == 0) {
+                    session->buffer_size = buf.length;
+                }
+            }
         }
 
-        if (session->mplane) {
+        if (session->mplane && session->host_num_planes) {
             uint32_t p;
 
             for (p = 0; p < session->host_num_planes; p++) {
-                uint32_t idx = i * session->host_num_planes + p;
-
-                session->host_offsets[idx] = planes[p].m.mem_offset;
-                session->host_lengths[idx] = planes[p].length;
-                session->host_maps[idx] = mmap(NULL, planes[p].length,
-                                               PROT_READ | PROT_WRITE,
-                                               MAP_SHARED,
-                                               session->host_fd,
-                                               planes[p].m.mem_offset);
-                if (session->host_maps[idx] == MAP_FAILED) {
-                    session->host_maps[idx] = NULL;
-                    ret = -errno;
-                    vmedia_proxy_release_buffers(s, session);
-                    memset(&reqbufs, 0, sizeof(reqbufs));
-                    reqbufs.type = session->mplane ?
-                        V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
-                        V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                    reqbufs.memory = V4L2_MEMORY_MMAP;
-                    vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
-                                       &reqbufs);
-                    return ret;
-                }
+                session->host_plane_lengths[p] = session->host_lengths[p];
             }
-            if (i == 0) {
-                uint64_t total = 0;
-
-                for (p = 0; p < session->host_num_planes; p++) {
-                    total += session->host_lengths[p];
-                }
-                session->buffer_size = total ? (uint32_t)total :
-                    VIRTIO_MEDIA_BUFFER_SIZE_MPLANE;
-            }
-        } else {
-            session->host_offsets[i] = buf.m.offset;
-            session->host_maps[i] = mmap(NULL, buf.length,
-                                         PROT_READ | PROT_WRITE, MAP_SHARED,
-                                         session->host_fd, buf.m.offset);
-            if (session->host_maps[i] == MAP_FAILED) {
-                session->host_maps[i] = NULL;
-                ret = -errno;
-                vmedia_proxy_release_buffers(s, session);
-                memset(&reqbufs, 0, sizeof(reqbufs));
-                reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                reqbufs.memory = V4L2_MEMORY_MMAP;
-                vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &reqbufs);
-                return ret;
-            }
-            session->host_lengths[i] = buf.length;
-            if (i == 0) {
-                session->buffer_size = buf.length;
-            }
-        }
-    }
-
-    if (session->mplane && session->host_num_planes) {
-        uint32_t p;
-
-        for (p = 0; p < session->host_num_planes; p++) {
-            session->host_plane_lengths[p] = session->host_lengths[p];
         }
     }
 
     ret = vmedia_alloc_buffers(s, session, reqbufs.count);
     if (ret < 0) {
         vmedia_proxy_release_buffers(s, session);
-        memset(&reqbufs, 0, sizeof(reqbufs));
-        reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        reqbufs.memory = V4L2_MEMORY_MMAP;
-        vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &reqbufs);
+        memset(&host_reqbufs, 0, sizeof(host_reqbufs));
+        host_reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        host_reqbufs.memory = session->host_memory;
+        vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &host_reqbufs);
         return ret;
     }
 
@@ -1454,6 +2366,7 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
 
     if (vmedia_iov_read(out_sg, out_num, out_off, &buf,
                               sizeof(buf)) != sizeof(buf)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "virtio-media: qbuf iov_read failed\n");
         return -EINVAL;
     }
 
@@ -1469,17 +2382,23 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
 
     index = buf.index;
     if (index >= session->num_buffers || index >= session->host_num_buffers) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: qbuf bad index %u (num=%u host=%u)\n",
+                      index, session->num_buffers, session->host_num_buffers);
         return -EINVAL;
     }
 
     if (session->buffers[index].queued) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: qbuf idx=%u already queued (session=%u)\n",
+                      index, session->id);
         return -EINVAL;
     }
 
     memset(&host_buf, 0, sizeof(host_buf));
     host_buf.type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
                                       V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    host_buf.memory = V4L2_MEMORY_MMAP;
+    host_buf.memory = session->host_memory;
     host_buf.index = index;
     if (session->mplane) {
         if (!session->host_num_planes ||
@@ -1496,13 +2415,56 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
         for (uint32_t p = 0; p < session->host_num_planes; p++) {
             uint32_t idx = index * session->host_num_planes + p;
 
-            planes[p].length = session->host_lengths[idx];
-            planes[p].m.mem_offset = session->host_offsets[idx];
+            if (session->host_memory == V4L2_MEMORY_MMAP) {
+                planes[p].length = session->host_lengths[idx];
+                planes[p].m.mem_offset = session->host_offsets[idx];
+            } else {
+                planes[p].length = session->buffers[index].plane_lengths[p];
+                planes[p].m.userptr =
+                    (unsigned long)(uintptr_t)
+                    (vmedia_hostmem_base(s) +
+                     session->buffers[index].plane_offsets[p]);
+            }
         }
+    } else if (session->host_memory == V4L2_MEMORY_USERPTR) {
+        host_buf.length = session->buffers[index].plane_lengths[0];
+        host_buf.m.userptr =
+            (unsigned long)(uintptr_t)
+            (vmedia_hostmem_base(s) +
+             session->buffers[index].plane_offsets[0]);
     }
 
     ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QBUF, &host_buf);
     if (ret < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: host qbuf failed ret=%d session=%u idx=%u type=%u mplane=%d len=%u flags=0x%x bytesused=%u\n",
+                      ret, session->id, index, host_buf.type, session->mplane,
+                      host_buf.length, host_buf.flags, host_buf.bytesused);
+        if (session->mplane && session->host_num_planes) {
+            for (uint32_t p = 0; p < session->host_num_planes; p++) {
+                if (session->host_memory == V4L2_MEMORY_MMAP) {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "virtio-media: host qbuf plane[%u] mem_offset=0x%x length=%u bytesused=%u data_offset=%u\n",
+                                  p, planes[p].m.mem_offset, planes[p].length,
+                                  planes[p].bytesused, planes[p].data_offset);
+                } else {
+                    qemu_log_mask(LOG_GUEST_ERROR,
+                                  "virtio-media: host qbuf plane[%u] userptr=0x%lx length=%u bytesused=%u data_offset=%u\n",
+                                  p, planes[p].m.userptr, planes[p].length,
+                                  planes[p].bytesused, planes[p].data_offset);
+                }
+            }
+        } else {
+            if (session->host_memory == V4L2_MEMORY_MMAP) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "virtio-media: host qbuf single mem_offset=0x%x\n",
+                              host_buf.m.offset);
+            } else {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "virtio-media: host qbuf single userptr=0x%lx len=%u\n",
+                              host_buf.m.userptr, host_buf.length);
+            }
+        }
         return ret;
     }
 
@@ -1984,9 +2946,16 @@ static int vmedia_proxy_ext_ctrls(VirtIOMediaSession *session,
         buf = g_malloc0(total);
         memcpy(buf, &ctrls, sizeof(ctrls));
     } else {
-        size_t controls_size = ctrls.count * sizeof(*controls);
-        size_t base = sizeof(ctrls) + controls_size;
+        size_t controls_size;
+        size_t base;
         size_t out_len = iov_size(out_sg, out_num);
+
+        if (ctrls.count > VIRTIO_MEDIA_MAX_EXT_CTRLS) {
+            return -EINVAL;
+        }
+
+        controls_size = ctrls.count * sizeof(*controls);
+        base = sizeof(ctrls) + controls_size;
 
         if (out_len < out_off + base) {
             return -EINVAL;
@@ -2000,6 +2969,10 @@ static int vmedia_proxy_ext_ctrls(VirtIOMediaSession *session,
         }
 
         for (i = 0; i < ctrls.count; i++) {
+            if (controls[i].size > VIRTIO_MEDIA_MAX_EXT_CTRL_SIZE) {
+                g_free(controls);
+                return -EINVAL;
+            }
             data_size += controls[i].size;
         }
         g_free(controls);
@@ -2388,6 +3361,7 @@ static int vmedia_ioctl_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
         QTAILQ_REMOVE(&session->queued_buffers, qbuf, next);
         qbuf->queued = false;
         vmedia_generate_frame(s, session, qbuf);
+        vmedia_share_sync_for_buffer(s, session, qbuf->index);
         vmedia_emit_dqbuf(s, session, qbuf);
         vmedia_flush_events(s);
     }
@@ -2437,6 +3411,7 @@ static int vmedia_ioctl_streamon(VirtIOMedia *s, VirtIOMediaSession *session,
         QTAILQ_REMOVE(&session->queued_buffers, qbuf, next);
         qbuf->queued = false;
         vmedia_generate_frame(s, session, qbuf);
+        vmedia_share_sync_for_buffer(s, session, qbuf->index);
         vmedia_emit_dqbuf(s, session, qbuf);
     }
     vmedia_flush_events(s);
@@ -3008,20 +3983,269 @@ static void vmedia_handle_command(VirtIODevice *vdev, VirtQueue *vq)
         vmedia_flush_events(s);
         break;
     }
+    case VIRTIO_MEDIA_CMD_EXPORT_BUFFER: {
+        struct virtio_media_cmd_export_buffer export_cmd;
+        struct virtio_media_resp_export_buffer resp = { 0 };
+        VirtIOMediaSession *session;
+        VirtIOMediaShare *share = NULL;
+        uint32_t id;
+        int status = 0;
+
+        if (in_len < sizeof(resp)) {
+            virtio_error(vdev, "virtio-media: short EXPORT response buffer");
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+        if (!virtio_vdev_has_feature(vdev, VIRTIO_MEDIA_F_EXPORT_IMPORT)) {
+            status = -EOPNOTSUPP;
+            goto export_respond;
+        }
+        if (vmedia_iov_read(elem->out_sg, elem->out_num, 0,
+                            &export_cmd,
+                            sizeof(export_cmd)) != sizeof(export_cmd)) {
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: EXPORT cmd session=%u qtype=%u idx=%u plane=%u\n",
+                      le32_to_cpu(export_cmd.session_id),
+                      le32_to_cpu(export_cmd.queue_type),
+                      le32_to_cpu(export_cmd.buffer_index),
+                      le32_to_cpu(export_cmd.plane_index));
+
+        id = le32_to_cpu(export_cmd.session_id);
+        session = g_hash_table_lookup(s->sessions, GUINT_TO_POINTER(id));
+        if (!session) {
+            status = -EINVAL;
+            goto export_respond;
+        }
+
+        status = vmedia_share_from_buffer(s, session,
+                                          le32_to_cpu(export_cmd.queue_type),
+                                          le32_to_cpu(export_cmd.buffer_index),
+                                          le32_to_cpu(export_cmd.plane_index),
+                                          &share);
+        if (status < 0) {
+            goto export_respond;
+        }
+
+        {
+            guint64 *key = g_new(guint64, 1);
+            *key = share->handle_id;
+            g_hash_table_insert(s->share_handles, key, share);
+        }
+
+        resp.handle_id = cpu_to_le64(share->handle_id);
+        resp.len = cpu_to_le64(share->len);
+        resp.plane_count = cpu_to_le32(share->plane_count);
+
+export_respond:
+        if (status < 0 && share) {
+            g_free(share);
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: EXPORT resp status=%d handle=%" PRIu64
+                      " len=%" PRIu64 "\n",
+                      status, (uint64_t)le64_to_cpu(resp.handle_id),
+                      (uint64_t)le64_to_cpu(resp.len));
+        vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
+        vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
+        virtqueue_push(vq, elem, sizeof(resp));
+        break;
+    }
+    case VIRTIO_MEDIA_CMD_IMPORT_BUFFER: {
+        struct virtio_media_cmd_import_buffer import_cmd;
+        struct virtio_media_resp_import_buffer resp = { 0 };
+        VirtIOMediaSession *session;
+        VirtIOMediaShare *share;
+        VirtIOMediaPeerGrant *peer_grant = NULL;
+        size_t resp_len;
+        uint32_t id;
+        uint32_t flags = 0;
+        uint32_t import_domid = 0;
+        uint64_t addr = 0;
+        uint64_t len = 0;
+        int status = 0;
+
+        if (!virtio_vdev_has_feature(vdev, VIRTIO_MEDIA_F_EXPORT_IMPORT)) {
+            status = -EOPNOTSUPP;
+            goto import_respond;
+        }
+        if (vmedia_iov_read(elem->out_sg, elem->out_num, 0,
+                            &import_cmd,
+                            sizeof(import_cmd)) != sizeof(import_cmd)) {
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+
+        flags = le32_to_cpu(import_cmd.flags);
+        if (flags & VIRTIO_MEDIA_IMPORT_F_TARGET_DOMID) {
+            import_domid = (flags >> VIRTIO_MEDIA_IMPORT_DOMID_SHIFT) &
+                           VIRTIO_MEDIA_IMPORT_DOMID_MASK;
+            if (!import_domid) {
+                status = -EINVAL;
+                goto import_respond;
+            }
+            if (!virtio_vdev_has_feature(vdev,
+                                         VIRTIO_MEDIA_F_PEER_GREF_IMPORT)) {
+                status = -EOPNOTSUPP;
+                goto import_respond;
+            }
+        }
+
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: IMPORT cmd session=%u handle=%" PRIu64
+                      " flags=0x%x domid=%u\n",
+                      le32_to_cpu(import_cmd.session_id),
+                      (uint64_t)le64_to_cpu(import_cmd.handle_id),
+                      flags, import_domid);
+
+        id = le32_to_cpu(import_cmd.session_id);
+        session = g_hash_table_lookup(s->sessions, GUINT_TO_POINTER(id));
+        if (!session) {
+            status = -EINVAL;
+            goto import_respond;
+        }
+
+        share = vmedia_share_lookup(s, le64_to_cpu(import_cmd.handle_id));
+        if (!share) {
+            status = -ENOENT;
+            goto import_respond;
+        }
+        addr = share->driver_addr;
+        len = share->len;
+
+        if (import_domid) {
+            peer_grant = vmedia_share_get_peer_grant(s, share, import_domid,
+                                                     &status);
+            if (!peer_grant) {
+                goto import_respond;
+            }
+        }
+
+import_respond:
+        vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
+        resp.driver_addr = cpu_to_le64(addr);
+        resp.len = cpu_to_le64(len);
+        resp.gref_count = 0;
+        resp.gref_page_size = 0;
+        resp.gref_domid = 0;
+        resp.pad = 0;
+
+        if (s->use_grefs && status == 0) {
+            uint32_t gref_start;
+            uint32_t gref_count;
+            size_t needed;
+
+            if (peer_grant) {
+                gref_start = 0;
+                gref_count = peer_grant->gref_count;
+            } else {
+                gref_start = addr / VIRTIO_MEDIA_GREF_PAGE_SIZE;
+                gref_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            }
+            needed = sizeof(resp) + (size_t)gref_count * sizeof(uint32_t);
+            if (in_len < needed ||
+                (!peer_grant &&
+                 (uint64_t)gref_start + gref_count > s->gref_count)) {
+                vmedia_write_resp_header(&resp.hdr, ENOSPC);
+                vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                                 &resp, sizeof(resp));
+                virtqueue_push(vq, elem, sizeof(resp));
+                break;
+            }
+
+            resp.gref_count = cpu_to_le32(gref_count);
+            resp.gref_page_size = cpu_to_le32(VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            resp.gref_domid = cpu_to_le32(peer_grant ? import_domid : 0);
+
+            vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
+            {
+                uint32_t i;
+                g_autofree uint32_t *grefs = g_new(uint32_t, gref_count);
+
+                for (i = 0; i < gref_count; i++) {
+                    grefs[i] = cpu_to_le32(peer_grant ?
+                                           peer_grant->grefs[i] :
+                                           s->grefs[gref_start + i]);
+                }
+                vmedia_iov_write(elem->in_sg, elem->in_num, sizeof(resp),
+                                 grefs, gref_count * sizeof(uint32_t));
+            }
+            resp_len = needed;
+        } else {
+            if (in_len < sizeof(resp)) {
+                virtio_error(vdev,
+                             "virtio-media: short IMPORT response buffer");
+                virtqueue_push(vq, elem, 0);
+                break;
+            }
+            vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
+            resp_len = sizeof(resp);
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: IMPORT resp status=%d addr=0x%" PRIx64
+                      " len=0x%" PRIx64 " grefs=%u\n",
+                      status, (uint64_t)addr, (uint64_t)len,
+                      (uint32_t)le32_to_cpu(resp.gref_count));
+        virtqueue_push(vq, elem, resp_len);
+        break;
+    }
+    case VIRTIO_MEDIA_CMD_RELEASE_HANDLE: {
+        struct virtio_media_cmd_release_handle release_cmd;
+        struct virtio_media_resp_release_handle resp = { 0 };
+        int status = 0;
+
+        if (in_len < sizeof(resp)) {
+            virtio_error(vdev, "virtio-media: short RELEASE response buffer");
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+        if (!virtio_vdev_has_feature(vdev, VIRTIO_MEDIA_F_EXPORT_IMPORT)) {
+            status = -EOPNOTSUPP;
+            goto release_respond;
+        }
+        if (vmedia_iov_read(elem->out_sg, elem->out_num, 0,
+                            &release_cmd,
+                            sizeof(release_cmd)) != sizeof(release_cmd)) {
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: RELEASE cmd handle=%" PRIu64 "\n",
+                      (uint64_t)le64_to_cpu(release_cmd.handle_id));
+        {
+            uint64_t handle_id = le64_to_cpu(release_cmd.handle_id);
+            if (!g_hash_table_remove(s->share_handles, &handle_id)) {
+                status = -ENOENT;
+            }
+        }
+
+release_respond:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: RELEASE resp status=%d\n", status);
+        vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
+        vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
+        virtqueue_push(vq, elem, sizeof(resp));
+        break;
+    }
     case VIRTIO_MEDIA_CMD_MMAP: {
         struct virtio_media_cmd_mmap mmap_cmd;
         struct virtio_media_resp_mmap resp;
+        size_t resp_len;
         VirtIOMediaSession *session;
         uint64_t addr = 0;
         uint64_t len = 0;
         uint32_t id;
         int status;
-
-        if (in_len < sizeof(resp)) {
-            virtio_error(vdev, "virtio-media: short MMAP response buffer");
-            virtqueue_push(vq, elem, 0);
-            break;
-        }
+        /*
+         * Only emit the grant-ref extension when the guest negotiated GNTREF.
+         * A grant-unaware driver (e.g. upstream) posts a base-sized response
+         * buffer; gating on the device capability alone would overrun it.
+         */
+        bool grefs_acked = s->use_grefs &&
+            virtio_vdev_has_feature(vdev, VIRTIO_MEDIA_F_GNTREF);
 
         if (vmedia_iov_read(elem->out_sg, elem->out_num, 0,
                             &mmap_cmd,
@@ -3043,9 +4267,112 @@ static void vmedia_handle_command(VirtIODevice *vdev, VirtQueue *vq)
         vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
         resp.driver_addr = cpu_to_le64(addr);
         resp.len = cpu_to_le64(len);
-        vmedia_iov_write(elem->in_sg, elem->in_num, 0,
-                               &resp, sizeof(resp));
-        virtqueue_push(vq, elem, sizeof(resp));
+        resp.gref_count = 0;
+        resp.gref_page_size = 0;
+        resp.gref_domid = 0;
+        resp.pad = 0;
+
+        if (grefs_acked && status == 0 && session->host_regrant) {
+            /*
+             * Mode A: return the grant refs for the host driver's own
+             * EXPBUF'd buffer pages (set up at REQBUFS), so the guest maps
+             * the actual capture buffer with no per-frame copy.
+             */
+            uint32_t bi = 0, pi = 0;
+            uint32_t planes = session->host_num_planes ?
+                              session->host_num_planes : 1;
+            uint32_t slot;
+            uint32_t gref_count;
+            const uint32_t *src;
+            size_t needed;
+
+            if (vmedia_find_plane_index(session, le32_to_cpu(mmap_cmd.offset),
+                                        &bi, &pi) < 0) {
+                vmedia_write_resp_header(&resp.hdr, EINVAL);
+                vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                                 &resp, sizeof(resp));
+                virtqueue_push(vq, elem, sizeof(resp));
+                break;
+            }
+            slot = bi * planes + pi;
+            gref_count = session->host_gref_cnts[slot];
+            src = session->host_gref_ids[slot];
+            needed = sizeof(resp) + (size_t)gref_count * sizeof(uint32_t);
+            if (!src || !gref_count || in_len < needed) {
+                vmedia_write_resp_header(&resp.hdr, ENOSPC);
+                vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                                 &resp, sizeof(resp));
+                virtqueue_push(vq, elem, sizeof(resp));
+                break;
+            }
+
+            resp.gref_count = cpu_to_le32(gref_count);
+            resp.gref_page_size = cpu_to_le32(VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            resp.gref_domid = cpu_to_le32(0); /* dom0-granted */
+            vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
+            {
+                uint32_t i;
+                g_autofree uint32_t *grefs = g_new(uint32_t, gref_count);
+
+                for (i = 0; i < gref_count; i++) {
+                    grefs[i] = cpu_to_le32(src[i]);
+                }
+                vmedia_iov_write(elem->in_sg, elem->in_num, sizeof(resp),
+                                 grefs, gref_count * sizeof(uint32_t));
+            }
+            resp_len = needed;
+        } else if (grefs_acked && status == 0) {
+            uint32_t gref_start;
+            uint32_t gref_count;
+            size_t needed;
+
+            gref_start = addr / VIRTIO_MEDIA_GREF_PAGE_SIZE;
+            gref_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            needed = sizeof(resp) + (size_t)gref_count * sizeof(uint32_t);
+            if (in_len < needed ||
+                (uint64_t)gref_start + gref_count > s->gref_count) {
+                vmedia_write_resp_header(&resp.hdr, ENOSPC);
+                vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                                 &resp, sizeof(resp));
+                virtqueue_push(vq, elem, sizeof(resp));
+                break;
+            }
+
+            resp.gref_count = cpu_to_le32(gref_count);
+            resp.gref_page_size = cpu_to_le32(VIRTIO_MEDIA_GREF_PAGE_SIZE);
+            /* gntalloc grants pages from dom0. */
+            resp.gref_domid = cpu_to_le32(0);
+
+            vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                             &resp, sizeof(resp));
+            {
+                uint32_t i;
+                g_autofree uint32_t *grefs = g_new(uint32_t, gref_count);
+
+                for (i = 0; i < gref_count; i++) {
+                    grefs[i] = cpu_to_le32(s->grefs[gref_start + i]);
+                }
+                vmedia_iov_write(elem->in_sg, elem->in_num, sizeof(resp),
+                                 grefs,
+                                 gref_count * sizeof(uint32_t));
+            }
+            resp_len = needed;
+        } else {
+            /*
+             * No grant extension: respond with the spec-sized struct only
+             * (hdr, driver_addr, len). Writing sizeof(resp) would include the
+             * grant fields and overrun a grant-unaware driver's buffer.
+             */
+            if (in_len < VIRTIO_MEDIA_RESP_MMAP_BASE_SIZE) {
+                virtio_error(vdev, "virtio-media: short MMAP response buffer");
+                virtqueue_push(vq, elem, 0);
+                break;
+            }
+            vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                             &resp, VIRTIO_MEDIA_RESP_MMAP_BASE_SIZE);
+            resp_len = VIRTIO_MEDIA_RESP_MMAP_BASE_SIZE;
+        }
+        virtqueue_push(vq, elem, resp_len);
         break;
     }
     case VIRTIO_MEDIA_CMD_MUNMAP: {
@@ -3102,6 +4429,14 @@ static void vmedia_get_config(VirtIODevice *vdev, uint8_t *config_data)
 static uint64_t vmedia_get_features(VirtIODevice *vdev, uint64_t f,
                                           Error **errp)
 {
+    VirtIOMedia *s = VIRTIO_MEDIA(vdev);
+
+    if (s->use_grefs) {
+        f |= (1ULL << VIRTIO_MEDIA_F_GNTREF);
+        f |= (1ULL << VIRTIO_MEDIA_F_PEER_GREF_IMPORT);
+    }
+    f |= (1ULL << VIRTIO_MEDIA_F_EXPORT_IMPORT);
+    f |= (1ULL << VIRTIO_MEDIA_F_SHARE_FENCE);
     return f;
 }
 
@@ -3134,16 +4469,32 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
     struct v4l2_capability cap;
     struct v4l2_format fmt;
     uint64_t buffer_size = VIRTIO_MEDIA_BUFFER_SIZE_MPLANE;
+    bool use_grefs = xen_enabled() && s->xen_grants;
     int caps;
 
     if (s->max_buffers == 0) {
         s->max_buffers = 8;
     }
 
+    if (vmedia_parse_host_v4l2_mem_mode(s, errp) < 0) {
+        return;
+    }
+
+    if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_REGRANT && !use_grefs) {
+        error_setg(errp,
+                   "virtio-media: host-v4l2-memory=regrant requires Xen grant "
+                   "references; not available (xen-grants disabled or not "
+                   "running under Xen)");
+        return;
+    }
+
     s->use_host_device = false;
+    s->host_userptr_capture = false;
+    s->host_userptr_mplane = false;
 
     if (s->host_device) {
         uint64_t max_sizeimage;
+        int host_caps;
         int host_fd;
 
         host_fd = open(s->host_device, O_RDWR | O_NONBLOCK);
@@ -3162,17 +4513,49 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
 
         memset(&fmt, 0, sizeof(fmt));
         fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        if (vmedia_ioctl_nointr(host_fd, VIDIOC_G_FMT, &fmt) == 0 &&
-            fmt.fmt.pix.sizeimage > 0) {
-            buffer_size = fmt.fmt.pix.sizeimage;
+        if (vmedia_ioctl_nointr(host_fd, VIDIOC_G_FMT, &fmt) == 0) {
+            buffer_size = MAX(buffer_size, vmedia_format_sizeimage(&fmt));
         }
 
-        max_sizeimage = vmedia_proxy_max_sizeimage(host_fd);
-        if (max_sizeimage > buffer_size) {
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        if (vmedia_ioctl_nointr(host_fd, VIDIOC_G_FMT, &fmt) == 0) {
+            buffer_size = MAX(buffer_size, vmedia_format_sizeimage(&fmt));
+        }
+
+        max_sizeimage = use_grefs ? 0 : vmedia_proxy_max_sizeimage(host_fd);
+        if (!use_grefs && max_sizeimage > buffer_size) {
             buffer_size = max_sizeimage;
         }
 
-        caps = cap.device_caps ? cap.device_caps : cap.capabilities;
+        host_caps = cap.device_caps ? cap.device_caps : cap.capabilities;
+        if (host_caps & V4L2_CAP_STREAMING) {
+            if (host_caps & V4L2_CAP_VIDEO_CAPTURE) {
+                s->host_userptr_capture =
+                    vmedia_type_supports_userptr(host_fd,
+                                                 V4L2_BUF_TYPE_VIDEO_CAPTURE);
+            }
+            if (host_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) {
+                s->host_userptr_mplane =
+                    vmedia_type_supports_userptr(
+                        host_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+            }
+        }
+
+        if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_USERPTR &&
+            !s->host_userptr_capture && !s->host_userptr_mplane) {
+            error_setg(errp,
+                       "virtio-media: host-v4l2-memory=userptr requested but host device does not support USERPTR");
+            close(host_fd);
+            return;
+        }
+
+        caps = host_caps;
+        /*
+         * Do not advertise V4L2_CAP_READWRITE: the proxy only implements the
+         * streaming (QBUF/DQBUF) API, not read()/write(), so claiming it would
+         * be a conformance lie.
+         */
         caps &= V4L2_CAP_VIDEO_CAPTURE |
             V4L2_CAP_VIDEO_CAPTURE_MPLANE |
             V4L2_CAP_STREAMING |
@@ -3194,15 +4577,46 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
     s->config.device_type = cpu_to_le32(0);
 
     s->hostmem_size = pow2ceil((uint64_t)s->max_buffers * buffer_size);
-    memory_region_init_ram(&s->hostmem, OBJECT(s), "virtio-media-hostmem",
-                           s->hostmem_size, errp);
-    if (*errp) {
-        return;
+    s->hostmem_buf = NULL;
+    s->use_grefs = use_grefs;
+    s->gntalloc_fd = -1;
+    s->gntalloc_index = 0;
+    s->gref_count = 0;
+    s->grefs = NULL;
+
+    /*
+     * In regrant-only mode the per-buffer pages are re-granted from the host
+     * device's EXPBUF'd dma-bufs (per session, at REQBUFS time), so the
+     * device-wide gntalloc pool / hostmem RAM region is never read or written.
+     * Skip allocating it entirely: this avoids exhausting the dom0 gntalloc
+     * limit when scaling guests, and lets buffer size grow at runtime (e.g.
+     * higher resolution) without being capped by a pool fixed at realize.
+     */
+    s->regrant_only = s->use_host_device && use_grefs &&
+                      s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_REGRANT;
+
+    if (s->regrant_only) {
+        s->hostmem_size = 0;
+    } else if (s->use_grefs) {
+        if (!vmedia_gntalloc_init(s, errp)) {
+            return;
+        }
+    } else {
+        memory_region_init_ram(&s->hostmem, OBJECT(s),
+                               "virtio-media-hostmem",
+                               s->hostmem_size, errp);
+        if (*errp) {
+            return;
+        }
+        s->hostmem_buf = memory_region_get_ram_ptr(&s->hostmem);
     }
 
     s->use_hostmem = true;
     s->session_next_id = 1;
+    s->next_share_handle = 1;
     s->sessions = g_hash_table_new(g_direct_hash, g_direct_equal);
+    s->share_handles = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                             g_free, vmedia_share_free);
     QTAILQ_INIT(&s->pending_events);
 
     virtio_init(vdev, VIRTIO_ID_MEDIA, sizeof(s->config));
@@ -3212,36 +4626,78 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
                                    vmedia_handle_event);
 }
 
-static void vmedia_unrealize(DeviceState *dev)
+static void vmedia_drain_pending_events(VirtIOMedia *s)
 {
-    VirtIOMedia *s = VIRTIO_MEDIA(dev);
-    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
+    while (!QTAILQ_EMPTY(&s->pending_events)) {
+        VirtIOMediaEvent *evt = QTAILQ_FIRST(&s->pending_events);
+
+        QTAILQ_REMOVE(&s->pending_events, evt, next);
+        g_free(evt);
+    }
+    s->pending_events_count = 0;
+}
+
+/*
+ * Tear down all per-session state (host fds, host maps, buffers, grants) and
+ * the pending event backlog. Called on device reset (guest reboot) and reused
+ * by unrealize. Without this, a guest reset would leak host fds/grants and
+ * leave stale sessions that the next guest could reference.
+ */
+static void vmedia_free_all_sessions(VirtIOMedia *s)
+{
     GHashTableIter iter;
     gpointer key;
     gpointer value;
-    VirtIOMediaEvent *evt;
+
+    if (!s->sessions) {
+        return;
+    }
 
     g_hash_table_iter_init(&iter, s->sessions);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
         vmedia_session_free(s, value);
     }
+    g_hash_table_remove_all(s->sessions);
+}
+
+static void vmedia_reset(VirtIODevice *vdev)
+{
+    VirtIOMedia *s = VIRTIO_MEDIA(vdev);
+
+    vmedia_free_all_sessions(s);
+    if (s->share_handles) {
+        g_hash_table_remove_all(s->share_handles);
+    }
+    vmedia_drain_pending_events(s);
+}
+
+static void vmedia_unrealize(DeviceState *dev)
+{
+    VirtIOMedia *s = VIRTIO_MEDIA(dev);
+    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
+
+    vmedia_free_all_sessions(s);
     g_hash_table_destroy(s->sessions);
     s->sessions = NULL;
+    g_hash_table_destroy(s->share_handles);
+    s->share_handles = NULL;
 
-    while (!QTAILQ_EMPTY(&s->pending_events)) {
-        evt = QTAILQ_FIRST(&s->pending_events);
-        QTAILQ_REMOVE(&s->pending_events, evt, next);
-        g_free(evt);
-    }
+    vmedia_drain_pending_events(s);
 
     virtio_del_queue(vdev, VIRTIO_MEDIA_EVENT_VQ);
     virtio_del_queue(vdev, VIRTIO_MEDIA_COMMAND_VQ);
     virtio_cleanup(vdev);
+
+    if (s->use_grefs) {
+        vmedia_gntalloc_cleanup(s);
+    }
 }
 
 static const Property virtio_media_properties[] = {
     DEFINE_PROP_UINT32("max-buffers", VirtIOMedia, max_buffers, 8),
     DEFINE_PROP_STRING("host-device", VirtIOMedia, host_device),
+    DEFINE_PROP_STRING("host-v4l2-memory", VirtIOMedia, host_v4l2_mem),
+    DEFINE_PROP_BOOL("xen-grants", VirtIOMedia, xen_grants, true),
 };
 
 static void vmedia_class_init(ObjectClass *klass, const void *data)
@@ -3253,6 +4709,7 @@ static void vmedia_class_init(ObjectClass *klass, const void *data)
     dc->vmsd = &vmstate_virtio_media;
     vdc->realize = vmedia_realize;
     vdc->unrealize = vmedia_unrealize;
+    vdc->reset = vmedia_reset;
     vdc->get_config = vmedia_get_config;
     vdc->get_features = vmedia_get_features;
 }
