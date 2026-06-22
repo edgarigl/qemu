@@ -59,6 +59,8 @@ struct virtio_gpu_simple_resource {
     void *blob;
     int dmabuf_fd;
     uint8_t *remapped;
+    uint8_t uuid[16];
+    bool uuid_set;
 
     QTAILQ_ENTRY(virtio_gpu_simple_resource) next;
 };

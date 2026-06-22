@@ -19,6 +19,8 @@
 #include "hw/virtio/virtio-gpu.h"
 #include "hw/virtio/virtio-gpu-bswap.h"
 #include "hw/virtio/virtio-gpu-pixman.h"
+#include "hw/virtio/virtio-dmabuf.h"
+#include "qemu/uuid.h"
 
 #include "ui/egl-helpers.h"
 
@@ -872,6 +874,59 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
 }
 #endif
 
+static void virgl_cmd_resource_assign_uuid(VirtIOGPU *g,
+                                           struct virtio_gpu_ctrl_command *cmd)
+{
+    struct virtio_gpu_resource_assign_uuid au;
+    struct virtio_gpu_resp_resource_uuid resp;
+    struct virtio_gpu_virgl_resource *res;
+
+    VIRTIO_GPU_FILL_CMD(au);
+    virtio_gpu_bswap_32(&au, sizeof(au));
+
+    res = virtio_gpu_virgl_find_resource(g, au.resource_id);
+    if (!res) {
+        qemu_log_mask(LOG_GUEST_ERROR, "%s: resource does not exist %d\n",
+                      __func__, au.resource_id);
+        cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
+        return;
+    }
+
+    if (!res->base.uuid_set) {
+        QemuUUID uuid;
+        qemu_uuid_generate(&uuid);
+        memcpy(res->base.uuid, uuid.data, sizeof(res->base.uuid));
+        res->base.uuid_set = true;
+        int dfd = res->base.dmabuf_fd;
+        if (dfd < 0) {
+            /* Non-blob (e.g. gbm 3D) resource: export its host dmabuf so it can
+             * be resolved by UUID (used by virtio-media import-uuid mode). */
+            struct virgl_renderer_resource_info info;
+            if (virgl_renderer_resource_get_info(au.resource_id, &info) == 0) {
+                dfd = info.fd;
+            }
+        }
+        if (dfd >= 0) {
+            /* NOTE: virtio_add_resource() stores the key BY REFERENCE (no
+             * key copy, key_destroy=NULL).  Must pass persistent storage, not
+             * the stack-local "uuid" above, or lookups dereference garbage. */
+            virtio_add_dmabuf((QemuUUID *)res->base.uuid, dfd);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: registered res %d host dmabuf %d in uuid table\n",
+                          __func__, au.resource_id, dfd);
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: res %d has no host dmabuf (uuid only)\n",
+                          __func__, au.resource_id);
+        }
+    }
+
+    memset(&resp, 0, sizeof(resp));
+    resp.hdr.type = VIRTIO_GPU_RESP_OK_RESOURCE_UUID;
+    memcpy(resp.uuid, res->base.uuid, sizeof(resp.uuid));
+    virtio_gpu_ctrl_response(g, cmd, &resp.hdr, sizeof(resp));
+}
+
 void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
                                       struct virtio_gpu_ctrl_command *cmd)
 {
@@ -954,6 +1009,9 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
         virgl_cmd_set_scanout_blob(g, cmd);
         break;
 #endif
+    case VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID:
+        virgl_cmd_resource_assign_uuid(g, cmd);
+        break;
     default:
         cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
         break;
