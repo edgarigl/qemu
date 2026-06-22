@@ -144,6 +144,7 @@ static void virtio_gpu_gl_device_realize(DeviceState *qdev, Error **errp)
     }
 
     g->parent_obj.conf.flags |= (1 << VIRTIO_GPU_FLAG_VIRGL_ENABLED);
+    g->parent_obj.conf.flags |= (1 << VIRTIO_GPU_FLAG_RESOURCE_UUID_ENABLED);
     g->capset_ids = virtio_gpu_virgl_get_capsets(g);
     VIRTIO_GPU_BASE(g)->virtio_config.num_capsets = g->capset_ids->len;
 

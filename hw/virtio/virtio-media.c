@@ -26,6 +26,7 @@
 #include <glib.h>
 #include <linux/ioctl.h>
 #include <linux/videodev2.h>
+#include "hw/virtio/virtio-dmabuf.h"
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -53,6 +54,19 @@ struct vmedia_gntdev_dmabuf_imp_release {
 #define VMEDIA_IOCTL_GNTDEV_DMABUF_IMP_RELEASE \
     _IOC(_IOC_NONE, 'G', 12, sizeof(struct vmedia_gntdev_dmabuf_imp_release))
 
+/*
+ * dma-heap ABI (from linux/dma-heap.h). Defined locally to match the
+ * gntdev-struct convention above and avoid UAPI header dependencies.
+ */
+struct vmedia_dma_heap_allocation_data {
+    uint64_t len;
+    uint32_t fd;
+    uint32_t fd_flags;
+    uint64_t heap_flags;
+};
+#define VMEDIA_DMA_HEAP_IOCTL_ALLOC \
+    _IOWR('H', 0x0, struct vmedia_dma_heap_allocation_data)
+
 #define VIRTIO_MEDIA_COMMAND_VQ 0
 #define VIRTIO_MEDIA_EVENT_VQ   1
 #define VIRTIO_MEDIA_NUM_VQS    2
@@ -68,6 +82,7 @@ struct vmedia_gntdev_dmabuf_imp_release {
 #define VIRTIO_MEDIA_CMD_EXPORT_BUFFER 6
 #define VIRTIO_MEDIA_CMD_IMPORT_BUFFER 7
 #define VIRTIO_MEDIA_CMD_RELEASE_HANDLE 8
+#define VIRTIO_MEDIA_CMD_REGISTER_BUFFER 9
 
 #define VIRTIO_MEDIA_EVT_ERROR  0
 #define VIRTIO_MEDIA_EVT_DQBUF  1
@@ -88,6 +103,7 @@ struct vmedia_gntdev_dmabuf_imp_release {
 #define VIRTIO_MEDIA_F_EXPORT_IMPORT 62
 #define VIRTIO_MEDIA_F_SHARE_FENCE 61
 #define VIRTIO_MEDIA_F_PEER_GREF_IMPORT 60
+#define VIRTIO_MEDIA_F_IMPORT_BUFFER 59
 #define VIRTIO_MEDIA_GREF_PAGE_SIZE 4096u
 
 #define VIRTIO_MEDIA_IMPORT_F_TARGET_DOMID (1U << 1)
@@ -109,6 +125,10 @@ typedef enum VirtIOMediaHostV4L2MemMode {
     VMEDIA_HOST_V4L2_MEM_USERPTR,
     /* Mode A: host MMAP + EXPBUF + gntdev re-grant */
     VMEDIA_HOST_V4L2_MEM_REGRANT,
+    /* Import: dma-heap host dmabuf + downstream DMABUF + gntdev re-grant */
+    VMEDIA_HOST_V4L2_MEM_IMPORT,
+    /* Import-UUID: guest virtio-gpu blob (UUID) resolved to a host dmabuf */
+    VMEDIA_HOST_V4L2_MEM_IMPORT_UUID,
 } VirtIOMediaHostV4L2MemMode;
 
 static int vmedia_ioctl_nointr(int fd, unsigned long req, void *arg);
@@ -324,6 +344,16 @@ struct virtio_media_cmd_import_buffer {
     uint64_t handle_id;
 };
 
+struct virtio_media_cmd_register_buffer {
+    struct virtio_media_cmd_header hdr;
+    uint32_t session_id;
+    uint32_t buffer_index;
+    uint8_t uuid[16];
+};
+struct virtio_media_resp_register_buffer {
+    struct virtio_media_resp_header hdr;
+};
+
 struct virtio_media_resp_import_buffer {
     struct virtio_media_resp_header hdr;
     uint64_t driver_addr;
@@ -399,6 +429,7 @@ typedef struct VirtIOMediaSession {
      * and the grant refs returned to the guest.
      */
     bool host_regrant;
+    bool host_import_uuid;
     int *host_dmabuf_fds;     /* EXPBUF fd per (buffer*planes + plane) */
     int *host_import_fds;     /* gntdev import fd per (buffer*planes + plane) */
     uint32_t **host_gref_ids; /* gref array per (buffer*planes + plane) */
@@ -1502,6 +1533,76 @@ static int vmedia_proxy_ioctl(int fd, unsigned long req, void *arg)
 }
 
 /*
+ * Grant a host dma-buf's pages to the guest with gntdev IMP_TO_REFS. Takes
+ * ownership of @dmabuf_fd: stores it, the gntdev import fd, and the grant-ref
+ * array on the session at slot @idx. On error closes @dmabuf_fd. Used by
+ * import mode (dma-heap dmabuf source).
+ */
+static int vmedia_grant_dmabuf(VirtIOMediaSession *session, uint32_t idx,
+                               int dmabuf_fd, uint32_t len)
+{
+    uint32_t page_count = DIV_ROUND_UP(len, VIRTIO_MEDIA_GREF_PAGE_SIZE);
+    struct vmedia_gntdev_dmabuf_imp_to_refs *imp;
+    size_t imp_sz;
+    int gntdev_fd;
+    int ret;
+
+    gntdev_fd = open("/dev/xen/gntdev", O_RDWR | O_CLOEXEC);
+    if (gntdev_fd < 0) {
+        ret = -errno;
+        close(dmabuf_fd);
+        return ret;
+    }
+
+    imp_sz = sizeof(*imp) + (size_t)(page_count - 1) * sizeof(uint32_t);
+    imp = g_malloc0(imp_sz);
+    imp->fd = dmabuf_fd;
+    imp->count = page_count;
+    imp->domid = xen_domid;
+
+    ret = ioctl(gntdev_fd, VMEDIA_IOCTL_GNTDEV_DMABUF_IMP_TO_REFS, imp);
+    if (ret < 0) {
+        ret = -errno;
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: import IMP_TO_REFS failed idx=%u pages=%u "
+                      "domid=%u: %d\n", idx, page_count, xen_domid, ret);
+        g_free(imp);
+        close(gntdev_fd);
+        close(dmabuf_fd);
+        return ret;
+    }
+
+    session->host_gref_cnts[idx] = page_count;
+    session->host_gref_ids[idx] = g_new(uint32_t, page_count);
+    memcpy(session->host_gref_ids[idx], imp->refs,
+           page_count * sizeof(uint32_t));
+    session->host_dmabuf_fds[idx] = dmabuf_fd;
+    session->host_import_fds[idx] = gntdev_fd;
+    session->host_lengths[idx] = len;
+    g_free(imp);
+    return 0;
+}
+
+/*
+ * Import mode helper: allocate a system-RAM dma-buf from dma-heap @heap_fd.
+ * Returns a dma-buf fd (>=0) or negative errno.
+ */
+static int vmedia_dmaheap_alloc(int heap_fd, uint32_t len)
+{
+    struct vmedia_dma_heap_allocation_data data;
+    int ret;
+
+    memset(&data, 0, sizeof(data));
+    data.len = len;
+    data.fd_flags = O_RDWR | O_CLOEXEC;
+    ret = ioctl(heap_fd, VMEDIA_DMA_HEAP_IOCTL_ALLOC, &data);
+    if (ret < 0) {
+        return -errno;
+    }
+    return data.fd;
+}
+
+/*
  * Mode A helper: export host MMAP buffer (index, plane) as a dma-buf via
  * VIDIOC_EXPBUF, then re-grant its pages to the guest domain with gntdev
  * IMP_TO_REFS. On success stores the EXPBUF fd, the gntdev import fd, and the
@@ -1622,6 +1723,14 @@ static int vmedia_get_host_memory_mode(VirtIOMedia *s, uint32_t type,
         /* Mode A uses host MMAP buffers, then re-grants them. */
         *memory = V4L2_MEMORY_MMAP;
         return 0;
+    case VMEDIA_HOST_V4L2_MEM_IMPORT:
+        /* Import uses dma-heap dmabufs driven downstream as DMABUF. */
+        *memory = V4L2_MEMORY_DMABUF;
+        return 0;
+    case VMEDIA_HOST_V4L2_MEM_IMPORT_UUID:
+        /* Import-UUID: guest-supplied blob resolved to a host dmabuf. */
+        *memory = V4L2_MEMORY_DMABUF;
+        return 0;
     case VMEDIA_HOST_V4L2_MEM_USERPTR:
         if (!supports_userptr) {
             return -EINVAL;
@@ -1656,10 +1765,18 @@ static int vmedia_parse_host_v4l2_mem_mode(VirtIOMedia *s, Error **errp)
         s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_REGRANT;
         return 0;
     }
+    if (!strcmp(mode, "import")) {
+        s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_IMPORT;
+        return 0;
+    }
+    if (!strcmp(mode, "import-uuid")) {
+        s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_IMPORT_UUID;
+        return 0;
+    }
 
     error_setg(errp,
                "virtio-media: invalid host-v4l2-memory '%s' "
-               "(use auto|mmap|userptr|regrant)",
+               "(use auto|mmap|userptr|regrant|import)",
                mode);
     return -EINVAL;
 }
@@ -1983,7 +2100,9 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
 
     if ((reqbufs.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
          reqbufs.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ||
-        reqbufs.memory != V4L2_MEMORY_MMAP) {
+        (reqbufs.memory != V4L2_MEMORY_MMAP &&
+         !(reqbufs.memory == V4L2_MEMORY_DMABUF &&
+           s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_IMPORT_UUID))) {
         return -EINVAL;
     }
 
@@ -2056,10 +2175,15 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
      * Mode A: re-grant the host driver's own MMAP buffers to the guest instead
      * of mmap+memcpy. Requires Xen grant refs and host MMAP buffers.
      */
-    session->host_regrant =
-        (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_REGRANT) &&
-        s->use_grefs && host_memory == V4L2_MEMORY_MMAP;
-    if (host_memory == V4L2_MEMORY_MMAP) {
+    session->host_regrant = s->use_grefs &&
+        (((s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_REGRANT) &&
+          host_memory == V4L2_MEMORY_MMAP) ||
+         ((s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_IMPORT) &&
+          host_memory == V4L2_MEMORY_DMABUF));
+    session->host_import_uuid =
+        (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_IMPORT_UUID) &&
+        host_memory == V4L2_MEMORY_DMABUF;
+    if (host_memory == V4L2_MEMORY_MMAP || host_memory == V4L2_MEMORY_DMABUF) {
         session->host_num_buffers = host_reqbufs.count;
         reqbufs.count = host_reqbufs.count;
     } else {
@@ -2247,6 +2371,97 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
                 session->host_plane_lengths[p] = session->host_lengths[p];
             }
         }
+    } else if (host_memory == V4L2_MEMORY_DMABUF && session->host_regrant) {
+        /*
+         * Import mode: back each capture buffer with a system-RAM dma-buf from
+         * the dma-heap, grant its pages to the guest (zero-copy readback), and
+         * drive the host device with V4L2_MEMORY_DMABUF.
+         */
+        uint32_t nslots = reqbufs.count * session->host_num_planes;
+        uint32_t k;
+        int heap_fd;
+
+        session->host_maps = g_new0(void *, nslots);
+        session->host_lengths = g_new0(uint32_t, nslots);
+        session->host_offsets = g_new0(uint32_t, nslots);
+        session->host_dmabuf_fds = g_new0(int, nslots);
+        session->host_import_fds = g_new0(int, nslots);
+        session->host_gref_ids = g_new0(uint32_t *, nslots);
+        session->host_gref_cnts = g_new0(uint32_t, nslots);
+        for (k = 0; k < nslots; k++) {
+            session->host_dmabuf_fds[k] = -1;
+            session->host_import_fds[k] = -1;
+        }
+
+        /*
+         * Prefer the CMA dma-heap: its buffers are physically (and, on a
+         * 1:1-mapped PVH dom0, machine-) contiguous, so a host capture device
+         * driven via vb2-dma-contig/dma-sg can DMA into them directly
+         * (nents==1).  The system heap is scattered and only works with a
+         * vb2-vmalloc (CPU-copy) host import.  Fall back to system if there is
+         * no CMA heap.
+         */
+        heap_fd = open("/dev/dma_heap/default_cma_region", O_RDWR | O_CLOEXEC);
+        if (heap_fd < 0)
+            heap_fd = open("/dev/dma_heap/system", O_RDWR | O_CLOEXEC);
+        if (heap_fd < 0) {
+            ret = -errno;
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "virtio-media: import open dma_heap failed: %d\n",
+                          ret);
+            vmedia_proxy_release_buffers(s, session);
+            memset(&host_reqbufs, 0, sizeof(host_reqbufs));
+            host_reqbufs.type = reqbufs.type;
+            host_reqbufs.memory = V4L2_MEMORY_DMABUF;
+            vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS, &host_reqbufs);
+            return ret;
+        }
+
+        for (i = 0; i < reqbufs.count; i++) {
+            uint32_t p;
+
+            for (p = 0; p < session->host_num_planes; p++) {
+                uint32_t idx = i * session->host_num_planes + p;
+                uint32_t plen = session->mplane ?
+                    session->host_plane_lengths[p] : session->buffer_size;
+                int dfd = vmedia_dmaheap_alloc(heap_fd, plen);
+
+                ret = (dfd < 0) ? dfd :
+                    vmedia_grant_dmabuf(session, idx, dfd, plen);
+                if (ret) {
+                    close(heap_fd);
+                    vmedia_proxy_release_buffers(s, session);
+                    memset(&host_reqbufs, 0, sizeof(host_reqbufs));
+                    host_reqbufs.type = reqbufs.type;
+                    host_reqbufs.memory = V4L2_MEMORY_DMABUF;
+                    vmedia_proxy_ioctl(session->host_fd, VIDIOC_REQBUFS,
+                                       &host_reqbufs);
+                    return ret;
+                }
+            }
+        }
+        close(heap_fd);
+    } else if (host_memory == V4L2_MEMORY_DMABUF && session->host_import_uuid) {
+        /*
+         * Import-UUID: the guest owns the buffers (its virtio-gpu blobs).
+         * Allocate the host-fd table; each slot is filled by REGISTER_BUFFER
+         * resolving the guest UUID -> host dmabuf via virtio_lookup_dmabuf.
+         */
+        uint32_t nslots = reqbufs.count * session->host_num_planes;
+        uint32_t k;
+
+        session->host_dmabuf_fds = g_new0(int, nslots);
+        /*
+         * host_lengths must be allocated here too: the QBUF path reads
+         * session->host_lengths[index] for DMABUF buffers.  Without it that
+         * deref is NULL[0] -> segfault.  The guest owns the buffers (venus
+         * blobs); size them from the negotiated capture format.
+         */
+        session->host_lengths = g_new0(uint32_t, nslots);
+        for (k = 0; k < nslots; k++) {
+            session->host_dmabuf_fds[k] = -1;
+            session->host_lengths[k] = session->buffer_size;
+        }
     }
 
     ret = vmedia_alloc_buffers(s, session, reqbufs.count);
@@ -2372,7 +2587,9 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
 
     if ((buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
          buf.type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ||
-        buf.memory != V4L2_MEMORY_MMAP) {
+        (buf.memory != V4L2_MEMORY_MMAP &&
+         !(buf.memory == V4L2_MEMORY_DMABUF &&
+           s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_IMPORT_UUID))) {
         return -EINVAL;
     }
 
@@ -2418,6 +2635,9 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
             if (session->host_memory == V4L2_MEMORY_MMAP) {
                 planes[p].length = session->host_lengths[idx];
                 planes[p].m.mem_offset = session->host_offsets[idx];
+            } else if (session->host_memory == V4L2_MEMORY_DMABUF) {
+                planes[p].length = session->host_lengths[idx];
+                planes[p].m.fd = session->host_dmabuf_fds[idx];
             } else {
                 planes[p].length = session->buffers[index].plane_lengths[p];
                 planes[p].m.userptr =
@@ -2432,6 +2652,9 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
             (unsigned long)(uintptr_t)
             (vmedia_hostmem_base(s) +
              session->buffers[index].plane_offsets[0]);
+    } else if (session->host_memory == V4L2_MEMORY_DMABUF) {
+        host_buf.length = session->host_lengths[index];
+        host_buf.m.fd = session->host_dmabuf_fds[index];
     }
 
     ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QBUF, &host_buf);
@@ -4230,6 +4453,62 @@ release_respond:
         virtqueue_push(vq, elem, sizeof(resp));
         break;
     }
+    case VIRTIO_MEDIA_CMD_REGISTER_BUFFER: {
+        struct virtio_media_cmd_register_buffer reg;
+        struct virtio_media_resp_register_buffer reg_resp = { 0 };
+        VirtIOMediaSession *session;
+        QemuUUID uuid;
+        int hostfd = -1;
+        int status = 0;
+        uint32_t idx;
+
+        if (!virtio_vdev_has_feature(vdev, VIRTIO_MEDIA_F_IMPORT_BUFFER)) {
+            status = -EOPNOTSUPP;
+            goto reg_respond;
+        }
+        if (vmedia_iov_read(elem->out_sg, elem->out_num, 0,
+                            &reg, sizeof(reg)) != sizeof(reg)) {
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+        session = g_hash_table_lookup(s->sessions,
+                      GUINT_TO_POINTER(le32_to_cpu(reg.session_id)));
+        if (!session) {
+            status = -EINVAL;
+            goto reg_respond;
+        }
+        idx = le32_to_cpu(reg.buffer_index);
+        if (!session->host_dmabuf_fds || idx >= session->host_num_buffers) {
+            status = -EINVAL;
+            goto reg_respond;
+        }
+        memcpy(uuid.data, reg.uuid, sizeof(uuid.data));
+        hostfd = virtio_lookup_dmabuf(&uuid);
+        if (hostfd < 0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "virtio-media: REGISTER_BUFFER idx=%u uuid not found\n",
+                          idx);
+            status = -ENOENT;
+            goto reg_respond;
+        }
+        if (session->host_dmabuf_fds[idx] >= 0) {
+            close(session->host_dmabuf_fds[idx]);
+        }
+        session->host_dmabuf_fds[idx] = dup(hostfd);
+        if (session->host_dmabuf_fds[idx] < 0) {
+            status = -errno;
+            goto reg_respond;
+        }
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: REGISTER_BUFFER idx=%u -> host fd %d\n",
+                      idx, session->host_dmabuf_fds[idx]);
+reg_respond:
+        vmedia_write_resp_header(&reg_resp.hdr, status);
+        vmedia_iov_write(elem->in_sg, elem->in_num, 0,
+                         &reg_resp, sizeof(reg_resp));
+        virtqueue_push(vq, elem, sizeof(reg_resp));
+        break;
+    }
     case VIRTIO_MEDIA_CMD_MMAP: {
         struct virtio_media_cmd_mmap mmap_cmd;
         struct virtio_media_resp_mmap resp;
@@ -4437,6 +4716,9 @@ static uint64_t vmedia_get_features(VirtIODevice *vdev, uint64_t f,
     }
     f |= (1ULL << VIRTIO_MEDIA_F_EXPORT_IMPORT);
     f |= (1ULL << VIRTIO_MEDIA_F_SHARE_FENCE);
+    if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_IMPORT_UUID) {
+        f |= (1ULL << VIRTIO_MEDIA_F_IMPORT_BUFFER);
+    }
     return f;
 }
 
