@@ -13,6 +13,7 @@
 #include "qemu/iov.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
+#include "qemu/memalign.h"
 #include "qemu/module.h"
 #include "qemu/queue.h"
 #include "hw/virtio/virtio.h"
@@ -135,8 +136,9 @@ static int vmedia_ioctl_nointr(int fd, unsigned long req, void *arg);
 
 static uint8_t *vmedia_hostmem_base(VirtIOMedia *s)
 {
-    return s->hostmem_buf ? s->hostmem_buf
-                          : memory_region_get_ram_ptr(&s->hostmem);
+    assert(s->host_v4l2_mem_mode != VMEDIA_HOST_V4L2_MEM_MMAP);
+    assert(s->hostmem_buf);
+    return s->hostmem_buf;
 }
 
 static uint64_t vmedia_format_sizeimage(const struct v4l2_format *fmt)
@@ -417,6 +419,7 @@ typedef struct VirtIOMediaSession {
     void **host_maps;
     uint32_t *host_lengths;
     uint32_t *host_offsets;
+    MemoryRegion *mr;
     uint32_t host_num_buffers;
     uint32_t host_num_planes;
     uint32_t host_plane_lengths[VIRTIO_MEDIA_MAX_PLANES];
@@ -676,11 +679,13 @@ static void vmedia_proxy_release_buffers(VirtIOMedia *s,
             uint32_t idx = i * planes + p;
 
             if (session->host_maps[idx]) {
+                memory_region_del_subregion(&s->hostmem, &session->mr[idx]);
                 munmap(session->host_maps[idx], session->host_lengths[idx]);
             }
         }
     }
 
+    g_free(session->mr);
     g_free(session->host_maps);
     g_free(session->host_lengths);
     g_free(session->host_offsets);
@@ -889,25 +894,9 @@ static void vmedia_host_fd_handler(void *opaque)
                 bytes = planes[p].bytesused ? planes[p].bytesused :
                                               fallback_len;
                 copy_len = MIN(bytes, max_len);
-                /*
-                 * Mode A (regrant): the host driver DMAs straight into the
-                 * EXPBUF'd pages the guest maps, so there is no copy here.
-                 */
-                if (session->host_memory == V4L2_MEMORY_MMAP &&
-                    !session->host_regrant) {
-                    memcpy(vmedia_hostmem_base(s) +
-                           session->buffers[buf.index].plane_offsets[p],
-                           session->host_maps[idx],
-                           copy_len);
-                }
+
                 session->buffers[buf.index].planes[p].bytesused = copy_len;
             }
-        } else if (session->host_memory == V4L2_MEMORY_MMAP &&
-                   !session->host_regrant) {
-            memcpy(vmedia_hostmem_base(s) +
-                   session->buffers[buf.index].base_offset,
-                   session->host_maps[buf.index],
-                   MIN(buf.bytesused, session->host_lengths[buf.index]));
         }
 
         session->buffers[buf.index].queued = false;
@@ -2260,6 +2249,8 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
                 session->host_dmabuf_fds[k] = -1;
                 session->host_import_fds[k] = -1;
             }
+        } else {
+            session->mr = g_new0(MemoryRegion, nslots);
         }
 
         for (i = 0; i < reqbufs.count; i++) {
@@ -2478,6 +2469,18 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
     if (vmedia_iov_write(in_sg, in_num, in_off, &reqbufs,
                                sizeof(reqbufs)) != sizeof(reqbufs)) {
         return -EINVAL;
+    }
+
+    if (host_memory == V4L2_MEMORY_MMAP) {
+        for (i = 0; i < reqbufs.count; i++) {
+            memory_region_init_ram_ptr(&session->mr[i], OBJECT(&s->hostmem),
+                                       "mmap-mr",
+                                       session->host_lengths[i],
+                                       session->host_maps[i]);
+            memory_region_add_subregion_overlap(&s->hostmem,
+                                                session->buffers[i].base_offset,
+                                                &session->mr[i], 1);
+        }
     }
 
     return 0;
@@ -4883,14 +4886,19 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
         if (!vmedia_gntalloc_init(s, errp)) {
             return;
         }
-    } else {
-        memory_region_init_ram(&s->hostmem, OBJECT(s),
+    }
+
+    if (!use_grefs) {
+        if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_MMAP) {
+            memory_region_init(&s->hostmem, OBJECT(s),
                                "virtio-media-hostmem",
-                               s->hostmem_size, errp);
-        if (*errp) {
-            return;
+                               s->hostmem_size);
+        } else if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_USERPTR) {
+            s->hostmem_buf = qemu_memalign(qemu_real_host_page_size(), s->hostmem_size);
+            memory_region_init_ram_ptr(&s->hostmem, OBJECT(s),
+                                       "virtio-media-hostmem",
+                                       s->hostmem_size, s->hostmem_buf);
         }
-        s->hostmem_buf = memory_region_get_ram_ptr(&s->hostmem);
     }
 
     s->use_hostmem = true;
