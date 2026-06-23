@@ -2476,7 +2476,7 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
         return -EINVAL;
     }
 
-    if (host_memory == V4L2_MEMORY_MMAP) {
+    if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_MMAP) {
         for (i = 0; i < reqbufs.count; i++) {
             memory_region_init_ram_ptr(&session->mr[i], OBJECT(&s->hostmem),
                                        "mmap-mr",
