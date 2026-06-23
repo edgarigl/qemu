@@ -1207,24 +1207,28 @@ static int vmedia_alloc_buffers(VirtIOMedia *s, VirtIOMediaSession *session,
                         (session->host_regrant ?
                          ROUND_UP(plane_lengths[p - 1],
                                   VIRTIO_MEDIA_GREF_PAGE_SIZE) :
-                         plane_lengths[p - 1]);
+                         ROUND_UP(plane_lengths[p - 1],
+                                  qemu_real_host_page_size()));
                 }
                 buf->plane_lengths[p] = plen;
                 /*
                  * In regrant mode each plane is re-granted as a whole number of
                  * pages; advance the synthetic layout by the page-rounded size
                  * so plane/buffer offsets align with gref boundaries and never
-                 * overlap.
+                 * overlap. In mmap mode the guest maps each plane by its
+                 * mem_offset, which mmap requires to be page-aligned, so round
+                 * to the host page size there too.
                  */
                 buf_size += session->host_regrant ?
-                    ROUND_UP(plen, VIRTIO_MEDIA_GREF_PAGE_SIZE) : plen;
+                    ROUND_UP(plen, VIRTIO_MEDIA_GREF_PAGE_SIZE) :
+                    ROUND_UP(plen, qemu_real_host_page_size());
             }
         } else {
             buf->plane_offsets[0] = offset;
             buf->plane_lengths[0] = session->buffer_size;
             buf_size = session->host_regrant ?
                 ROUND_UP(session->buffer_size, VIRTIO_MEDIA_GREF_PAGE_SIZE) :
-                session->buffer_size;
+                ROUND_UP(session->buffer_size, qemu_real_host_page_size());
         }
 
         /*
