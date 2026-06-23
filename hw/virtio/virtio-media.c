@@ -680,6 +680,7 @@ static void vmedia_proxy_release_buffers(VirtIOMedia *s,
 
             if (session->host_maps[idx]) {
                 memory_region_del_subregion(&s->hostmem, &session->mr[idx]);
+                object_unparent(OBJECT(&session->mr[idx]));
                 munmap(session->host_maps[idx], session->host_lengths[idx]);
             }
         }
