@@ -363,6 +363,23 @@ static inline int xen_get_default_ioreq_server_info(domid_t dom,
 
 static bool use_default_ioreq_server;
 
+#ifdef XEN_HMEM
+static inline void xen_hmem_sync(void *hva, size_t npages)
+{
+    xenhmem_sync(xen_fmem, xen_domid, hva, npages);
+}
+
+static inline int xen_hmem_map(void *hva, xen_pfn_t gfn, size_t npages)
+{
+    return xenhmem_map(xen_fmem, xen_domid, hva, gfn, npages);
+}
+
+static inline int xen_hmem_unmap(void *hva, size_t npages)
+{
+    return xenhmem_unmap(xen_fmem, xen_domid, hva, npages);
+}
+#endif
+
 static inline void xen_map_memory_section(domid_t dom,
                                           ioservid_t ioservid,
                                           MemoryRegionSection *section)
@@ -374,6 +391,24 @@ static inline void xen_map_memory_section(domid_t dom,
     if (use_default_ioreq_server) {
         return;
     }
+
+#ifdef XEN_HMEM
+    if (memory_region_is_preallocated(section->mr)) {
+        void *hva = memory_region_get_ram_ptr(section->mr) +
+                    section->offset_within_region;
+        xen_pfn_t gfn = start_addr >> XC_PAGE_SHIFT;
+        size_t npages = DIV_ROUND_UP(size, XC_PAGE_SIZE);
+        int rc;
+
+        rc = xen_hmem_map(hva, gfn, npages);
+        if (!rc) {
+            trace_xen_map_hmem_range(ioservid, start_addr, npages);
+            xendevicemodel_map_hmem_to_ioreq_server(xen_dmod, dom, ioservid,
+                                                    start_addr, end_addr);
+            return;
+        }
+    }
+#endif
 
     trace_xen_map_mmio_range(ioservid, start_addr, end_addr);
     xendevicemodel_map_io_range_to_ioreq_server(xen_dmod, dom, ioservid, 1,
@@ -391,6 +426,23 @@ static inline void xen_unmap_memory_section(domid_t dom,
     if (use_default_ioreq_server) {
         return;
     }
+
+#ifdef XEN_HMEM
+    if (memory_region_is_preallocated(section->mr)) {
+        void *hva = memory_region_get_ram_ptr(section->mr) +
+                    section->offset_within_region;
+        size_t npages = DIV_ROUND_UP(size, XC_PAGE_SIZE);
+        int rc;
+
+        rc = xen_hmem_unmap(hva, npages);
+        if (!rc) {
+            trace_xen_unmap_hmem_range(ioservid, start_addr, npages);
+            xendevicemodel_unmap_hmem_from_ioreq_server(
+                xen_dmod, dom, ioservid, start_addr, end_addr);
+            return;
+        }
+    }
+#endif
 
     trace_xen_unmap_mmio_range(ioservid, start_addr, end_addr);
     xendevicemodel_unmap_io_range_from_ioreq_server(xen_dmod, dom, ioservid,

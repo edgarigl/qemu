@@ -1828,6 +1828,15 @@ static inline bool memory_region_is_romd(MemoryRegion *mr)
 bool memory_region_is_protected(MemoryRegion *mr);
 
 /**
+ * memory_region_is_preallocated: check whether a memory region is preallocated
+ *
+ * Returns %true if a memory region is preallocated
+ *
+ * @mr: the memory region being queried
+ */
+bool memory_region_is_preallocated(MemoryRegion *mr);
+
+/**
  * memory_region_has_guest_memfd: check whether a memory region has guest_memfd
  *     associated
  *

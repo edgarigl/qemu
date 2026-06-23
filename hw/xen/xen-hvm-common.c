@@ -447,6 +447,43 @@ static void cpu_ioreq_config(XenIOState *state, ioreq_t *req)
     }
 }
 
+#ifdef XEN_HMEM
+static void cpu_ioreq_hmem(ioreq_t *req)
+{
+    hwaddr addr, len;
+
+    addr = req->addr;
+    len = req->size * req->count;
+    if (req->df) {
+        addr -= len;
+    }
+
+    RCU_READ_LOCK_GUARD();
+
+    while (len > 0) {
+        MemoryRegion *mr;
+        uintptr_t hva;
+        hwaddr xlat, l = len;
+        size_t npages;
+
+        mr = address_space_translate(&address_space_memory, addr,
+                                     &xlat, &l, true, MEMTXATTRS_UNSPECIFIED);
+        if (!mr || !memory_region_is_preallocated(mr)) {
+            error_report("IOREQ_TYPE_HMEM: invalid address 0x%"PRIx64, addr);
+            return;
+        }
+
+        hva = (uintptr_t)qemu_map_ram_ptr(mr->ram_block, xlat);
+        npages = DIV_ROUND_UP((hva & ~XC_PAGE_MASK) + l, XC_PAGE_SIZE);
+        hva &= XC_PAGE_MASK;
+        xen_hmem_sync((void *)hva, npages);
+
+        len -= l;
+        addr += l;
+    }
+}
+#endif
+
 static void handle_ioreq(XenIOState *state, ioreq_t *req)
 {
     size_t req_size_bits = req->size * BITS_PER_BYTE;
@@ -478,6 +515,11 @@ static void handle_ioreq(XenIOState *state, ioreq_t *req)
         case IOREQ_TYPE_PCI_CONFIG:
             cpu_ioreq_config(state, req);
             break;
+#ifdef XEN_HMEM
+        case IOREQ_TYPE_HMEM:
+            cpu_ioreq_hmem(req);
+            break;
+#endif
         default:
             arch_handle_ioreq(state, req);
     }
