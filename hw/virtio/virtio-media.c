@@ -1236,7 +1236,8 @@ static int vmedia_alloc_buffers(VirtIOMedia *s, VirtIOMediaSession *session,
          * in non-regrant modes. In regrant mode there is no pool (buffers are
          * re-granted from the host EXPBUF dma-bufs), so skip the bounds check.
          */
-        if (!session->host_regrant && offset + buf_size > s->hostmem_size) {
+        if (!session->host_regrant && !session->host_import_uuid &&
+            offset + buf_size > s->hostmem_size) {
             vmedia_reset_buffers(session);
             return -ENOMEM;
         }
@@ -2051,7 +2052,10 @@ static int vmedia_proxy_s_fmt(VirtIOMediaSession *session,
      * are re-granted from the host's dma-bufs, hostmem_size == 0) and never
      * for TRY_FMT, which must not allocate or fail with ENOMEM.
      */
-    if (!is_try && !session->dev->regrant_only && sizeimage &&
+    if (!is_try && !session->dev->regrant_only &&
+        session->dev->host_v4l2_mem_mode != VMEDIA_HOST_V4L2_MEM_IMPORT &&
+        session->dev->host_v4l2_mem_mode != VMEDIA_HOST_V4L2_MEM_IMPORT_UUID &&
+        sizeimage &&
         (uint64_t)session->dev->max_buffers * sizeimage >
         session->dev->hostmem_size) {
         return -ENOMEM;
