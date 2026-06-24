@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
+#include <sys/mman.h>
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -9,6 +10,8 @@
 #include "hw/virtio/virtio-gpu.h"
 #include "hw/virtio/virtio-gpu-pixman.h"
 #include "hw/virtio/virtio-iommu.h"
+#include "hw/virtio/virtio-dmabuf.h"
+#include "qemu/uuid.h"
 
 #include <glib/gmem.h>
 #include <rutabaga_gfx/rutabaga_gfx_ffi.h>
@@ -675,7 +678,26 @@ rutabaga_cmd_resource_map_blob(VirtIOGPU *g,
     resp.map_info = map_info & RUTABAGA_MAP_CACHE_MASK;
 
     result = rutabaga_resource_map(vr->rutabaga, mblob.resource_id, &mapping);
-    CHECK(!result, cmd);
+    /*
+     * gfxstream ExternalBlob resources cannot be mapped into the VMM address
+     * space (rutabaga_resource_map fails: "external blob enabled").  Export the
+     * blob as a dma-buf fd and back the BAR window with that instead.  On Xen
+     * the preallocated region is mapped into the guest p2m by the HMEM listener.
+     */
+    bool blob_external = (result != 0);
+    if (blob_external) {
+        struct rutabaga_handle handle = { 0 };
+        result = rutabaga_resource_export_blob(vr->rutabaga, mblob.resource_id,
+                                               &handle);
+        CHECK(!result, cmd);
+        int blob_fd = (int)handle.os_handle;
+        void *p = mmap(NULL, res->blob_size, PROT_READ | PROT_WRITE,
+                       MAP_SHARED, blob_fd, 0);
+        close(blob_fd);
+        CHECK(p != MAP_FAILED, cmd);
+        mapping.ptr = p;
+        mapping.size = res->blob_size;
+    }
 
     /*
      * There is small risk of the MemoryRegion dereferencing the pointer after
@@ -692,10 +714,12 @@ rutabaga_cmd_resource_map_blob(VirtIOGPU *g,
         }
 
         MemoryRegion *mr = &(vr->memory_regions[slot].mr);
-        memory_region_init_ram_ptr(mr, OBJECT(vr), "blob", mapping.size,
+        memory_region_init_ram_ptr(mr, OBJECT(mr), "blob", mapping.size,
                                    mapping.ptr);
         memory_region_add_subregion(&vb->hostmem, mblob.offset, mr);
+        memory_region_set_enabled(mr, true);
         vr->memory_regions[slot].resource_id = mblob.resource_id;
+        vr->memory_regions[slot].external = blob_external;
         vr->memory_regions[slot].used = 1;
         break;
     }
@@ -736,16 +760,82 @@ rutabaga_cmd_resource_unmap_blob(VirtIOGPU *g,
         }
 
         MemoryRegion *mr = &(vr->memory_regions[slot].mr);
+        bool was_external = vr->memory_regions[slot].external;
+        void *ext_ptr = was_external ? memory_region_get_ram_ptr(mr) : NULL;
+        uint64_t ext_size = memory_region_size(mr);
         memory_region_del_subregion(&vb->hostmem, mr);
 
         vr->memory_regions[slot].resource_id = 0;
+        vr->memory_regions[slot].external = false;
         vr->memory_regions[slot].used = 0;
+        if (was_external) {
+            if (ext_ptr) {
+                munmap(ext_ptr, ext_size);
+            }
+        } else {
+            result = rutabaga_resource_unmap(vr->rutabaga, res->resource_id);
+            CHECK(!result, cmd);
+        }
         break;
     }
 
     CHECK(slot < MAX_SLOTS, cmd);
-    result = rutabaga_resource_unmap(vr->rutabaga, res->resource_id);
+}
+
+static void
+rutabaga_cmd_assign_uuid(VirtIOGPU *g,
+                         struct virtio_gpu_ctrl_command *cmd)
+{
+    int32_t result;
+    int dmabuf_fd;
+    QemuUUID *uuid;
+    struct virtio_gpu_simple_resource *res;
+    struct rutabaga_handle handle = { 0 };
+    struct virtio_gpu_resource_assign_uuid assign;
+    struct virtio_gpu_resp_resource_uuid resp = { 0 };
+
+    VirtIOGPURutabaga *vr = VIRTIO_GPU_RUTABAGA(g);
+
+    VIRTIO_GPU_FILL_CMD(assign);
+
+    CHECK(assign.resource_id != 0, cmd);
+
+    res = virtio_gpu_find_resource(g, assign.resource_id);
+    CHECK(res, cmd);
+
+    /*
+     * Export the rutabaga resource as a host dma-buf and register it under a
+     * freshly generated UUID. This lets other devices (notably virtio-media in
+     * import-uuid mode) resolve the guest blob to its backing host dma-buf via
+     * virtio_lookup_dmabuf(). The UUID we return here is exactly what the guest
+     * will later quote in e.g. VIRTIO_MEDIA_CMD_REGISTER_BUFFER, so any unique
+     * value is fine as long as the table is keyed by it.
+     */
+    result = rutabaga_resource_export_blob(vr->rutabaga, assign.resource_id,
+                                           &handle);
     CHECK(!result, cmd);
+
+    dmabuf_fd = (int)handle.os_handle;
+    CHECK(dmabuf_fd >= 0, cmd);
+
+    /*
+     * The dmabuf table stores the key pointer without copying it
+     * (key_destroy == NULL in virtio_add_resource), so the UUID must outlive
+     * this command: allocate it on the heap.
+     */
+    uuid = g_new(QemuUUID, 1);
+    qemu_uuid_generate(uuid);
+
+    if (!virtio_add_dmabuf(uuid, dmabuf_fd)) {
+        close(dmabuf_fd);
+        g_free(uuid);
+        cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
+        return;
+    }
+
+    memcpy(resp.uuid, uuid->data, sizeof(resp.uuid));
+    resp.hdr.type = VIRTIO_GPU_RESP_OK_RESOURCE_UUID;
+    virtio_gpu_ctrl_response(g, cmd, &resp.hdr, sizeof(resp));
 }
 
 static void
@@ -825,6 +915,9 @@ virtio_gpu_rutabaga_process_cmd(VirtIOGPU *g,
         break;
     case VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB:
         rutabaga_cmd_resource_unmap_blob(g, cmd);
+        break;
+    case VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID:
+        rutabaga_cmd_assign_uuid(g, cmd);
         break;
     default:
         cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
@@ -986,6 +1079,7 @@ static bool virtio_gpu_rutabaga_init(VirtIOGPU *g, Error **errp)
     builder.debug_cb = virtio_gpu_rutabaga_debug_cb;
     builder.capset_mask = vr->capset_mask;
     builder.user_data = (uint64_t)g;
+    builder.renderer_features = "ExternalBlob:enabled,VulkanAllocateHostVisibleAsUdmabuf:enabled";
 
     /*
      * If the user doesn't specify the wayland socket path, we try to infer
@@ -1091,6 +1185,13 @@ static void virtio_gpu_rutabaga_realize(DeviceState *qdev, Error **errp)
     bdev->conf.flags |= (1 << VIRTIO_GPU_FLAG_RUTABAGA_ENABLED);
     bdev->conf.flags |= (1 << VIRTIO_GPU_FLAG_BLOB_ENABLED);
     bdev->conf.flags |= (1 << VIRTIO_GPU_FLAG_CONTEXT_INIT_ENABLED);
+    /*
+     * Advertise VIRTIO_GPU_F_RESOURCE_UUID so the guest accepts CROSS_DEVICE
+     * exportable blobs (gfxstream dma-buf export) and issues
+     * VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID, which rutabaga_cmd_assign_uuid()
+     * resolves to a host dma-buf for virtio-media import-uuid.
+     */
+    bdev->conf.flags |= (1 << VIRTIO_GPU_FLAG_RESOURCE_UUID_ENABLED);
 
     bdev->virtio_config.num_capsets = num_capsets;
     virtio_gpu_device_realize(qdev, errp);

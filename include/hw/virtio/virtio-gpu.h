@@ -270,6 +270,7 @@ struct MemoryRegionInfo {
     int used;
     MemoryRegion mr;
     uint32_t resource_id;
+    bool external;
 };
 
 struct rutabaga;
