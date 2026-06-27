@@ -171,6 +171,11 @@ virtio_gpu_rutabaga_resource_unref(VirtIOGPU *g,
         pixman_image_unref(res->image);
     }
 
+    if (res->dmabuf_fd >= 0) {
+        close(res->dmabuf_fd);
+        res->dmabuf_fd = -1;
+    }
+
     QTAILQ_REMOVE(&g->reslist, res, next);
     g_free(res);
 }
@@ -259,6 +264,17 @@ rutabaga_cmd_resource_flush(VirtIOGPU *g, struct virtio_gpu_ctrl_command *cmd)
     res = virtio_gpu_find_resource(g, rf.resource_id);
     CHECK(res, cmd);
 
+    if (res->dmabuf_fd >= 0) {
+        for (i = 0; i < vb->conf.max_outputs; i++) {
+            scanout = &vb->scanout[i];
+            if (scanout->con && scanout->resource_id == rf.resource_id) {
+                dpy_gl_update(scanout->con, 0, 0,
+                              scanout->width, scanout->height);
+            }
+        }
+        return;
+    }
+
     for (i = 0; i < vb->conf.max_outputs; i++) {
         scanout = &vb->scanout[i];
         if (i == res->scanout_bitmask) {
@@ -337,6 +353,63 @@ rutabaga_cmd_set_scanout(VirtIOGPU *g, struct virtio_gpu_ctrl_command *cmd)
     dpy_gfx_replace_surface(scanout->con, NULL);
     dpy_gfx_replace_surface(scanout->con, scanout->ds);
     res->scanout_bitmask = ss.scanout_id;
+}
+
+static void
+rutabaga_cmd_set_scanout_blob(VirtIOGPU *g,
+                              struct virtio_gpu_ctrl_command *cmd)
+{
+    struct virtio_gpu_simple_resource *res;
+    struct virtio_gpu_framebuffer fb = { 0 };
+    struct virtio_gpu_set_scanout_blob ss;
+    struct virtio_gpu_scanout *scanout;
+    int32_t result;
+
+    VirtIOGPUBase *vb = VIRTIO_GPU_BASE(g);
+    VirtIOGPURutabaga *vr = VIRTIO_GPU_RUTABAGA(g);
+    if (vr->headless) {
+        return;
+    }
+
+    VIRTIO_GPU_FILL_CMD(ss);
+    trace_virtio_gpu_cmd_set_scanout_blob(ss.scanout_id, ss.resource_id,
+                                          ss.r.width, ss.r.height,
+                                          ss.r.x, ss.r.y);
+
+    CHECK(ss.scanout_id < VIRTIO_GPU_MAX_SCANOUTS, cmd);
+
+    if (ss.resource_id == 0) {
+        virtio_gpu_disable_scanout(g, ss.scanout_id);
+        return;
+    }
+
+    res = virtio_gpu_find_resource(g, ss.resource_id);
+    CHECK(res, cmd);
+
+    scanout = &vb->scanout[ss.scanout_id];
+    CHECK(console_has_gl(scanout->con), cmd);
+
+    /*
+     * Display the gfxstream blob zero-copy: export it as a host dma-buf that
+     * the display backend imports via GL. Export once and cache on the
+     * resource (closed in virtio_gpu_rutabaga_resource_unref). Unlike the
+     * resource_map_blob path this is purely host-side, so no Xen HMEM mapping
+     * is involved.
+     */
+    if (res->dmabuf_fd < 0) {
+        struct rutabaga_handle handle = { 0 };
+        result = rutabaga_resource_export_blob(vr->rutabaga, ss.resource_id,
+                                               &handle);
+        CHECK(!result, cmd);
+        res->dmabuf_fd = (int)handle.os_handle;
+    }
+    CHECK(res->dmabuf_fd >= 0, cmd);
+
+    CHECK(virtio_gpu_scanout_blob_to_fb(&fb, &ss, res->blob_size), cmd);
+
+    vb->enable = 1;
+    CHECK(virtio_gpu_update_dmabuf(g, ss.scanout_id, res, &fb, &ss.r) == 0, cmd);
+    virtio_gpu_update_scanout(g, ss.scanout_id, res, &fb, &ss.r);
 }
 
 static void
@@ -614,6 +687,7 @@ rutabaga_cmd_resource_create_blob(VirtIOGPU *g,
 
     res->resource_id = cblob.resource_id;
     res->blob_size = cblob.size;
+    res->dmabuf_fd = -1;
 
     if (cblob.blob_mem != VIRTIO_GPU_BLOB_MEM_HOST3D) {
         result = virtio_gpu_create_mapping_iov(g, cblob.nr_entries,
@@ -882,6 +956,9 @@ virtio_gpu_rutabaga_process_cmd(VirtIOGPU *g,
         break;
     case VIRTIO_GPU_CMD_SET_SCANOUT:
         rutabaga_cmd_set_scanout(g, cmd);
+        break;
+    case VIRTIO_GPU_CMD_SET_SCANOUT_BLOB:
+        rutabaga_cmd_set_scanout_blob(g, cmd);
         break;
     case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
         rutabaga_cmd_resource_flush(g, cmd);
