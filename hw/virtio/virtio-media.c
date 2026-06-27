@@ -29,6 +29,42 @@
 #include <linux/videodev2.h>
 #include "hw/virtio/virtio-dmabuf.h"
 #include <sys/ioctl.h>
+#include <linux/dma-buf.h>
+
+/*
+ * Bracket host CPU access to imported dma-bufs with begin/end_cpu_access on the
+ * exporter (amdgpu). vb2-vmalloc/uvc fill the imported buffer via CPU vmap with
+ * NO such bracketing; on amdgpu begin/end_cpu_access carries residency/cache
+ * side effects the guest GPU consume depends on (addresses the cold-GPU
+ * MAPPING_ERROR on the camera->VRAM zero-copy path). Mode via VMEDIA_DMASYNC
+ * env: rw (default), w, r, off.
+ */
+static void vmedia_dmabuf_sync(int fd, unsigned long long startend)
+{
+    static int mode = -1;
+    struct dma_buf_sync s;
+
+    if (fd < 0) {
+        return;
+    }
+    if (mode == -1) {
+        const char *e = getenv("VMEDIA_DMASYNC");
+        if (e && !strcmp(e, "off")) {
+            mode = 0;
+        } else if (e && !strcmp(e, "w")) {
+            mode = DMA_BUF_SYNC_WRITE;
+        } else if (e && !strcmp(e, "r")) {
+            mode = DMA_BUF_SYNC_READ;
+        } else {
+            mode = DMA_BUF_SYNC_RW;
+        }
+    }
+    if (mode == 0) {
+        return;
+    }
+    s.flags = startend | (unsigned long long)mode;
+    ioctl(fd, DMA_BUF_IOCTL_SYNC, &s);
+}
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
@@ -867,6 +903,21 @@ static void vmedia_host_fd_handler(void *opaque)
         if (buf.index >= session->num_buffers ||
             buf.index >= session->host_num_buffers) {
             continue;
+        }
+
+        if (session->host_memory == V4L2_MEMORY_DMABUF &&
+            session->host_dmabuf_fds) {
+            if (session->mplane && session->host_num_planes) {
+                for (uint32_t p = 0; p < session->host_num_planes; p++) {
+                    vmedia_dmabuf_sync(
+                        session->host_dmabuf_fds[buf.index *
+                            session->host_num_planes + p],
+                        DMA_BUF_SYNC_END);
+                }
+            } else {
+                vmedia_dmabuf_sync(session->host_dmabuf_fds[buf.index],
+                                   DMA_BUF_SYNC_END);
+            }
         }
 
         if (!session->buffers[buf.index].queued) {
@@ -2669,6 +2720,15 @@ static int vmedia_proxy_qbuf(VirtIOMedia *s, VirtIOMediaSession *session,
         host_buf.m.fd = session->host_dmabuf_fds[index];
     }
 
+    if (session->host_memory == V4L2_MEMORY_DMABUF) {
+        if (session->mplane && session->host_num_planes) {
+            for (uint32_t p = 0; p < session->host_num_planes; p++) {
+                vmedia_dmabuf_sync(planes[p].m.fd, DMA_BUF_SYNC_START);
+            }
+        } else {
+            vmedia_dmabuf_sync(host_buf.m.fd, DMA_BUF_SYNC_START);
+        }
+    }
     ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_QBUF, &host_buf);
     if (ret < 0) {
         qemu_log_mask(LOG_GUEST_ERROR,
