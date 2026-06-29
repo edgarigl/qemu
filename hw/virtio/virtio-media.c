@@ -138,7 +138,6 @@ struct vmedia_dma_heap_allocation_data {
 
 #define VIRTIO_MEDIA_F_GNTREF 63
 #define VIRTIO_MEDIA_F_EXPORT_IMPORT 62
-#define VIRTIO_MEDIA_F_SHARE_FENCE 61
 #define VIRTIO_MEDIA_F_PEER_GREF_IMPORT 60
 #define VIRTIO_MEDIA_F_IMPORT_BUFFER 59
 #define VIRTIO_MEDIA_GREF_PAGE_SIZE 4096u
@@ -4787,7 +4786,6 @@ static uint64_t vmedia_get_features(VirtIODevice *vdev, uint64_t f,
         f |= (1ULL << VIRTIO_MEDIA_F_PEER_GREF_IMPORT);
     }
     f |= (1ULL << VIRTIO_MEDIA_F_EXPORT_IMPORT);
-    f |= (1ULL << VIRTIO_MEDIA_F_SHARE_FENCE);
     if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_IMPORT_UUID) {
         f |= (1ULL << VIRTIO_MEDIA_F_IMPORT_BUFFER);
     }
