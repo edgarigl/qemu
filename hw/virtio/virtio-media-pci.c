@@ -46,7 +46,7 @@ static void vmedia_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
         return;
     }
 
-    if (!mdev->use_grefs) {
+    if (!mdev->use_grefs && memory_region_size(&mdev->hostmem) > 0) {
         pci_register_bar(&vpci_dev->pci_dev, 4,
                          PCI_BASE_ADDRESS_SPACE_MEMORY |
                          PCI_BASE_ADDRESS_MEM_PREFETCH |
