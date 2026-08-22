@@ -2647,9 +2647,20 @@ static void virtio_set_isr(VirtIODevice *vdev, int value)
 /* Called within rcu_read_lock(). */
 static bool virtio_split_should_notify(VirtIODevice *vdev, VirtQueue *vq)
 {
+    volatile uint16_t flush;
     uint16_t old, new;
     bool v;
+
     /* We need to expose used array entries before checking used event. */
+    dma_mb();
+    /*
+     * A barrier is not enough when the ring is across a link.  The store is
+     * posted and the used_event load takes an independent path, so the load
+     * can win and return an event index the driver has already passed.  Read
+     * used->idx back first: the completion proves the write landed.  volatile
+     * keeps the load.
+     */
+    flush = vring_used_idx(vq);
     dma_mb();
     /* Always notify when queue is empty (when feature acknowledge) */
     if (virtio_vdev_has_feature(vdev, VIRTIO_F_NOTIFY_ON_EMPTY) &&
