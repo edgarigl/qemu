@@ -199,6 +199,22 @@
 #define smp_rmb()   smp_mb_acquire()
 
 /*
+ * Barriers against an agent outside our coherency domain -- a device, or a
+ * CPU on the far side of a link.  The fences above are C11, which only orders
+ * what other threads observe; on aarch64 that is inner shareable and orders
+ * nothing over e.g. PCIe.  Same meaning as Linux's dma_*mb().
+ */
+#if defined(__aarch64__)
+#define dma_mb()    ({ asm volatile("dmb osh"   ::: "memory"); (void)0; })
+#define dma_rmb()   ({ asm volatile("dmb oshld" ::: "memory"); (void)0; })
+#define dma_wmb()   ({ asm volatile("dmb oshst" ::: "memory"); (void)0; })
+#else
+#define dma_mb()    smp_mb()
+#define dma_rmb()   smp_rmb()
+#define dma_wmb()   smp_wmb()
+#endif
+
+/*
  * SEQ_CST is weaker than the older __sync_* builtins and Linux
  * kernel read-modify-write atomics.  Provide a macro to obtain
  * the same semantics.
