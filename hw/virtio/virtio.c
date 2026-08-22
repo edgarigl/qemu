@@ -568,7 +568,7 @@ static void virtio_queue_split_set_notification(VirtQueue *vq, int enable)
     }
     if (enable) {
         /* Expose avail event/used flags before caller checks the avail idx. */
-        smp_mb();
+        dma_mb();
     }
 }
 
@@ -601,7 +601,7 @@ static void virtio_queue_packed_set_notification(VirtQueue *vq, int enable)
     vring_packed_flags_write(vq->vdev, &caches->used, e.flags);
     if (enable) {
         /* Expose avail event/used flags before caller checks the avail idx. */
-        smp_mb();
+        dma_mb();
     }
 }
 
@@ -2650,7 +2650,7 @@ static bool virtio_split_should_notify(VirtIODevice *vdev, VirtQueue *vq)
     uint16_t old, new;
     bool v;
     /* We need to expose used array entries before checking used event. */
-    smp_mb();
+    dma_mb();
     /* Always notify when queue is empty (when feature acknowledge) */
     if (virtio_vdev_has_feature(vdev, VIRTIO_F_NOTIFY_ON_EMPTY) &&
         !vq->inuse && virtio_queue_empty(vq)) {
