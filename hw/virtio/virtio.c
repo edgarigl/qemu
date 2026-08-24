@@ -2661,6 +2661,7 @@ static bool virtio_split_should_notify(VirtIODevice *vdev, VirtQueue *vq)
      * keeps the load.
      */
     flush = vring_used_idx(vq);
+    (void)flush;
     dma_mb();
     /* Always notify when queue is empty (when feature acknowledge) */
     if (virtio_vdev_has_feature(vdev, VIRTIO_F_NOTIFY_ON_EMPTY) &&
