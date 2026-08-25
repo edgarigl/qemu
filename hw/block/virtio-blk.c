@@ -36,6 +36,7 @@
 #include "hw/virtio/iothread-vq-mapping.h"
 #include "hw/virtio/virtio-access.h"
 #include "hw/virtio/virtio-blk-common.h"
+#include "hw/virtio/virtio-dma-offload.h"
 #include "qemu/coroutine.h"
 
 /* Internal buffer size limit for zone report */
@@ -52,6 +53,108 @@ static void virtio_blk_init_request(VirtIOBlock *s, VirtQueue *vq,
     req->in_len = 0;
     req->next = NULL;
     req->mr_next = NULL;
+    req->dma_nslots = 0;
+}
+
+/* Hand back whatever the offload gathered for @req, if anything. */
+static void virtio_blk_dma_release(VirtIOBlockReq *req)
+{
+    const VirtIODMAOffload *off;
+    unsigned int i;
+
+    if (!req->dma_nslots) {
+        return;
+    }
+
+    /*
+     * Looked up rather than remembered: the transport is a separate device
+     * and may already have unrealized, in which case the slots died with the
+     * mapping they came from and there is nothing to give back.
+     */
+    off = virtio_dma_offload_get(VIRTIO_DEVICE(req->dev)->dma_as);
+    if (off) {
+        for (i = 0; i < req->dma_nslots; i++) {
+            off->slot_delete(off->opaque, req->dma_slots[i],
+                             req->dma_slot_len[i]);
+        }
+    }
+
+    req->dma_nslots = 0;
+    qemu_iovec_destroy(&req->dma_qiov);
+}
+
+/*
+ * Pull a write's buffers into memory the engine can name, and describe the
+ * result in @req->dma_qiov.  Returns NULL if nothing was gathered, and the
+ * caller then writes from the driver's buffers as before.
+ *
+ * The chain is cut into pieces that fit one slot, because a write is whatever
+ * size the guest asked for while a slot is a fixed size and the engine takes a
+ * bounded number of segments.  A piece that will not fit, or that the engine
+ * declines, is simply passed through -- the resulting qiov is then part slots
+ * and part driver buffers, which is correct, just less of a win.
+ */
+static QEMUIOVector *virtio_blk_dma_gather(VirtIOBlockReq *req,
+                                           QEMUIOVector *qiov)
+{
+    const VirtIODMAOffload *off;
+    int i = 0;
+
+    off = virtio_dma_offload_get(VIRTIO_DEVICE(req->dev)->dma_as);
+    if (!off || qiov->size < off->min_len) {
+        return NULL;
+    }
+
+    qemu_iovec_init(&req->dma_qiov, qiov->niov);
+
+    while (i < qiov->niov) {
+        size_t len = 0;
+        void *slot;
+        int n;
+
+        /* The longest run from here that one slot takes. */
+        for (n = 0; i + n < qiov->niov && n < off->max_segs; n++) {
+            if (len + qiov->iov[i + n].iov_len > off->max_len) {
+                break;
+            }
+            len += qiov->iov[i + n].iov_len;
+        }
+
+        slot = len >= off->min_len ? off->slot_new(off->opaque, len) : NULL;
+        if (slot && off->gather(off->opaque, slot, &qiov->iov[i], n, len)) {
+            req->dma_slots[req->dma_nslots] = slot;
+            req->dma_slot_len[req->dma_nslots] = len;
+            req->dma_nslots++;
+            qemu_iovec_add(&req->dma_qiov, slot, len);
+            i += n;
+
+            if (req->dma_nslots == VIRTIO_BLK_MAX_DMA_SLOTS) {
+                break;
+            }
+            continue;
+        }
+
+        if (slot) {
+            off->slot_delete(off->opaque, slot, len);
+        }
+
+        /* Not gathered: pass this buffer through and try again at the next. */
+        qemu_iovec_add(&req->dma_qiov, qiov->iov[i].iov_base,
+                       qiov->iov[i].iov_len);
+        i++;
+    }
+
+    if (!req->dma_nslots) {
+        qemu_iovec_destroy(&req->dma_qiov);
+        return NULL;
+    }
+
+    for (; i < qiov->niov; i++) {
+        qemu_iovec_add(&req->dma_qiov, qiov->iov[i].iov_base,
+                       qiov->iov[i].iov_len);
+    }
+
+    return &req->dma_qiov;
 }
 
 void virtio_blk_req_complete(VirtIOBlockReq *req, unsigned char status)
@@ -105,6 +208,8 @@ static void virtio_blk_rw_complete(void *opaque, int ret)
         VirtIOBlockReq *req = next;
         next = req->mr_next;
         trace_virtio_blk_rw_complete(vdev, req, ret);
+
+        virtio_blk_dma_release(req);
 
         if (req->qiov.nalloc != -1) {
             /* If nalloc is != -1 req->qiov is a local copy of the original
@@ -256,7 +361,28 @@ static inline void submit_requests(VirtIOBlock *s, MultiReqBuffer *mrb,
                               num_reqs - 1);
     }
 
-    if (blk_ram_registrar_ok(&s->blk_ram_registrar)) {
+    /*
+     * A write reads the driver's buffers, and on a transport that reaches its
+     * driver across a link that read costs link bandwidth and a CPU blocked on
+     * it.  Such a transport can offer an engine that pulls the buffers into
+     * local memory faster than the CPU reads one byte of them, so write from
+     * there instead.  Reads are left alone: they go the other way, which on
+     * this transport is already the fast direction.
+     */
+    if (is_write) {
+        QEMUIOVector *dma_qiov = virtio_blk_dma_gather(mrb->reqs[start], qiov);
+
+        if (dma_qiov) {
+            qiov = dma_qiov;
+        }
+    }
+
+    /*
+     * Only the driver's buffers are registered with the block layer; slots
+     * belong to the transport and are not, so the hint has to go with them.
+     */
+    if (!mrb->reqs[start]->dma_nslots &&
+        blk_ram_registrar_ok(&s->blk_ram_registrar)) {
         flags |= BDRV_REQ_REGISTERED_BUF;
     }
 

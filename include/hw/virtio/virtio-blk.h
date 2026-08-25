@@ -76,6 +76,14 @@ struct VirtIOBlock {
     BlockRAMRegistrar blk_ram_registrar;
 };
 
+/*
+ * How many DMA-offload slots one write may hold.  Eight times the transport's
+ * slot size is the largest chain the engine gathers in one go; past that the
+ * tail of the chain is written straight from the driver's buffers, which is
+ * what would have happened to all of it anyway.
+ */
+#define VIRTIO_BLK_MAX_DMA_SLOTS 8
+
 typedef struct VirtIOBlockReq {
     VirtQueueElement elem;
     int64_t sector_num;
@@ -86,6 +94,17 @@ typedef struct VirtIOBlockReq {
     struct virtio_blk_inhdr *in;
     struct virtio_blk_outhdr out;
     QEMUIOVector qiov;
+    /*
+     * Where a DMA offload gathered this write, when the transport offers one.
+     * @dma_qiov describes the slots and replaces @qiov for the duration of the
+     * block request, so both have to live until it completes; the slots go
+     * back to the transport there too.  Only the head request of a merge
+     * carries these -- it is the one the completion callback is given.
+     */
+    QEMUIOVector dma_qiov;
+    void *dma_slots[VIRTIO_BLK_MAX_DMA_SLOTS];
+    size_t dma_slot_len[VIRTIO_BLK_MAX_DMA_SLOTS];
+    unsigned int dma_nslots;
     size_t in_len;
     struct VirtIOBlockReq *next;
     struct VirtIOBlockReq *mr_next;
