@@ -28,6 +28,7 @@
 #include "qemu/config-file.h"
 #include "qobject/qdict.h"
 #include "hw/virtio/virtio-net.h"
+#include "hw/virtio/virtio-dma-offload.h"
 #include "net/vhost_net.h"
 #include "net/announce.h"
 #include "hw/virtio/virtio-bus.h"
@@ -2754,6 +2755,8 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
         unsigned int out_num;
         struct iovec sg[VIRTQUEUE_MAX_SIZE], sg2[VIRTQUEUE_MAX_SIZE + 1], *out_sg;
         struct virtio_net_hdr vhdr;
+        const VirtIODMAOffload *off;
+        struct iovec dma_sg;
 
         elem = virtqueue_pop(q->tx_vq, sizeof(VirtQueueElement));
         if (!elem) {
@@ -2807,6 +2810,40 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
             if (out_num < 1) {
                 virtio_error(vdev, "virtio-net nothing to send");
                 goto detach;
+            }
+        }
+
+        /*
+         * The buffers are the driver's, and on most transports that means
+         * host RAM the net backend can read for free.  On a transport that
+         * reaches its driver across a link it does not: writev() would drag
+         * every byte over the link with the CPU blocked on it.  Such a
+         * transport can offer an engine that pulls the whole chain into
+         * local memory faster than the CPU reads one byte of it, so hand it
+         * the chain and send from there instead.
+         *
+         * Only above the transport's own threshold -- below that the engine's
+         * setup costs more than it saves -- and only when it accepts the
+         * chain, which it will not if any buffer is not really in its window.
+         * The vnet-header swap above is exactly such a case: it splices in a
+         * stack address, and no engine can reach that.
+         */
+        off = virtio_dma_offload_get(vdev->dma_as);
+        if (off) {
+            size_t total = iov_size(out_sg, out_num);
+
+            if (total >= off->min_len) {
+                if (!q->tx_slot) {
+                    q->tx_slot = off->slot_new(off->opaque, total);
+                }
+                if (q->tx_slot &&
+                    off->gather(off->opaque, q->tx_slot, out_sg, out_num,
+                                total)) {
+                    dma_sg.iov_base = q->tx_slot;
+                    dma_sg.iov_len = total;
+                    out_sg = &dma_sg;
+                    out_num = 1;
+                }
             }
         }
 
@@ -3035,6 +3072,22 @@ static void virtio_net_del_queue(VirtIONet *n, int index)
         q->tx_bh = NULL;
     }
     q->tx_waiting = 0;
+
+    if (q->tx_slot) {
+        /*
+         * Looked up rather than remembered: the transport is a separate
+         * device and may already have unrealized, in which case the slot
+         * died with the mapping it came from and there is nothing to give
+         * back.
+         */
+        const VirtIODMAOffload *off = virtio_dma_offload_get(vdev->dma_as);
+
+        if (off) {
+            off->slot_delete(off->opaque, q->tx_slot, 0);
+        }
+        q->tx_slot = NULL;
+    }
+
     virtio_del_queue(vdev, index * 2 + 1);
 }
 

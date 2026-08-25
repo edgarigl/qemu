@@ -164,6 +164,13 @@ typedef struct VirtIONetQueue {
     struct {
         VirtQueueElement *elem;
     } async_tx;
+    /*
+     * Where a DMA offload gathers this queue's TX chains, when the transport
+     * offers one.  A single slot is enough: qemu_sendv_packet_async() either
+     * consumes the buffer before it returns or stops the flush entirely, so
+     * this queue never has two gathered chains outstanding.
+     */
+    void *tx_slot;
     struct VirtIONet *n;
 } VirtIONetQueue;
 
