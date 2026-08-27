@@ -86,6 +86,20 @@ static inline void set_bit_atomic(long nr, unsigned long *addr)
 }
 
 /**
+ * test_and_set_bit_atomic - Set a bit and return its old value, atomically
+ * @nr: the bit to set
+ * @addr: the address to start counting from
+ */
+static inline int test_and_set_bit_atomic(long nr, unsigned long *addr)
+{
+    unsigned long mask = BIT_MASK(nr);
+    unsigned long *p = addr + BIT_WORD(nr);
+    unsigned long old = qatomic_fetch_or(p, mask);
+
+    return (old & mask) != 0;
+}
+
+/**
  * clear_bit - Clears a bit in memory
  * @nr: Bit to clear
  * @addr: Address to start counting from
