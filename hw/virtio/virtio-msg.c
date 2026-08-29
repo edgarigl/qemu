@@ -742,27 +742,18 @@ static int virtio_msg_set_guest_notifier(DeviceState *d, int n, bool assign,
     VirtIOMSGDev *mdev = VIRTIO_MSG_DEV(d);
     VirtIOMSGProxy *s = VIRTIO_MSG(mdev->proxy);
     VirtIODevice *vdev = virtio_msg_lookup_vdev(s, mdev->dev_num, __func__);
-    VirtQueue *vq;
-    EventNotifier *notifier;
     VirtioDeviceClass *vdc;
+    int r;
 
     if (!vdev) {
         return -ENODEV;
     }
 
     vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
-    vq = virtio_get_queue(vdev, n);
-    notifier = virtio_queue_get_guest_notifier(vq);
 
-    if (assign) {
-        int r = event_notifier_init(notifier, 0);
-        if (r < 0) {
-            return r;
-        }
-        virtio_queue_set_guest_notifier_fd_handler(vq, true, with_irqfd);
-    } else {
-        virtio_queue_set_guest_notifier_fd_handler(vq, false, with_irqfd);
-        event_notifier_cleanup(notifier);
+    r = virtio_set_guest_notifier(vdev, n, assign, with_irqfd);
+    if (r < 0) {
+        return r;
     }
 
     if (vdc->guest_notifier_mask && vdev->use_guest_notifier_mask) {
@@ -778,27 +769,21 @@ static int virtio_msg_set_config_guest_notifier(DeviceState *d, bool assign,
     VirtIOMSGDev *mdev = VIRTIO_MSG_DEV(d);
     VirtIOMSGProxy *s = VIRTIO_MSG(mdev->proxy);
     VirtIODevice *vdev = virtio_msg_lookup_vdev(s, mdev->dev_num, __func__);
-    EventNotifier *notifier;
     VirtioDeviceClass *vdc;
-    int r = 0;
+    int r;
 
     if (!vdev) {
         return -ENODEV;
     }
 
     vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
-    notifier = virtio_config_get_guest_notifier(vdev);
 
-    if (assign) {
-        r = event_notifier_init(notifier, 0);
-        if (r < 0) {
-            return r;
-        }
-        virtio_config_set_guest_notifier_fd_handler(vdev, assign, with_irqfd);
-    } else {
-        virtio_config_set_guest_notifier_fd_handler(vdev, assign, with_irqfd);
-        event_notifier_cleanup(notifier);
+    r = virtio_set_guest_notifier(vdev, VIRTIO_CONFIG_IRQ_IDX, assign,
+                                  with_irqfd);
+    if (r < 0) {
+        return r;
     }
+
     if (vdc->guest_notifier_mask && vdev->use_guest_notifier_mask) {
         vdc->guest_notifier_mask(vdev, VIRTIO_CONFIG_IRQ_IDX, !assign);
     }
