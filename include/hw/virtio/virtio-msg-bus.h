@@ -98,6 +98,15 @@ static inline AddressSpace *virtio_msg_bus_get_remote_as(BusState *bus)
     VirtIOMSGBusDeviceClass *bdc;
     VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
 
+    /*
+     * A virtio device can be plugged before -- or without -- the bus device
+     * that reaches the peer.  There is no remote address space to hand out
+     * yet, so name the local one rather than dereferencing NULL.
+     */
+    if (!bd) {
+        return &address_space_memory;
+    }
+
     bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
 
     if (bdc->get_remote_as) {

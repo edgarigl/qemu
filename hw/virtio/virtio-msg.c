@@ -847,7 +847,16 @@ static void virtio_msg_pre_plugged(DeviceState *d, Error **errp)
 
 static AddressSpace *virtio_msg_get_dma_as(DeviceState *d)
 {
-    VirtIOMSGProxy *s = VIRTIO_MSG(d);
+    /*
+     * As with every other hook on this class, @d is the per-device
+     * VirtIOMSGDev and not the proxy -- the msg bus hangs off the proxy, so
+     * go through the device's back-pointer to reach it.  Casting @d straight
+     * to VirtIOMSGProxy reads msg_bus out of the wrong object, which a build
+     * with --disable-qom-cast-debug will not catch: it segfaults on the first
+     * -device plugged onto the bus.
+     */
+    VirtIOMSGDev *mdev = VIRTIO_MSG_DEV(d);
+    VirtIOMSGProxy *s = VIRTIO_MSG(mdev->proxy);
     AddressSpace *as;
 
     as = virtio_msg_bus_get_remote_as(&s->msg_bus);
