@@ -975,6 +975,15 @@ static void virtio_msg_bus_class_init(ObjectClass *klass, const void *data)
 
     /* Needed for multiple devs of the same kind (virtio-net).  */
     bus_class->get_dev_path = virtio_msg_bus_get_dev_path;
+
+    /*
+     * One virtio device per proxy bus.  Without this the bus never reads as
+     * full and qdev puts every -device on the first one it finds, so only a
+     * single device is ever visible to the driver -- and a second device of
+     * the same kind trips the vmstate assert, because get_dev_path above
+     * names the bus owner and both then share an idstr.
+     */
+    bus_class->max_dev = 1;
 }
 
 static const TypeInfo virtio_msg_bus_types[] = {
