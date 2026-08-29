@@ -487,6 +487,18 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 
     /* We handle some generic bus messages. */
     if (msg->type & VIRTIO_MSG_TYPE_BUS) {
+        /*
+         * Only requests get an answer.  Replying to a reply is what turns a
+         * single keepalive BUS_PING into a storm: the peer answers our ping
+         * response, we answer that, and the link saturates on ping traffic --
+         * measured on rave2 as a full core burnt and virtio-net down to a few
+         * Mbit/s.  The device-message path below already drops responses; the
+         * bus path returns before ever reaching that check.
+         */
+        if (msg->type & VIRTIO_MSG_TYPE_RESPONSE) {
+            return VIRTIO_MSG_NO_ERROR;
+        }
+
         if (msg->msg_id == VIRTIO_MSG_BUS_GET_DEVICES) {
             virtio_msg_bus_get_devices(s, msg);
         }
