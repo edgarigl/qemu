@@ -16,6 +16,8 @@ system_virtio_ss.add(files('virtio-qmp.c'))
 system_virtio_ss.add(when: 'CONFIG_VIRTIO_MSG', if_true: files(
     'virtio-msg.c',
     'virtio-msg-bus.c',
+    'virtio-msg-bus-user.c',
+    'virtio-msg-machine.c',
 ))
 
 if have_vhost
