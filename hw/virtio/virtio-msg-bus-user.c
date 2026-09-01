@@ -27,6 +27,12 @@
  * optional at every step: no pool, an old kernel, or a chain that does not
  * fit and the device model reads the window itself, as it always did.
  *
+ * One failure is not optional, though.  If the driver ever answers EHWPOISON
+ * it has lost control of an engine that may still write the pool whenever it
+ * pleases, and the pool becomes untouchable for the life of the fd: no more
+ * transfers, no reads, and no slot handed back to be filled by someone else.
+ * That is what pool_dead below is for.
+ *
  * Copyright (c) 2025 Advanced Micro Devices, Inc.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -106,6 +112,13 @@ typedef struct VirtIOMSGBusUser {
     uint64_t pool_size;
     unsigned long *pool_used;   /* one bit per slot */
     unsigned int pool_slots;
+    /*
+     * Latched when the driver reports the engine unstoppable.  Read from the
+     * iothreads that allocate slots as well as the main loop, hence atomic;
+     * it only ever goes false to true, so a racing reader that misses it once
+     * simply sees it on the next call.
+     */
+    bool pool_dead;
 
     VirtIODMAOffload offload;
 
@@ -224,7 +237,8 @@ static void *vmsg_user_slot_new(void *opaque, size_t len)
     VirtIOMSGBusUser *s = opaque;
     unsigned int i;
 
-    if (!s->pool || len > VMSG_USER_SLOT_SIZE) {
+    if (!s->pool || qatomic_read(&s->pool_dead) ||
+        len > VMSG_USER_SLOT_SIZE) {
         return NULL;
     }
 
@@ -242,7 +256,12 @@ static void vmsg_user_slot_delete(void *opaque, void *slot, size_t len)
     VirtIOMSGBusUser *s = opaque;
     size_t off;
 
-    if (!s->pool || !slot) {
+    /*
+     * A dead engine may still be writing this slot, so it is not free and
+     * never becomes free again.  Leaking it is the point: the bit stays set
+     * so nothing else is ever pointed at these bytes.
+     */
+    if (!s->pool || !slot || qatomic_read(&s->pool_dead)) {
         return;
     }
 
@@ -268,7 +287,8 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
     size_t got = 0;
     unsigned int i;
 
-    if (!s->pool || num > VIRTIO_MSG_USER_DMA_MAX_SEGS ||
+    if (!s->pool || qatomic_read(&s->pool_dead) ||
+        num > VIRTIO_MSG_USER_DMA_MAX_SEGS ||
         len > VMSG_USER_SLOT_SIZE) {
         return false;
     }
@@ -305,6 +325,21 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
     vec.done = 0;
 
     if (ioctl(s->fd, VIRTIO_MSG_USER_DMA_VEC, &vec) < 0) {
+        if (errno == EHWPOISON) {
+            /*
+             * The engine would not stop and the driver has given up on it.
+             * Retiring the pool here rather than declining this one transfer
+             * is what keeps us off bytes it may still write: from now on no
+             * slot is handed out, no slot is recycled, and every chain goes
+             * over the window with the CPU as it did before there was an
+             * engine.  Only a device reset brings it back.
+             */
+            qatomic_set(&s->pool_dead, true);
+            error_report("virtio-msg-bus-user: the DMA engine could not be "
+                         "stopped; retiring the pool and copying with the CPU");
+            return false;
+        }
+
         /*
          * Rate-limited by being a warning nobody should see: the kernel
          * bounds-checks the whole vector before running any of it, so a
