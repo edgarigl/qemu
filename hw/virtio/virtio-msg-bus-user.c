@@ -90,6 +90,7 @@ struct virtio_msg_user_dma_vec {
 
 #define VIRTIO_MSG_USER_DMA_FROM_HOST 0
 #define VIRTIO_MSG_USER_DMA_TO_HOST   1
+#define VIRTIO_MSG_USER_DMA_NOWAIT    (1u << 0)
 
 #define VIRTIO_MSG_USER_DMA_VEC \
     _IOWR('v', 0x03, struct virtio_msg_user_dma_vec)
@@ -126,6 +127,7 @@ typedef struct VirtIOMSGBusUser {
         char *dev_path;
         uint64_t mem_size;
         uint64_t dma_min;
+        bool dma_nowait;
     } cfg;
 } VirtIOMSGBusUser;
 
@@ -321,7 +323,7 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
     vec.segs = (uintptr_t)segs;
     vec.nsegs = num;
     vec.dir = dir;
-    vec.flags = 0;
+    vec.flags = s->cfg.dma_nowait ? VIRTIO_MSG_USER_DMA_NOWAIT : 0;
     vec.done = 0;
 
     if (ioctl(s->fd, VIRTIO_MSG_USER_DMA_VEC, &vec) < 0) {
@@ -337,6 +339,16 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
             qatomic_set(&s->pool_dead, true);
             error_report("virtio-msg-bus-user: the DMA engine could not be "
                          "stopped; retiring the pool and copying with the CPU");
+            return false;
+        }
+
+        /*
+         * Contention in NOWAIT mode is expected, and the caller's normal CPU
+         * path is exactly the low-latency fallback it requested.  The kernel
+         * claims a channel before syncing or moving anything, so -EBUSY must
+         * report zero completed segments.
+         */
+        if (errno == EBUSY && s->cfg.dma_nowait && vec.done == 0) {
             return false;
         }
 
@@ -552,6 +564,7 @@ static const Property virtio_msg_bus_user_props[] = {
     DEFINE_PROP_UINT64("mem-size", VirtIOMSGBusUser, cfg.mem_size, 0),
     /* 0 means the measured default; see VMSG_USER_DMA_MIN. */
     DEFINE_PROP_UINT64("dma-min", VirtIOMSGBusUser, cfg.dma_min, 0),
+    DEFINE_PROP_BOOL("dma-nowait", VirtIOMSGBusUser, cfg.dma_nowait, false),
 };
 
 static void virtio_msg_bus_user_init(Object *obj)
