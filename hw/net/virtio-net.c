@@ -2701,6 +2701,17 @@ static ssize_t virtio_net_receive(NetClientState *nc, const uint8_t *buf,
 
 static int32_t virtio_net_flush_tx(VirtIONetQueue *q);
 
+static void virtio_net_flush_tx_completions(VirtIONetQueue *q,
+                                            unsigned int count)
+{
+    if (!count) {
+        return;
+    }
+
+    virtqueue_flush(q->tx_vq, count);
+    virtio_notify(VIRTIO_DEVICE(q->n), q->tx_vq);
+}
+
 static void virtio_net_tx_complete(NetClientState *nc, ssize_t len)
 {
     VirtIONet *n = qemu_get_nic_opaque(nc);
@@ -2850,23 +2861,26 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
         ret = qemu_sendv_packet_async(qemu_get_subqueue(n->nic, queue_index),
                                       out_sg, out_num, virtio_net_tx_complete);
         if (ret == 0) {
+            virtio_net_flush_tx_completions(q, num_packets);
             virtio_queue_set_notification(q->tx_vq, 0);
             q->async_tx.elem = elem;
             return -EBUSY;
         }
 
 drop:
-        virtqueue_push(q->tx_vq, elem, 0);
-        virtio_notify(vdev, q->tx_vq);
+        virtqueue_fill(q->tx_vq, elem, 0, num_packets);
         g_free(elem);
 
         if (++num_packets >= n->tx_burst) {
             break;
         }
     }
+
+    virtio_net_flush_tx_completions(q, num_packets);
     return num_packets;
 
 detach:
+    virtio_net_flush_tx_completions(q, num_packets);
     virtqueue_detach_element(q->tx_vq, elem, 0);
     g_free(elem);
     return -EINVAL;
