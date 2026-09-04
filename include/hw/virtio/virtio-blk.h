@@ -74,6 +74,12 @@ struct VirtIOBlock {
     uint64_t host_features;
     size_t config_size;
     BlockRAMRegistrar blk_ram_registrar;
+
+    struct {
+        uint64_t merged_submissions;
+        uint64_t merged_requests;
+        uint64_t merged_bytes;
+    } dma_stats;
 };
 
 /*

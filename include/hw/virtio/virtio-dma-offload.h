@@ -28,6 +28,19 @@
 
 #include "system/memory.h"
 
+typedef enum VirtIODMAFallbackReason {
+    VIRTIO_DMA_FALLBACK_BELOW_MIN,
+    VIRTIO_DMA_FALLBACK_POOL_FULL,
+    VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE,
+    VIRTIO_DMA_FALLBACK_SLOT_TOO_LARGE,
+    VIRTIO_DMA_FALLBACK_UNSUPPORTED_BUFFER,
+    VIRTIO_DMA_FALLBACK_TOO_MANY_SEGS,
+    VIRTIO_DMA_FALLBACK_DMA_BUSY,
+    VIRTIO_DMA_FALLBACK_DMA_ERROR,
+    VIRTIO_DMA_FALLBACK_SLOT_LIMIT,
+    VIRTIO_DMA_FALLBACK__MAX,
+} VirtIODMAFallbackReason;
+
 typedef struct VirtIODMAOffload {
     /*
      * Pull the @num buffers described by @sg, @len bytes in total, into
@@ -37,7 +50,8 @@ typedef struct VirtIODMAOffload {
      * the buffers itself.  On success @slot holds the gathered bytes.
      */
     bool (*gather)(void *opaque, void *slot, const struct iovec *sg,
-                   unsigned int num, size_t len);
+                   unsigned int num, size_t len,
+                   VirtIODMAFallbackReason *reason);
 
     /*
      * The other direction: push @len bytes from @slot out into the @num
@@ -62,8 +76,13 @@ typedef struct VirtIODMAOffload {
      * it knows the address of, which rules out the heap.  A slot is valid
      * until it is deleted or the transport unregisters, whichever is first.
      */
-    void *(*slot_new)(void *opaque, size_t len);
+    void *(*slot_new)(void *opaque, size_t len,
+                      VirtIODMAFallbackReason *reason);
     void (*slot_delete)(void *opaque, void *slot, size_t len);
+
+    /* Account bytes that the device model copied after offload declined. */
+    void (*record_fallback)(void *opaque, VirtIODMAFallbackReason reason,
+                            size_t len);
 
     /*
      * Below this many bytes an engine's fixed setup cost exceeds what it
@@ -94,5 +113,15 @@ void virtio_dma_offload_unregister(AddressSpace *as);
 
 /* NULL when @as has no engine behind it, which is the common case. */
 const VirtIODMAOffload *virtio_dma_offload_get(AddressSpace *as);
+
+static inline void
+virtio_dma_offload_record_fallback(const VirtIODMAOffload *off,
+                                   VirtIODMAFallbackReason reason,
+                                   size_t len)
+{
+    if (off->record_fallback) {
+        off->record_fallback(off->opaque, reason, len);
+    }
+}
 
 #endif /* QEMU_VIRTIO_DMA_OFFLOAD_H */

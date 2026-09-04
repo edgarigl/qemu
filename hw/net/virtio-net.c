@@ -2842,19 +2842,26 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
         off = virtio_dma_offload_get(vdev->dma_as);
         if (off) {
             size_t total = iov_size(out_sg, out_num);
+            VirtIODMAFallbackReason reason = VIRTIO_DMA_FALLBACK_BELOW_MIN;
+            bool gathered = false;
 
             if (total >= off->min_len) {
                 if (!q->tx_slot) {
-                    q->tx_slot = off->slot_new(off->opaque, total);
+                    q->tx_slot = off->slot_new(off->opaque, total, &reason);
                 }
                 if (q->tx_slot &&
                     off->gather(off->opaque, q->tx_slot, out_sg, out_num,
-                                total)) {
+                                total, &reason)) {
                     dma_sg.iov_base = q->tx_slot;
                     dma_sg.iov_len = total;
                     out_sg = &dma_sg;
                     out_num = 1;
+                    gathered = true;
                 }
+            }
+
+            if (!gathered) {
+                virtio_dma_offload_record_fallback(off, reason, total);
             }
         }
 

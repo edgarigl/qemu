@@ -47,9 +47,11 @@
 #include "qapi/error.h"
 #include "qemu/bitmap.h"
 #include "qemu/error-report.h"
+#include "qemu/queue.h"
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "hw/core/qdev-properties.h"
 
 #include "hw/virtio/virtio-msg-bus.h"
@@ -99,6 +101,11 @@ struct virtio_msg_user_dma_vec {
 OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMSGBusUser,
                            VIRTIO_MSG_BUS_USER)
 
+typedef struct VmsgUserPending {
+    VirtIOMSG msg;
+    QTAILQ_ENTRY(VmsgUserPending) next;
+} VmsgUserPending;
+
 typedef struct VirtIOMSGBusUser {
     VirtIOMSGBusDevice parent_obj;
 
@@ -120,6 +127,35 @@ typedef struct VirtIOMSGBusUser {
      * simply sees it on the next call.
      */
     bool pool_dead;
+
+    QemuMutex tx_lock;
+    QTAILQ_HEAD(, VmsgUserPending) tx_pending;
+    QEMUBH *tx_bh;
+    QEMUTimer *tx_retry_timer;
+    bool tx_handler_enabled;
+    bool stopping;
+
+    struct {
+        uint64_t rx_messages;
+        uint64_t tx_messages;
+        uint64_t tx_eagain;
+        uint64_t tx_errors;
+        uint64_t tx_queued;
+        uint64_t tx_retried;
+        uint64_t tx_coalesced;
+        uint64_t tx_retry_wakeups;
+        uint64_t slot_requests;
+        uint64_t slots_allocated;
+        uint64_t slots_released;
+        uint64_t slots_in_use;
+        uint64_t pool_high_water;
+        uint64_t dma_requests;
+        uint64_t dma_completions;
+        uint64_t dma_bytes;
+        uint64_t dma_segments;
+        uint64_t fallback_count[VIRTIO_DMA_FALLBACK__MAX];
+        uint64_t fallback_bytes[VIRTIO_DMA_FALLBACK__MAX];
+    } stats;
 
     VirtIODMAOffload offload;
 
@@ -149,6 +185,101 @@ typedef struct VirtIOMSGBusUser {
  * because it is a property of somebody's engine and not of this code.
  */
 #define VMSG_USER_DMA_MIN     8192
+#define VMSG_USER_TX_RETRY_MS 1
+
+static const char *const vmsg_user_fallback_name[] = {
+    [VIRTIO_DMA_FALLBACK_BELOW_MIN] = "below_min",
+    [VIRTIO_DMA_FALLBACK_POOL_FULL] = "pool_full",
+    [VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE] = "pool_unavailable",
+    [VIRTIO_DMA_FALLBACK_SLOT_TOO_LARGE] = "slot_too_large",
+    [VIRTIO_DMA_FALLBACK_UNSUPPORTED_BUFFER] = "unsupported_buffer",
+    [VIRTIO_DMA_FALLBACK_TOO_MANY_SEGS] = "too_many_segs",
+    [VIRTIO_DMA_FALLBACK_DMA_BUSY] = "dma_busy",
+    [VIRTIO_DMA_FALLBACK_DMA_ERROR] = "dma_error",
+    [VIRTIO_DMA_FALLBACK_SLOT_LIMIT] = "slot_limit",
+};
+
+static void vmsg_user_record_fallback(void *opaque,
+                                      VirtIODMAFallbackReason reason,
+                                      size_t len)
+{
+    VirtIOMSGBusUser *s = opaque;
+
+    assert(reason < VIRTIO_DMA_FALLBACK__MAX);
+    qatomic_inc(&s->stats.fallback_count[reason]);
+    qatomic_add(&s->stats.fallback_bytes[reason], len);
+}
+
+static void vmsg_user_update_pool_high_water(VirtIOMSGBusUser *s,
+                                             uint64_t in_use)
+{
+    uint64_t old = qatomic_read(&s->stats.pool_high_water);
+
+    while (in_use > old) {
+        uint64_t seen = qatomic_cmpxchg(&s->stats.pool_high_water,
+                                       old, in_use);
+
+        if (seen == old) {
+            break;
+        }
+        old = seen;
+    }
+}
+
+static char *vmsg_user_get_stats(Object *obj, Error **errp)
+{
+    VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(obj);
+    GString *out = g_string_new(NULL);
+    VmsgUserPending *pending;
+    uint64_t pending_count = 0;
+    unsigned int i;
+
+    qemu_mutex_lock(&s->tx_lock);
+    QTAILQ_FOREACH(pending, &s->tx_pending, next) {
+        pending_count++;
+    }
+    qemu_mutex_unlock(&s->tx_lock);
+
+    g_string_append_printf(out,
+        "rx_messages=%" PRIu64 " tx_messages=%" PRIu64
+        " tx_eagain=%" PRIu64 " tx_errors=%" PRIu64
+        " tx_queued=%" PRIu64 " tx_retried=%" PRIu64
+        " tx_coalesced=%" PRIu64 " tx_retry_wakeups=%" PRIu64
+        " tx_pending=%" PRIu64 "\n"
+        "slot_requests=%" PRIu64 " slots_allocated=%" PRIu64
+        " slots_released=%" PRIu64 " slots_in_use=%" PRIu64
+        " pool_high_water=%" PRIu64 " pool_slots=%u\n"
+        "dma_requests=%" PRIu64 " dma_completions=%" PRIu64
+        " dma_bytes=%" PRIu64 " dma_segments=%" PRIu64 "\n",
+        qatomic_read(&s->stats.rx_messages),
+        qatomic_read(&s->stats.tx_messages),
+        qatomic_read(&s->stats.tx_eagain),
+        qatomic_read(&s->stats.tx_errors),
+        qatomic_read(&s->stats.tx_queued),
+        qatomic_read(&s->stats.tx_retried),
+        qatomic_read(&s->stats.tx_coalesced),
+        qatomic_read(&s->stats.tx_retry_wakeups), pending_count,
+        qatomic_read(&s->stats.slot_requests),
+        qatomic_read(&s->stats.slots_allocated),
+        qatomic_read(&s->stats.slots_released),
+        qatomic_read(&s->stats.slots_in_use),
+        qatomic_read(&s->stats.pool_high_water), s->pool_slots,
+        qatomic_read(&s->stats.dma_requests),
+        qatomic_read(&s->stats.dma_completions),
+        qatomic_read(&s->stats.dma_bytes),
+        qatomic_read(&s->stats.dma_segments));
+
+    for (i = 0; i < VIRTIO_DMA_FALLBACK__MAX; i++) {
+        g_string_append_printf(out, "fallback_%s=%" PRIu64
+                               " fallback_%s_bytes=%" PRIu64 "\n",
+                               vmsg_user_fallback_name[i],
+                               qatomic_read(&s->stats.fallback_count[i]),
+                               vmsg_user_fallback_name[i],
+                               qatomic_read(&s->stats.fallback_bytes[i]));
+    }
+
+    return g_string_free(out, false);
+}
 
 static bool vmsg_user_recv_once(VirtIOMSGBusUser *s)
 {
@@ -179,6 +310,7 @@ static bool vmsg_user_recv_once(VirtIOMSGBusUser *s)
         return true;
     }
 
+    qatomic_inc(&s->stats.rx_messages);
     virtio_msg_bus_receive(VIRTIO_MSG_BUS_DEVICE(s), &msg.msg);
     return len >= 0;
 }
@@ -200,22 +332,161 @@ static void vmsg_user_read(void *opaque)
     virtio_msg_bus_user_process(bd);
 }
 
+static bool vmsg_user_same_used(const VirtIOMSG *a, const VirtIOMSG *b)
+{
+    return a->msg_id == VIRTIO_MSG_EVENT_USED &&
+           b->msg_id == VIRTIO_MSG_EVENT_USED &&
+           a->type == b->type && a->dev_num == b->dev_num &&
+           a->event_used.index == b->event_used.index;
+}
+
+/* Called with tx_lock held. */
+static bool vmsg_user_queue_tx(VirtIOMSGBusUser *s, const VirtIOMSG *msg)
+{
+    VmsgUserPending *pending;
+    bool duplicate = false;
+
+    /*
+     * One future wakeup is enough for repeated completions on the same
+     * virtqueue.  Stop at a non-EVENT_USED record so a reset/configuration
+     * response remains an ordering boundary.
+     */
+    QTAILQ_FOREACH(pending, &s->tx_pending, next) {
+        if (pending->msg.msg_id != VIRTIO_MSG_EVENT_USED) {
+            duplicate = false;
+        } else if (vmsg_user_same_used(&pending->msg, msg)) {
+            duplicate = true;
+        }
+    }
+    if (duplicate) {
+        qatomic_inc(&s->stats.tx_coalesced);
+        return false;
+    }
+
+    pending = g_new(VmsgUserPending, 1);
+    pending->msg = *msg;
+    QTAILQ_INSERT_TAIL(&s->tx_pending, pending, next);
+    qatomic_inc(&s->stats.tx_queued);
+    return true;
+}
+
+static void vmsg_user_write(void *opaque)
+{
+    VirtIOMSGBusUser *s = opaque;
+
+    for (;;) {
+        VmsgUserPending *pending;
+        ssize_t written;
+
+        qemu_mutex_lock(&s->tx_lock);
+        pending = QTAILQ_FIRST(&s->tx_pending);
+        if (!pending || s->stopping) {
+            s->tx_handler_enabled = false;
+            qemu_mutex_unlock(&s->tx_lock);
+            timer_del(s->tx_retry_timer);
+            qemu_set_fd_handler(s->fd, vmsg_user_read, NULL, s);
+            return;
+        }
+
+        written = write(s->fd, &pending->msg, sizeof(pending->msg));
+        if (written == sizeof(pending->msg)) {
+            QTAILQ_REMOVE(&s->tx_pending, pending, next);
+            qemu_mutex_unlock(&s->tx_lock);
+            g_free(pending);
+            qatomic_inc(&s->stats.tx_messages);
+            qatomic_inc(&s->stats.tx_retried);
+            continue;
+        }
+
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            qatomic_inc(&s->stats.tx_eagain);
+            qemu_mutex_unlock(&s->tx_lock);
+            timer_mod(s->tx_retry_timer,
+                      qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                      VMSG_USER_TX_RETRY_MS);
+            return;
+        }
+
+        QTAILQ_REMOVE(&s->tx_pending, pending, next);
+        qemu_mutex_unlock(&s->tx_lock);
+        warn_report("virtio-msg-bus-user: queued write failed on %s: %s",
+                    s->cfg.dev_path ? s->cfg.dev_path : "<unknown>",
+                    written < 0 ? strerror(errno) : "short write");
+        qatomic_inc(&s->stats.tx_errors);
+        g_free(pending);
+    }
+}
+
+static void vmsg_user_retry_timer(void *opaque)
+{
+    VirtIOMSGBusUser *s = opaque;
+
+    qatomic_inc(&s->stats.tx_retry_wakeups);
+    vmsg_user_write(s);
+}
+
+static void vmsg_user_enable_write(void *opaque)
+{
+    VirtIOMSGBusUser *s = opaque;
+    bool enable;
+
+    qemu_mutex_lock(&s->tx_lock);
+    enable = !s->stopping && !QTAILQ_EMPTY(&s->tx_pending);
+    s->tx_handler_enabled = enable;
+    qemu_mutex_unlock(&s->tx_lock);
+
+    if (enable) {
+        qemu_set_fd_handler(s->fd, vmsg_user_read, vmsg_user_write, s);
+        timer_mod(s->tx_retry_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                  VMSG_USER_TX_RETRY_MS);
+    }
+}
+
 static int virtio_msg_bus_user_send(VirtIOMSGBusDevice *bd,
                                            VirtIOMSG *msg_req)
 {
     VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(bd);
+    bool schedule = false;
     ssize_t written;
+
+    qemu_mutex_lock(&s->tx_lock);
+    if (s->stopping) {
+        qemu_mutex_unlock(&s->tx_lock);
+        return VIRTIO_MSG_ERROR_MEMORY;
+    }
+
+    if (!QTAILQ_EMPTY(&s->tx_pending)) {
+        vmsg_user_queue_tx(s, msg_req);
+        schedule = !s->tx_handler_enabled;
+        qemu_mutex_unlock(&s->tx_lock);
+        if (schedule) {
+            qemu_bh_schedule(s->tx_bh);
+        }
+        return VIRTIO_MSG_NO_ERROR;
+    }
 
     written = write(s->fd, msg_req, sizeof *msg_req);
 
     if (written == sizeof *msg_req) {
+        qemu_mutex_unlock(&s->tx_lock);
+        qatomic_inc(&s->stats.tx_messages);
         return VIRTIO_MSG_NO_ERROR;
     }
 
     if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        return VIRTIO_MSG_ERROR_RETRY;
+        qatomic_inc(&s->stats.tx_eagain);
+        vmsg_user_queue_tx(s, msg_req);
+        schedule = !s->tx_handler_enabled;
+        qemu_mutex_unlock(&s->tx_lock);
+        if (schedule) {
+            qemu_bh_schedule(s->tx_bh);
+        }
+        return VIRTIO_MSG_NO_ERROR;
     }
 
+    qemu_mutex_unlock(&s->tx_lock);
+    qatomic_inc(&s->stats.tx_errors);
     warn_report("virtio-msg-bus-user: write failed on %s: %s",
                 s->cfg.dev_path ? s->cfg.dev_path : "<unknown>", strerror(errno));
     return VIRTIO_MSG_ERROR_MEMORY;
@@ -233,22 +504,34 @@ static int virtio_msg_bus_user_send(VirtIOMSGBusDevice *bd,
  * collision per 9000 allocations with two blk devices on two iothreads, which
  * is silent data corruption, both writers gathering into one buffer.
  */
-static void *vmsg_user_slot_new(void *opaque, size_t len)
+static void *vmsg_user_slot_new(void *opaque, size_t len,
+                                VirtIODMAFallbackReason *reason)
 {
     VirtIOMSGBusUser *s = opaque;
     unsigned int i;
 
-    if (!s->pool || qatomic_read(&s->pool_dead) ||
-        len > VMSG_USER_SLOT_SIZE) {
+    qatomic_inc(&s->stats.slot_requests);
+
+    if (!s->pool || qatomic_read(&s->pool_dead)) {
+        *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
+        return NULL;
+    }
+    if (len > VMSG_USER_SLOT_SIZE) {
+        *reason = VIRTIO_DMA_FALLBACK_SLOT_TOO_LARGE;
         return NULL;
     }
 
     for (i = 0; i < s->pool_slots; i++) {
         if (!test_and_set_bit_atomic(i, s->pool_used)) {
+            uint64_t in_use = qatomic_inc_fetch(&s->stats.slots_in_use);
+
+            qatomic_inc(&s->stats.slots_allocated);
+            vmsg_user_update_pool_high_water(s, in_use);
             return (uint8_t *)s->pool + (size_t)i * VMSG_USER_SLOT_SIZE;
         }
     }
 
+    *reason = VIRTIO_DMA_FALLBACK_POOL_FULL;
     return NULL;
 }
 
@@ -268,6 +551,8 @@ static void vmsg_user_slot_delete(void *opaque, void *slot, size_t len)
 
     off = (uint8_t *)slot - (uint8_t *)s->pool;
     clear_bit_atomic(off / VMSG_USER_SLOT_SIZE, s->pool_used);
+    qatomic_inc(&s->stats.slots_released);
+    qatomic_dec(&s->stats.slots_in_use);
 }
 
 /*
@@ -279,7 +564,8 @@ static void vmsg_user_slot_delete(void *opaque, void *slot, size_t len)
  */
 static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
                               const struct iovec *sg, unsigned int num,
-                              size_t len, uint32_t dir)
+                              size_t len, uint32_t dir,
+                              VirtIODMAFallbackReason *reason)
 {
     struct virtio_msg_user_dma_seg segs[VIRTIO_MSG_USER_DMA_MAX_SEGS];
     struct virtio_msg_user_dma_vec vec;
@@ -288,9 +574,16 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
     size_t got = 0;
     unsigned int i;
 
-    if (!s->pool || qatomic_read(&s->pool_dead) ||
-        num > VIRTIO_MSG_USER_DMA_MAX_SEGS ||
-        len > VMSG_USER_SLOT_SIZE) {
+    if (!s->pool || qatomic_read(&s->pool_dead)) {
+        *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
+        return false;
+    }
+    if (num > VIRTIO_MSG_USER_DMA_MAX_SEGS) {
+        *reason = VIRTIO_DMA_FALLBACK_TOO_MANY_SEGS;
+        return false;
+    }
+    if (len > VMSG_USER_SLOT_SIZE) {
+        *reason = VIRTIO_DMA_FALLBACK_SLOT_TOO_LARGE;
         return false;
     }
 
@@ -305,6 +598,7 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
          * reach it.  Falling back is the correct answer, not an error.
          */
         if (base < window || base + sg[i].iov_len > window + s->cfg.mem_size) {
+            *reason = VIRTIO_DMA_FALLBACK_UNSUPPORTED_BUFFER;
             return false;
         }
 
@@ -316,6 +610,7 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
     }
 
     if (got != len) {
+        *reason = VIRTIO_DMA_FALLBACK_UNSUPPORTED_BUFFER;
         return false;
     }
 
@@ -324,6 +619,8 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
     vec.dir = dir;
     vec.flags = s->cfg.dma_nowait ? VIRTIO_MSG_USER_DMA_NOWAIT : 0;
     vec.done = 0;
+
+    qatomic_inc(&s->stats.dma_requests);
 
     if (ioctl(s->fd, VIRTIO_MSG_USER_DMA_VEC, &vec) < 0) {
         if (errno == EHWPOISON) {
@@ -336,6 +633,7 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
              * engine.  Only a device reset brings it back.
              */
             qatomic_set(&s->pool_dead, true);
+            *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
             error_report("virtio-msg-bus-user: the DMA engine could not be "
                          "stopped; retiring the pool and copying with the CPU");
             return false;
@@ -348,6 +646,7 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
          * report zero completed segments.
          */
         if (errno == EBUSY && s->cfg.dma_nowait && vec.done == 0) {
+            *reason = VIRTIO_DMA_FALLBACK_DMA_BUSY;
             return false;
         }
 
@@ -361,25 +660,32 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
                          "falling back to a CPU copy",
                          dir == VIRTIO_MSG_USER_DMA_FROM_HOST ?
                          "gather" : "scatter", strerror(errno));
+        *reason = VIRTIO_DMA_FALLBACK_DMA_ERROR;
         return false;
     }
 
+    qatomic_inc(&s->stats.dma_completions);
+    qatomic_add(&s->stats.dma_bytes, len);
+    qatomic_add(&s->stats.dma_segments, num);
     return true;
 }
 
 static bool vmsg_user_gather(void *opaque, void *slot, const struct iovec *sg,
-                             unsigned int num, size_t len)
+                             unsigned int num, size_t len,
+                             VirtIODMAFallbackReason *reason)
 {
     return vmsg_user_dma_vec(opaque, slot, sg, num, len,
-                             VIRTIO_MSG_USER_DMA_FROM_HOST);
+                             VIRTIO_MSG_USER_DMA_FROM_HOST, reason);
 }
 
 static bool vmsg_user_scatter(void *opaque, const void *slot,
                               const struct iovec *sg, unsigned int num,
                               size_t len)
 {
+    VirtIODMAFallbackReason reason;
+
     return vmsg_user_dma_vec(opaque, slot, sg, num, len,
-                             VIRTIO_MSG_USER_DMA_TO_HOST);
+                             VIRTIO_MSG_USER_DMA_TO_HOST, &reason);
 }
 
 static void vmsg_user_pool_init(VirtIOMSGBusUser *s)
@@ -419,6 +725,7 @@ static void vmsg_user_pool_init(VirtIOMSGBusUser *s)
     s->offload.scatter = vmsg_user_scatter;
     s->offload.slot_new = vmsg_user_slot_new;
     s->offload.slot_delete = vmsg_user_slot_delete;
+    s->offload.record_fallback = vmsg_user_record_fallback;
     s->offload.min_len = s->cfg.dma_min;
     s->offload.max_len = VMSG_USER_SLOT_SIZE;
     s->offload.max_segs = VIRTIO_MSG_USER_DMA_MAX_SEGS;
@@ -454,6 +761,18 @@ static void virtio_msg_bus_user_unrealize(DeviceState *dev)
 {
     VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(dev);
     VirtIOMSGBusDeviceClass *bdc = VIRTIO_MSG_BUS_DEVICE_GET_CLASS(dev);
+    VmsgUserPending *pending;
+
+    qemu_mutex_lock(&s->tx_lock);
+    s->stopping = true;
+    qemu_mutex_unlock(&s->tx_lock);
+
+    if (s->tx_bh) {
+        qemu_bh_delete(s->tx_bh);
+        s->tx_bh = NULL;
+    }
+    timer_free(s->tx_retry_timer);
+    s->tx_retry_timer = NULL;
 
     vmsg_user_pool_free(s);
 
@@ -462,6 +781,13 @@ static void virtio_msg_bus_user_unrealize(DeviceState *dev)
         close(s->fd);
         s->fd = -1;
     }
+
+    qemu_mutex_lock(&s->tx_lock);
+    while ((pending = QTAILQ_FIRST(&s->tx_pending))) {
+        QTAILQ_REMOVE(&s->tx_pending, pending, next);
+        g_free(pending);
+    }
+    qemu_mutex_unlock(&s->tx_lock);
 
     g_free(s->cfg.dev_path);
     s->cfg.dev_path = NULL;
@@ -520,6 +846,9 @@ static void virtio_msg_bus_user_realize(DeviceState *dev, Error **errp)
         s->cfg.mem_size = mem_size;
     }
 
+    s->tx_bh = qemu_bh_new(vmsg_user_enable_write, s);
+    s->tx_retry_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                     vmsg_user_retry_timer, s);
     qemu_set_fd_handler(s->fd, vmsg_user_read, NULL, s);
 
     memory_region_init_ram_from_fd(&s->mr_host, OBJECT(s), "mr",
@@ -571,6 +900,16 @@ static void virtio_msg_bus_user_init(Object *obj)
     VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(obj);
 
     s->fd = -1;
+    qemu_mutex_init(&s->tx_lock);
+    QTAILQ_INIT(&s->tx_pending);
+    object_property_add_str(obj, "stats", vmsg_user_get_stats, NULL);
+}
+
+static void virtio_msg_bus_user_finalize(Object *obj)
+{
+    VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(obj);
+
+    qemu_mutex_destroy(&s->tx_lock);
 }
 
 static void virtio_msg_bus_user_class_init(ObjectClass *klass, const void *data)
@@ -592,6 +931,7 @@ static const TypeInfo virtio_msg_bus_user_info = {
     .parent        = TYPE_VIRTIO_MSG_BUS_DEVICE,
     .instance_size = sizeof(VirtIOMSGBusUser),
     .instance_init = virtio_msg_bus_user_init,
+    .instance_finalize = virtio_msg_bus_user_finalize,
     .class_init    = virtio_msg_bus_user_class_init,
 };
 

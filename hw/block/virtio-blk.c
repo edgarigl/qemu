@@ -44,6 +44,18 @@
 
 static void virtio_blk_ioeventfd_attach(VirtIOBlock *s);
 
+static char *virtio_blk_get_dma_stats(Object *obj, Error **errp)
+{
+    VirtIOBlock *s = VIRTIO_BLK(obj);
+
+    return g_strdup_printf(
+        "merged_submissions=%" PRIu64 " merged_requests=%" PRIu64
+        " merged_bytes=%" PRIu64,
+        qatomic_read(&s->dma_stats.merged_submissions),
+        qatomic_read(&s->dma_stats.merged_requests),
+        qatomic_read(&s->dma_stats.merged_bytes));
+}
+
 static void virtio_blk_init_request(VirtIOBlock *s, VirtQueue *vq,
                                     VirtIOBlockReq *req)
 {
@@ -101,7 +113,12 @@ static QEMUIOVector *virtio_blk_dma_gather(VirtIOBlockReq *req,
     int i = 0;
 
     off = virtio_dma_offload_get(VIRTIO_DEVICE(req->dev)->dma_as);
-    if (!off || qiov->size < off->min_len) {
+    if (!off) {
+        return NULL;
+    }
+    if (qiov->size < off->min_len) {
+        virtio_dma_offload_record_fallback(
+            off, VIRTIO_DMA_FALLBACK_BELOW_MIN, qiov->size);
         return NULL;
     }
 
@@ -110,6 +127,7 @@ static QEMUIOVector *virtio_blk_dma_gather(VirtIOBlockReq *req,
     while (i < qiov->niov) {
         size_t len = 0;
         void *slot;
+        VirtIODMAFallbackReason reason = VIRTIO_DMA_FALLBACK_BELOW_MIN;
         int n;
 
         /* The longest run from here that one slot takes. */
@@ -120,8 +138,16 @@ static QEMUIOVector *virtio_blk_dma_gather(VirtIOBlockReq *req,
             len += qiov->iov[i + n].iov_len;
         }
 
-        slot = len >= off->min_len ? off->slot_new(off->opaque, len) : NULL;
-        if (slot && off->gather(off->opaque, slot, &qiov->iov[i], n, len)) {
+        if (!n) {
+            reason = VIRTIO_DMA_FALLBACK_SLOT_TOO_LARGE;
+            slot = NULL;
+        } else if (len < off->min_len) {
+            slot = NULL;
+        } else {
+            slot = off->slot_new(off->opaque, len, &reason);
+        }
+        if (slot && off->gather(off->opaque, slot, &qiov->iov[i], n, len,
+                                &reason)) {
             req->dma_slots[req->dma_nslots] = slot;
             req->dma_slot_len[req->dma_nslots] = len;
             req->dma_nslots++;
@@ -139,6 +165,8 @@ static QEMUIOVector *virtio_blk_dma_gather(VirtIOBlockReq *req,
         }
 
         /* Not gathered: pass this buffer through and try again at the next. */
+        virtio_dma_offload_record_fallback(off, reason,
+                                           qiov->iov[i].iov_len);
         qemu_iovec_add(&req->dma_qiov, qiov->iov[i].iov_base,
                        qiov->iov[i].iov_len);
         i++;
@@ -150,6 +178,8 @@ static QEMUIOVector *virtio_blk_dma_gather(VirtIOBlockReq *req,
     }
 
     for (; i < qiov->niov; i++) {
+        virtio_dma_offload_record_fallback(
+            off, VIRTIO_DMA_FALLBACK_SLOT_LIMIT, qiov->iov[i].iov_len);
         qemu_iovec_add(&req->dma_qiov, qiov->iov[i].iov_base,
                        qiov->iov[i].iov_len);
     }
@@ -359,6 +389,12 @@ static inline void submit_requests(VirtIOBlock *s, MultiReqBuffer *mrb,
         block_acct_merge_done(blk_get_stats(blk),
                               is_write ? BLOCK_ACCT_WRITE : BLOCK_ACCT_READ,
                               num_reqs - 1);
+
+        if (is_write) {
+            qatomic_inc(&s->dma_stats.merged_submissions);
+            qatomic_add(&s->dma_stats.merged_requests, num_reqs);
+            qatomic_add(&s->dma_stats.merged_bytes, qiov->size);
+        }
     }
 
     /*
@@ -2036,6 +2072,8 @@ static void virtio_blk_instance_init(Object *obj)
     device_add_bootindex_property(obj, &s->conf.conf.bootindex,
                                   "bootindex", "/disk@0,0",
                                   DEVICE(obj));
+    object_property_add_str(obj, "dma-stats", virtio_blk_get_dma_stats,
+                            NULL);
 }
 
 static const VMStateDescription vmstate_virtio_blk = {
