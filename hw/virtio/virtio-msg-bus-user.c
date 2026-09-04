@@ -179,7 +179,6 @@ static bool vmsg_user_recv_once(VirtIOMSGBusUser *s)
         return true;
     }
 
-    virtio_msg_unpack(&msg.msg);
     virtio_msg_bus_receive(VIRTIO_MSG_BUS_DEVICE(s), &msg.msg);
     return len >= 0;
 }
