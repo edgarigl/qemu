@@ -417,7 +417,9 @@ static int multireq_compare(const void *a, const void *b)
 
 static void virtio_blk_submit_multireq(VirtIOBlock *s, MultiReqBuffer *mrb)
 {
+    const VirtIODMAOffload *off = NULL;
     int i = 0, start = 0, num_reqs = 0, niov = 0, nb_sectors = 0;
+    unsigned int max_iov;
     uint32_t max_transfer;
     int64_t sector_num = 0;
 
@@ -428,6 +430,33 @@ static void virtio_blk_submit_multireq(VirtIOBlock *s, MultiReqBuffer *mrb)
     }
 
     max_transfer = blk_get_max_transfer(mrb->reqs[0]->dev->blk);
+    max_iov = blk_get_max_iov(s->blk);
+
+    /*
+     * A merged write must fit completely in the transport's bounded gather
+     * storage.  Otherwise virtio_blk_dma_gather() exhausts dma_slots[] and
+     * silently appends the tail from the remote driver buffers, producing a
+     * sharp CPU-copy cliff once a sequential merge exceeds one MiB on
+     * virtio-msg.
+     *
+     * Split the merge here so each submitted request is either wholly
+     * gatherable or independently eligible for the normal fallback path.
+     * This does not reserve slots across submissions; temporary pool
+     * exhaustion remains a transport scheduling problem.
+     */
+    if (mrb->is_write) {
+        uint64_t offload_max;
+
+        off = virtio_dma_offload_get(VIRTIO_DEVICE(s)->dma_as);
+        if (off && off->max_len && off->max_segs) {
+            offload_max = (uint64_t)off->max_len *
+                          VIRTIO_BLK_MAX_DMA_SLOTS;
+            max_transfer = MIN((uint64_t)max_transfer, offload_max);
+            max_iov = MIN((uint64_t)max_iov,
+                          (uint64_t)off->max_segs *
+                          VIRTIO_BLK_MAX_DMA_SLOTS);
+        }
+    }
 
     qsort(mrb->reqs, mrb->num_reqs, sizeof(*mrb->reqs),
           &multireq_compare);
@@ -442,7 +471,8 @@ static void virtio_blk_submit_multireq(VirtIOBlock *s, MultiReqBuffer *mrb)
              * 3. merge would exceed maximum transfer length of backend device
              */
             if (sector_num + nb_sectors != req->sector_num ||
-                niov > blk_get_max_iov(s->blk) - req->qiov.niov ||
+                req->qiov.niov > max_iov ||
+                niov > max_iov - req->qiov.niov ||
                 req->qiov.size > max_transfer ||
                 nb_sectors > (max_transfer -
                               req->qiov.size) / BDRV_SECTOR_SIZE) {
