@@ -97,6 +97,27 @@ void virtqueue_dma_cancel(VirtQueueDMA *dma)
     virtqueue_dma_complete(dma);
 }
 
+void virtqueue_dma_waiter_init(VirtIODMASlotWaiter *waiter,
+                               void (*notify)(Notifier *, void *))
+{
+    memset(waiter, 0, sizeof(*waiter));
+    waiter->notifier.notify = notify;
+}
+
+void virtqueue_dma_waiter_cancel(VirtIODMASlotWaiter *waiter)
+{
+    const VirtIODMAOffload *off = waiter->offload;
+
+    if (off && virtio_dma_offload_get(waiter->as) == off &&
+        off->slot_wait_cancel) {
+        off->slot_wait_cancel(off->opaque, waiter);
+    }
+    waiter->offload = NULL;
+    waiter->as = NULL;
+    waiter->queued = false;
+    waiter->granted = false;
+}
+
 static size_t virtqueue_dma_next_chunk(const VirtIODMAOffload *off,
                                        const QEMUIOVector *source,
                                        unsigned int *iov_index,
@@ -144,6 +165,7 @@ static size_t virtqueue_dma_next_chunk(const VirtIODMAOffload *off,
 VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
                                      const QEMUIOVector *source,
                                      unsigned int max_slots,
+                                     VirtIODMASlotWaiter *waiter,
                                      VirtQueueDMA *dma)
 {
     VirtIODMAFallbackReason reason = VIRTIO_DMA_FALLBACK_BELOW_MIN;
@@ -194,8 +216,13 @@ VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
 
     slots = g_new(void *, nslots);
     if (off->slots_reserve) {
+        if (waiter) {
+            waiter->offload = off;
+            waiter->as = as;
+        }
         VirtIODMAResult result = off->slots_reserve(off->opaque, nslots,
-                                                    lengths, slots, &reason);
+                                                    lengths, slots, waiter,
+                                                    &reason);
 
         if (result != VIRTIO_DMA_OK) {
             g_free(slots);
@@ -203,8 +230,16 @@ VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
             if (result == VIRTIO_DMA_FALLBACK) {
                 virtio_dma_offload_record_fallback(off, reason,
                                                    source->size);
+                if (waiter) {
+                    waiter->offload = NULL;
+                    waiter->as = NULL;
+                }
             }
             return result;
+        }
+        if (waiter) {
+            waiter->offload = NULL;
+            waiter->as = NULL;
         }
     } else {
         for (i = 0; i < nslots; i++) {

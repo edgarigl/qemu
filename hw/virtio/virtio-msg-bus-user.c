@@ -121,7 +121,8 @@ typedef struct VirtIOMSGBusUser {
     unsigned long *pool_used;   /* one bit per slot */
     unsigned int pool_slots;
     QemuMutex pool_lock;
-    NotifierList slot_notifiers;
+    QTAILQ_HEAD(, VirtIODMASlotWaiter) slot_waiters;
+    VirtIODMASlotWaiter *slot_waiter_owner;
     /*
      * Latched when the driver reports the engine unstoppable.  Read from the
      * iothreads that allocate slots as well as the main loop, hence atomic;
@@ -152,6 +153,8 @@ typedef struct VirtIOMSGBusUser {
         uint64_t slots_in_use;
         uint64_t pool_high_water;
         uint64_t pool_retries;
+        uint64_t pool_waiters;
+        uint64_t pool_waiter_wakeups;
         uint64_t dma_requests;
         uint64_t dma_completions;
         uint64_t dma_bytes;
@@ -166,6 +169,7 @@ typedef struct VirtIOMSGBusUser {
         char *dev_path;
         uint64_t mem_size;
         uint64_t dma_min;
+        uint32_t dma_slots;
         bool dma_nowait;
     } cfg;
 } VirtIOMSGBusUser;
@@ -252,7 +256,8 @@ static char *vmsg_user_get_stats(Object *obj, Error **errp)
         "slot_requests=%" PRIu64 " slots_allocated=%" PRIu64
         " slots_released=%" PRIu64 " slots_in_use=%" PRIu64
         " pool_high_water=%" PRIu64 " pool_slots=%u"
-        " pool_retries=%" PRIu64 "\n"
+        " pool_retries=%" PRIu64 " pool_waiters=%" PRIu64
+        " pool_waiter_wakeups=%" PRIu64 "\n"
         "dma_requests=%" PRIu64 " dma_completions=%" PRIu64
         " dma_bytes=%" PRIu64 " dma_segments=%" PRIu64 "\n",
         qatomic_read(&s->stats.rx_messages),
@@ -269,6 +274,8 @@ static char *vmsg_user_get_stats(Object *obj, Error **errp)
         qatomic_read(&s->stats.slots_in_use),
         qatomic_read(&s->stats.pool_high_water), s->pool_slots,
         qatomic_read(&s->stats.pool_retries),
+        qatomic_read(&s->stats.pool_waiters),
+        qatomic_read(&s->stats.pool_waiter_wakeups),
         qatomic_read(&s->stats.dma_requests),
         qatomic_read(&s->stats.dma_completions),
         qatomic_read(&s->stats.dma_bytes),
@@ -512,6 +519,7 @@ static int virtio_msg_bus_user_send(VirtIOMSGBusDevice *bd,
 static VirtIODMAResult
 vmsg_user_slots_reserve(void *opaque, unsigned int nslots,
                         const size_t *lengths, void **slots,
+                        VirtIODMASlotWaiter *waiter,
                         VirtIODMAFallbackReason *reason)
 {
     VirtIOMSGBusUser *s = opaque;
@@ -520,7 +528,7 @@ vmsg_user_slots_reserve(void *opaque, unsigned int nslots,
 
     qatomic_add(&s->stats.slot_requests, nslots);
 
-    if (!s->pool || qatomic_read(&s->pool_dead)) {
+    if (!s->pool) {
         *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
         return VIRTIO_DMA_FALLBACK;
     }
@@ -536,12 +544,41 @@ vmsg_user_slots_reserve(void *opaque, unsigned int nslots,
     }
 
     qemu_mutex_lock(&s->pool_lock);
+    if (qatomic_read(&s->pool_dead)) {
+        qemu_mutex_unlock(&s->pool_lock);
+        *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
+        return VIRTIO_DMA_FALLBACK;
+    }
+
+    if (waiter && waiter->granted) {
+        assert(s->slot_waiter_owner == waiter);
+        s->slot_waiter_owner = NULL;
+        waiter->granted = false;
+    } else if (s->slot_waiter_owner || !QTAILQ_EMPTY(&s->slot_waiters)) {
+        if (waiter && !waiter->queued) {
+            waiter->nslots = nslots;
+            waiter->queued = true;
+            QTAILQ_INSERT_TAIL(&s->slot_waiters, waiter, next);
+            qatomic_inc(&s->stats.pool_waiters);
+        }
+        qemu_mutex_unlock(&s->pool_lock);
+        qatomic_inc(&s->stats.pool_retries);
+        *reason = VIRTIO_DMA_FALLBACK_POOL_FULL;
+        return VIRTIO_DMA_RETRY;
+    }
+
     for (i = 0; i < s->pool_slots; i++) {
         if (!test_bit(i, s->pool_used)) {
             free_slots++;
         }
     }
     if (free_slots < nslots) {
+        if (waiter && !waiter->queued) {
+            waiter->nslots = nslots;
+            waiter->queued = true;
+            QTAILQ_INSERT_TAIL(&s->slot_waiters, waiter, next);
+            qatomic_inc(&s->stats.pool_waiters);
+        }
         qemu_mutex_unlock(&s->pool_lock);
         qatomic_inc(&s->stats.pool_retries);
         *reason = VIRTIO_DMA_FALLBACK_POOL_FULL;
@@ -561,6 +598,40 @@ vmsg_user_slots_reserve(void *opaque, unsigned int nslots,
         s, qatomic_add_fetch(&s->stats.slots_in_use, nslots));
     qemu_mutex_unlock(&s->pool_lock);
     return VIRTIO_DMA_OK;
+}
+
+static unsigned int vmsg_user_free_slots_locked(VirtIOMSGBusUser *s)
+{
+    unsigned int free_slots = 0;
+    unsigned int i;
+
+    for (i = 0; i < s->pool_slots; i++) {
+        if (!test_bit(i, s->pool_used)) {
+            free_slots++;
+        }
+    }
+    return free_slots;
+}
+
+static void vmsg_user_wake_waiter_locked(VirtIOMSGBusUser *s)
+{
+    VirtIODMASlotWaiter *waiter;
+
+    if (s->slot_waiter_owner || qatomic_read(&s->pool_dead)) {
+        return;
+    }
+
+    waiter = QTAILQ_FIRST(&s->slot_waiters);
+    if (!waiter || vmsg_user_free_slots_locked(s) < waiter->nslots) {
+        return;
+    }
+
+    QTAILQ_REMOVE(&s->slot_waiters, waiter, next);
+    waiter->queued = false;
+    waiter->granted = true;
+    s->slot_waiter_owner = waiter;
+    qatomic_inc(&s->stats.pool_waiter_wakeups);
+    waiter->notifier.notify(&waiter->notifier, NULL);
 }
 
 static void vmsg_user_slots_release(void *opaque, unsigned int nslots,
@@ -583,7 +654,7 @@ static void vmsg_user_slots_release(void *opaque, unsigned int nslots,
     }
     qatomic_add(&s->stats.slots_released, nslots);
     qatomic_sub(&s->stats.slots_in_use, nslots);
-    notifier_list_notify(&s->slot_notifiers, NULL);
+    vmsg_user_wake_waiter_locked(s);
     qemu_mutex_unlock(&s->pool_lock);
 }
 
@@ -592,7 +663,7 @@ static void *vmsg_user_slot_new(void *opaque, size_t len,
 {
     void *slot;
 
-    if (vmsg_user_slots_reserve(opaque, 1, &len, &slot, reason) ==
+    if (vmsg_user_slots_reserve(opaque, 1, &len, &slot, NULL, reason) ==
         VIRTIO_DMA_OK) {
         return slot;
     }
@@ -610,29 +681,41 @@ static void vmsg_user_slot_delete(void *opaque, void *slot, size_t len)
     vmsg_user_slots_release(s, 1, &slot, &len);
 }
 
-static void vmsg_user_slot_notifier_add(void *opaque, Notifier *notifier)
+static void vmsg_user_slot_wait_cancel(void *opaque,
+                                       VirtIODMASlotWaiter *waiter)
 {
     VirtIOMSGBusUser *s = opaque;
 
     qemu_mutex_lock(&s->pool_lock);
-    notifier_list_add(&s->slot_notifiers, notifier);
-    qemu_mutex_unlock(&s->pool_lock);
-}
-
-static void vmsg_user_slot_notifier_remove(void *opaque, Notifier *notifier)
-{
-    VirtIOMSGBusUser *s = opaque;
-
-    qemu_mutex_lock(&s->pool_lock);
-    notifier_remove(notifier);
+    if (waiter->queued) {
+        QTAILQ_REMOVE(&s->slot_waiters, waiter, next);
+        waiter->queued = false;
+    }
+    if (s->slot_waiter_owner == waiter) {
+        s->slot_waiter_owner = NULL;
+        waiter->granted = false;
+    }
+    vmsg_user_wake_waiter_locked(s);
     qemu_mutex_unlock(&s->pool_lock);
 }
 
 static void vmsg_user_pool_retire(VirtIOMSGBusUser *s)
 {
+    VirtIODMASlotWaiter *waiter;
+
     qatomic_set(&s->pool_dead, true);
     qemu_mutex_lock(&s->pool_lock);
-    notifier_list_notify(&s->slot_notifiers, NULL);
+    waiter = s->slot_waiter_owner;
+    s->slot_waiter_owner = NULL;
+    if (waiter) {
+        waiter->granted = false;
+        waiter->notifier.notify(&waiter->notifier, NULL);
+    }
+    while ((waiter = QTAILQ_FIRST(&s->slot_waiters))) {
+        QTAILQ_REMOVE(&s->slot_waiters, waiter, next);
+        waiter->queued = false;
+        waiter->notifier.notify(&waiter->notifier, NULL);
+    }
     qemu_mutex_unlock(&s->pool_lock);
 }
 
@@ -800,6 +883,9 @@ static void vmsg_user_pool_init(VirtIOMSGBusUser *s)
 
     s->pool_size = info.size;
     s->pool_slots = info.size / VMSG_USER_SLOT_SIZE;
+    if (s->cfg.dma_slots) {
+        s->pool_slots = MIN(s->pool_slots, s->cfg.dma_slots);
+    }
     s->pool_used = bitmap_new(s->pool_slots);
 
     s->offload.gather = vmsg_user_gather;
@@ -808,12 +894,12 @@ static void vmsg_user_pool_init(VirtIOMSGBusUser *s)
     s->offload.slot_delete = vmsg_user_slot_delete;
     s->offload.slots_reserve = vmsg_user_slots_reserve;
     s->offload.slots_release = vmsg_user_slots_release;
-    s->offload.slot_notifier_add = vmsg_user_slot_notifier_add;
-    s->offload.slot_notifier_remove = vmsg_user_slot_notifier_remove;
+    s->offload.slot_wait_cancel = vmsg_user_slot_wait_cancel;
     s->offload.record_fallback = vmsg_user_record_fallback;
     s->offload.min_len = s->cfg.dma_min;
     s->offload.max_len = VMSG_USER_SLOT_SIZE;
     s->offload.max_segs = VIRTIO_MSG_USER_DMA_MAX_SEGS;
+    s->offload.max_slots = s->pool_slots;
     s->offload.opaque = s;
 
     virtio_dma_offload_register(&s->as, &s->offload);
@@ -978,6 +1064,7 @@ static const Property virtio_msg_bus_user_props[] = {
     DEFINE_PROP_UINT64("mem-size", VirtIOMSGBusUser, cfg.mem_size, 0),
     /* 0 means the measured default; see VMSG_USER_DMA_MIN. */
     DEFINE_PROP_UINT64("dma-min", VirtIOMSGBusUser, cfg.dma_min, 0),
+    DEFINE_PROP_UINT32("dma-slots", VirtIOMSGBusUser, cfg.dma_slots, 0),
     DEFINE_PROP_BOOL("dma-nowait", VirtIOMSGBusUser, cfg.dma_nowait, false),
 };
 
@@ -989,7 +1076,7 @@ static void virtio_msg_bus_user_init(Object *obj)
     qemu_mutex_init(&s->tx_lock);
     qemu_mutex_init(&s->pool_lock);
     QTAILQ_INIT(&s->tx_pending);
-    notifier_list_init(&s->slot_notifiers);
+    QTAILQ_INIT(&s->slot_waiters);
     object_property_add_str(obj, "stats", vmsg_user_get_stats, NULL);
 }
 

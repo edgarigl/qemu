@@ -55,13 +55,11 @@ typedef struct VirtIOBlockDMAQueue {
     VirtIOBlock *s;
     VirtQueue *vq;
     QEMUBH *retry_bh;
-    Notifier slot_notifier;
-    const VirtIODMAOffload *offload;
+    VirtIODMASlotWaiter waiter;
     QTAILQ_HEAD(, VirtIOBlockReq) pending;
     bool blocked;
     bool stopping;
     bool retry_running;
-    bool notifier_registered;
     uint64_t wake_seq;
 } VirtIOBlockDMAQueue;
 
@@ -113,36 +111,10 @@ static void virtio_blk_dma_release(VirtIOBlockReq *req)
     virtqueue_dma_complete(&req->dma);
 }
 
-static void virtio_blk_dma_slot_available(Notifier *notifier, void *data);
-
-static bool virtio_blk_dma_register_notifier(VirtIOBlockDMAQueue *q)
-{
-    const VirtIODMAOffload *off;
-
-    if (q->notifier_registered) {
-        return true;
-    }
-
-    off = virtio_dma_offload_get(VIRTIO_DEVICE(q->s)->dma_as);
-    if (!off || !off->slot_notifier_add || !off->slot_notifier_remove) {
-        return false;
-    }
-
-    q->offload = off;
-    q->slot_notifier.notify = virtio_blk_dma_slot_available;
-    off->slot_notifier_add(off->opaque, &q->slot_notifier);
-    q->notifier_registered = true;
-    return true;
-}
-
 static bool virtio_blk_dma_queue_request(VirtIOBlockReq *req,
                                          unsigned int op)
 {
     VirtIOBlockDMAQueue *q = virtio_blk_dma_queue(req->dev, req->vq);
-
-    if (!virtio_blk_dma_register_notifier(q)) {
-        return false;
-    }
 
     req->dma_pending_op = op;
     req->dma_wait_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -181,9 +153,16 @@ static void virtio_blk_submit_rw(VirtIOBlockReq *req, bool is_write)
 static VirtIODMAResult virtio_blk_prepare_write(VirtIOBlockReq *req)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(req->dev);
+    VirtIOBlockDMAQueue *q = virtio_blk_dma_queue(req->dev, req->vq);
+    const VirtIODMAOffload *off = virtio_dma_offload_get(vdev->dma_as);
+    unsigned int max_slots = VIRTIO_BLK_MAX_DMA_SLOTS;
+
+    if (off && off->max_slots) {
+        max_slots = MIN(max_slots, off->max_slots);
+    }
 
     return virtqueue_dma_gather(vdev->dma_as, &req->qiov,
-                                VIRTIO_BLK_MAX_DMA_SLOTS, &req->dma);
+                                max_slots, &q->waiter, &req->dma);
 }
 
 void virtio_blk_req_complete(VirtIOBlockReq *req, unsigned char status)
@@ -474,12 +453,17 @@ static void virtio_blk_submit_multireq(VirtIOBlock *s, MultiReqBuffer *mrb)
 
         off = virtio_dma_offload_get(VIRTIO_DEVICE(s)->dma_as);
         if (off && off->max_len && off->max_segs) {
+            unsigned int max_slots = VIRTIO_BLK_MAX_DMA_SLOTS;
+
+            if (off->max_slots) {
+                max_slots = MIN(max_slots, off->max_slots);
+            }
             offload_max = (uint64_t)off->max_len *
-                          VIRTIO_BLK_MAX_DMA_SLOTS;
+                          max_slots;
             max_transfer = MIN((uint64_t)max_transfer, offload_max);
             max_iov = MIN((uint64_t)max_iov,
                           (uint64_t)off->max_segs *
-                          VIRTIO_BLK_MAX_DMA_SLOTS);
+                          max_slots);
         }
     }
 
@@ -1282,8 +1266,10 @@ static void virtio_blk_dma_retry_bh(void *opaque)
 
 static void virtio_blk_dma_slot_available(Notifier *notifier, void *data)
 {
-    VirtIOBlockDMAQueue *q = container_of(notifier, VirtIOBlockDMAQueue,
-                                          slot_notifier);
+    VirtIODMASlotWaiter *waiter =
+        container_of(notifier, VirtIODMASlotWaiter, notifier);
+    VirtIOBlockDMAQueue *q = container_of(waiter, VirtIOBlockDMAQueue,
+                                          waiter);
 
     qatomic_inc(&q->wake_seq);
     if (qatomic_read(&q->blocked) && !qatomic_read(&q->stopping) &&
@@ -1330,6 +1316,7 @@ static void virtio_blk_dma_queues_stop(VirtIOBlock *s)
 
     for (i = 0; i < s->conf.num_queues; i++) {
         qatomic_set(&s->dma_queues[i].stopping, true);
+        virtqueue_dma_waiter_cancel(&s->dma_queues[i].waiter);
     }
 }
 
@@ -1367,7 +1354,8 @@ static void virtio_blk_dma_queues_init(VirtIOBlock *s)
         QTAILQ_INIT(&q->pending);
         q->retry_bh = aio_bh_new(s->vq_aio_context[i],
                                  virtio_blk_dma_retry_bh, q);
-        virtio_blk_dma_register_notifier(q);
+        virtqueue_dma_waiter_init(&q->waiter,
+                                  virtio_blk_dma_slot_available);
     }
 }
 
@@ -1378,11 +1366,7 @@ static void virtio_blk_dma_queues_cleanup(VirtIOBlock *s)
     for (i = 0; i < s->conf.num_queues; i++) {
         VirtIOBlockDMAQueue *q = &s->dma_queues[i];
 
-        if (q->notifier_registered) {
-            q->offload->slot_notifier_remove(q->offload->opaque,
-                                             &q->slot_notifier);
-            q->notifier_registered = false;
-        }
+        virtqueue_dma_waiter_cancel(&q->waiter);
     }
 
     virtio_blk_dma_queues_purge(s);

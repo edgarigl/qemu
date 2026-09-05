@@ -28,6 +28,7 @@
 
 #include "qemu/iov.h"
 #include "qemu/notify.h"
+#include "qemu/queue.h"
 #include "system/memory.h"
 
 typedef enum VirtIODMAFallbackReason {
@@ -48,6 +49,16 @@ typedef enum VirtIODMAResult {
     VIRTIO_DMA_FALLBACK,
     VIRTIO_DMA_RETRY,
 } VirtIODMAResult;
+
+typedef struct VirtIODMASlotWaiter {
+    Notifier notifier;
+    QTAILQ_ENTRY(VirtIODMASlotWaiter) next;
+    const struct VirtIODMAOffload *offload;
+    AddressSpace *as;
+    unsigned int nslots;
+    bool queued;
+    bool granted;
+} VirtIODMASlotWaiter;
 
 typedef struct VirtQueueDMA {
     const struct VirtIODMAOffload *offload;
@@ -101,13 +112,13 @@ typedef struct VirtIODMAOffload {
     /* Reserve or release a complete group without partial allocation. */
     VirtIODMAResult (*slots_reserve)(void *opaque, unsigned int nslots,
                                      const size_t *lengths, void **slots,
+                                     VirtIODMASlotWaiter *waiter,
                                      VirtIODMAFallbackReason *reason);
     void (*slots_release)(void *opaque, unsigned int nslots, void **slots,
                           const size_t *lengths);
 
-    /* Notify device models when a slot release may unblock deferred work. */
-    void (*slot_notifier_add)(void *opaque, Notifier *notifier);
-    void (*slot_notifier_remove)(void *opaque, Notifier *notifier);
+    /* Cancel a queued or granted reservation waiter. */
+    void (*slot_wait_cancel)(void *opaque, VirtIODMASlotWaiter *waiter);
 
     /* Account bytes that the device model copied after offload declined. */
     void (*record_fallback)(void *opaque, VirtIODMAFallbackReason reason,
@@ -129,6 +140,7 @@ typedef struct VirtIODMAOffload {
      */
     size_t max_len;
     unsigned int max_segs;
+    unsigned int max_slots;
 
     void *opaque;
 } VirtIODMAOffload;
@@ -147,9 +159,13 @@ void virtqueue_dma_init(VirtQueueDMA *dma);
 VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
                                      const QEMUIOVector *source,
                                      unsigned int max_slots,
+                                     VirtIODMASlotWaiter *waiter,
                                      VirtQueueDMA *dma);
 void virtqueue_dma_complete(VirtQueueDMA *dma);
 void virtqueue_dma_cancel(VirtQueueDMA *dma);
+void virtqueue_dma_waiter_init(VirtIODMASlotWaiter *waiter,
+                               void (*notify)(Notifier *, void *));
+void virtqueue_dma_waiter_cancel(VirtIODMASlotWaiter *waiter);
 
 static inline void
 virtio_dma_offload_record_fallback(const VirtIODMAOffload *off,
