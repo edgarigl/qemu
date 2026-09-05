@@ -41,12 +41,57 @@ int virtio_msg_bus_send(BusState *bus, VirtIOMSG *msg_req)
     VirtIOMSGBusDeviceClass *bdc;
     int r = VIRTIO_MSG_NO_ERROR;
 
+    if (!bd || !bd->peer) {
+        return VIRTIO_MSG_ERROR_RETRY;
+    }
+
     bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
 
     if (bdc->send) {
         r = bdc->send(bd, msg_req);
     }
     return r;
+}
+
+int virtio_msg_bus_send_must_deliver(BusState *bus, VirtIOMSG *msg_req)
+{
+    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
+    VirtIOMSGBusDeviceClass *bdc;
+
+    if (!bd || !bd->peer) {
+        return VIRTIO_MSG_ERROR_RETRY;
+    }
+
+    bdc = VIRTIO_MSG_BUS_DEVICE_GET_CLASS(object_get_class(OBJECT(bd)));
+    if (bdc->send_must_deliver) {
+        return bdc->send_must_deliver(bd, msg_req);
+    }
+
+    return virtio_msg_bus_send(bus, msg_req);
+}
+
+void virtio_msg_bus_get_transport_caps(BusState *bus,
+                                       VirtIOMSGTransportCaps *caps)
+{
+    VirtIOMSGBusDevice *bd = virtio_msg_bus_get_device(bus);
+    VirtIOMSGBusDeviceClass *bdc;
+
+    *caps = (VirtIOMSGTransportCaps) {
+        .dma_as = &address_space_memory,
+        .revision = VIRTIO_MSG_TRANSPORT_REVISION,
+        .max_msg_size = VIRTIO_MSG_MAX_SIZE,
+    };
+    if (!bd) {
+        return;
+    }
+
+    bdc = VIRTIO_MSG_BUS_DEVICE_CLASS(object_get_class(OBJECT(bd)));
+    if (bdc->get_transport_caps) {
+        bdc->get_transport_caps(bd, caps);
+        return;
+    }
+
+    caps->ready = true;
 }
 
 static void virtio_msg_bus_class_init(ObjectClass *klass, const void *data)

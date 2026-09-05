@@ -189,7 +189,7 @@ static void vmsg_amp_pci_class_init(ObjectClass *klass, const void *data)
     pc->exit = vmsg_amp_pci_exit;
     pc->vendor_id = PCI_VENDOR_ID_XILINX;
     pc->device_id = 0x9039;
-    pc->revision = 1;
+    pc->revision = VIRTIO_MSG_TRANSPORT_REVISION;
     pc->class_id = PCI_CLASS_SYSTEM_OTHER;
     dc->vmsd = &vmstate_vmsg_pci;
 
@@ -244,7 +244,6 @@ static void vmsg_bus_amp_pci_process(VirtIOMSGBusDevice *bd)
 {
     VmsgBusAmpPciState *s = VMSG_BUS_AMP_PCI(bd);
     spsc_queue *q;
-    VirtIOMSG msg;
     bool r;
 
     if (!vmsg_bus_amp_pci_map_fifo(s)) {
@@ -257,8 +256,19 @@ static void vmsg_bus_amp_pci_process(VirtIOMSGBusDevice *bd)
      */
     q = bd->peer->is_driver ? &s->shm.device : &s->shm.driver;
     do {
-        r = spsc_recv(q, &msg, sizeof msg);
+        VirtIOMSG msg = { 0 };
+        uint16_t msg_size;
+
+        r = spsc_recv(q, &msg, sizeof(msg));
         if (r) {
+            msg_size = le16_to_cpu(msg.msg_size);
+            if (msg_size < virtio_msg_header_size() ||
+                msg_size > sizeof(msg)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "%s: dropping malformed message size %u\n",
+                              __func__, msg_size);
+                continue;
+            }
             virtio_msg_bus_receive(bd, &msg);
         }
     } while (r);
@@ -269,13 +279,21 @@ static int vmsg_bus_amp_pci_send(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req)
 {
     VmsgAmpPciState *pci_s = VMSG_AMP_PCI(OBJECT(bd)->parent);
     VmsgBusAmpPciState *s = VMSG_BUS_AMP_PCI(bd);
+    uint16_t msg_size = le16_to_cpu(msg_req->msg_size);
+    VirtIOMSG msg = { 0 };
     bool sent;
+
+    if (msg_size < virtio_msg_header_size() || msg_size > sizeof(msg)) {
+        return VIRTIO_MSG_ERROR_BAD_MESSAGE;
+    }
+
+    memcpy(&msg, msg_req, msg_size);
 
     if (!vmsg_bus_amp_pci_map_fifo(s)) {
         return VIRTIO_MSG_ERROR_MEMORY;
     }
 
-    sent = spsc_send(&s->shm.device, msg_req, sizeof *msg_req);
+    sent = spsc_send(&s->shm.device, &msg, sizeof(msg));
     if (!sent) {
         vmsg_bus_amp_pci_unmap_fifo(s);
         return VIRTIO_MSG_ERROR_RETRY;

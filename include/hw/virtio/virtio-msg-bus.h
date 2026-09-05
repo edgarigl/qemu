@@ -29,6 +29,15 @@ typedef struct VirtIOMSGBusPort {
     bool is_driver;
 } VirtIOMSGBusPort;
 
+typedef struct VirtIOMSGTransportCaps {
+    AddressSpace *dma_as;
+    uint64_t extra_features;
+    uint64_t transport_features;
+    uint32_t revision;
+    uint16_t max_msg_size;
+    bool ready;
+} VirtIOMSGTransportCaps;
+
 struct VirtIOMSGBusDeviceClass {
     /*< private >*/
     DeviceClass parent_class;
@@ -50,10 +59,17 @@ struct VirtIOMSGBusDeviceClass {
      */
     int (*send)(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req);
 
+    /* Send protocol responses and events that must not be dropped. */
+    int (*send_must_deliver)(VirtIOMSGBusDevice *bd, VirtIOMSG *msg_req);
+
     /*
      * A bus device can construct a view into the guests address-space.
      */
     AddressSpace *(*get_remote_as)(VirtIOMSGBusDevice *bd);
+
+    /* Return the stable capabilities exported by this bus instance. */
+    void (*get_transport_caps)(VirtIOMSGBusDevice *bd,
+                               VirtIOMSGTransportCaps *caps);
 };
 
 typedef struct VirtIOMSGBusDevice {
@@ -84,14 +100,21 @@ bool virtio_msg_bus_connect(BusState *bus,
                             const VirtIOMSGBusPort *port,
                             void *opaque);
 
-static inline void
+static inline int
 virtio_msg_bus_receive(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 {
+    if (!bd || !bd->peer) {
+        return VIRTIO_MSG_ERROR_RETRY;
+    }
+
     virtio_msg_unpack(msg);
-    bd->peer->receive(bd, msg);
+    return bd->peer->receive(bd, msg);
 }
 
 int virtio_msg_bus_send(BusState *bus, VirtIOMSG *msg_req);
+int virtio_msg_bus_send_must_deliver(BusState *bus, VirtIOMSG *msg_req);
+void virtio_msg_bus_get_transport_caps(BusState *bus,
+                                       VirtIOMSGTransportCaps *caps);
 
 static inline AddressSpace *virtio_msg_bus_get_remote_as(BusState *bus)
 {

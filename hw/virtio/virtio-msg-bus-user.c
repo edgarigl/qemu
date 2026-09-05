@@ -178,6 +178,7 @@ typedef struct VirtIOMSGBusUser {
 
     QemuMutex tx_lock;
     QTAILQ_HEAD(, VmsgUserPending) tx_pending;
+    unsigned int tx_pending_count;
     QEMUBH *tx_bh;
     QEMUTimer *tx_retry_timer;
     bool tx_handler_enabled;
@@ -226,8 +227,8 @@ typedef struct VirtIOMSGBusUser {
 } VirtIOMSGBusUser;
 
 #define VMSG_USER_DEFAULT_DEV "/dev/virtio-msg-0"
-#define VMSG_USER_WIRE_MIN    50
-#define VMSG_USER_WIRE_MAX    64
+#define VMSG_USER_WIRE_SIZE   VIRTIO_MSG_MAX_SIZE
+#define VMSG_USER_TX_PENDING_MAX 64
 
 /*
  * One slot holds one gathered chain.  A virtio-net TSO buffer reaches 64 KB
@@ -358,6 +359,7 @@ static bool vmsg_user_recv_once(VirtIOMSGBusUser *s)
         uint8_t buf[64];
     } msg;
     ssize_t len;
+    int ret;
 
     len = read(s->fd, msg.buf, sizeof(msg));
     if (len < 0) {
@@ -375,13 +377,37 @@ static bool vmsg_user_recv_once(VirtIOMSGBusUser *s)
         return false;
     }
 
-    if (len < VMSG_USER_WIRE_MIN) {
-        warn_report("virtio-msg-bus-user: short message (%zd bytes) dropped", len);
+    if (len != VMSG_USER_WIRE_SIZE) {
+        warn_report("virtio-msg-bus-user: bad record size (%zd bytes) dropped",
+                    len);
+        return true;
+    }
+    if (le16_to_cpu(msg.msg.msg_size) < virtio_msg_header_size() ||
+        le16_to_cpu(msg.msg.msg_size) > sizeof(msg)) {
+        warn_report("virtio-msg-bus-user: bad message size (%u) dropped",
+                    le16_to_cpu(msg.msg.msg_size));
+        return true;
+    }
+    if ((msg.msg.type & VIRTIO_MSG_TYPE_BUS) &&
+        le16_to_cpu(msg.msg.dev_num)) {
+        warn_report("virtio-msg-bus-user: bus message for device %u dropped",
+                    le16_to_cpu(msg.msg.dev_num));
+        return true;
+    }
+    if ((msg.msg.msg_id & VIRTIO_MSG_ID_EVENT) &&
+        (msg.msg.type & VIRTIO_MSG_TYPE_RESPONSE)) {
+        warn_report("virtio-msg-bus-user: event 0x%x marked as response",
+                    msg.msg.msg_id);
         return true;
     }
 
     qatomic_inc(&s->stats.rx_messages);
-    virtio_msg_bus_receive(VIRTIO_MSG_BUS_DEVICE(s), &msg.msg);
+    ret = virtio_msg_bus_receive(VIRTIO_MSG_BUS_DEVICE(s), &msg.msg);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-msg-bus-user: receive failed for message %u: "
+                      "ret=%d\n", msg.msg.msg_id, ret);
+    }
     return len >= 0;
 }
 
@@ -407,11 +433,11 @@ static bool vmsg_user_same_used(const VirtIOMSG *a, const VirtIOMSG *b)
     return a->msg_id == VIRTIO_MSG_EVENT_USED &&
            b->msg_id == VIRTIO_MSG_EVENT_USED &&
            a->type == b->type && a->dev_num == b->dev_num &&
-           a->event_used.index == b->event_used.index;
+           a->event_used.vq_index == b->event_used.vq_index;
 }
 
 /* Called with tx_lock held. */
-static bool vmsg_user_queue_tx(VirtIOMSGBusUser *s, const VirtIOMSG *msg)
+static int vmsg_user_queue_tx(VirtIOMSGBusUser *s, const VirtIOMSG *msg)
 {
     VmsgUserPending *pending;
     bool duplicate = false;
@@ -430,14 +456,21 @@ static bool vmsg_user_queue_tx(VirtIOMSGBusUser *s, const VirtIOMSG *msg)
     }
     if (duplicate) {
         qatomic_inc(&s->stats.tx_coalesced);
-        return false;
+        return VIRTIO_MSG_NO_ERROR;
+    }
+    if (s->tx_pending_count >= VMSG_USER_TX_PENDING_MAX) {
+        return VIRTIO_MSG_ERROR_MEMORY;
     }
 
-    pending = g_new(VmsgUserPending, 1);
+    pending = g_try_new(VmsgUserPending, 1);
+    if (!pending) {
+        return VIRTIO_MSG_ERROR_MEMORY;
+    }
     pending->msg = *msg;
     QTAILQ_INSERT_TAIL(&s->tx_pending, pending, next);
+    s->tx_pending_count++;
     qatomic_inc(&s->stats.tx_queued);
-    return true;
+    return VIRTIO_MSG_NO_ERROR;
 }
 
 static void vmsg_user_write(void *opaque)
@@ -461,6 +494,8 @@ static void vmsg_user_write(void *opaque)
         written = write(s->fd, &pending->msg, sizeof(pending->msg));
         if (written == sizeof(pending->msg)) {
             QTAILQ_REMOVE(&s->tx_pending, pending, next);
+            assert(s->tx_pending_count);
+            s->tx_pending_count--;
             qemu_mutex_unlock(&s->tx_lock);
             g_free(pending);
             qatomic_inc(&s->stats.tx_messages);
@@ -478,6 +513,8 @@ static void vmsg_user_write(void *opaque)
         }
 
         QTAILQ_REMOVE(&s->tx_pending, pending, next);
+        assert(s->tx_pending_count);
+        s->tx_pending_count--;
         qemu_mutex_unlock(&s->tx_lock);
         warn_report("virtio-msg-bus-user: queued write failed on %s: %s",
                     s->cfg.dev_path ? s->cfg.dev_path : "<unknown>",
@@ -514,11 +551,47 @@ static void vmsg_user_enable_write(void *opaque)
 }
 
 static int virtio_msg_bus_user_send(VirtIOMSGBusDevice *bd,
-                                           VirtIOMSG *msg_req)
+                                    VirtIOMSG *msg_req)
+{
+    VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(bd);
+    ssize_t written;
+
+    qemu_mutex_lock(&s->tx_lock);
+    if (s->stopping) {
+        qemu_mutex_unlock(&s->tx_lock);
+        return VIRTIO_MSG_ERROR_MEMORY;
+    }
+    if (!QTAILQ_EMPTY(&s->tx_pending)) {
+        qemu_mutex_unlock(&s->tx_lock);
+        return VIRTIO_MSG_ERROR_RETRY;
+    }
+
+    written = write(s->fd, msg_req, sizeof(*msg_req));
+    qemu_mutex_unlock(&s->tx_lock);
+
+    if (written == sizeof(*msg_req)) {
+        qatomic_inc(&s->stats.tx_messages);
+        return VIRTIO_MSG_NO_ERROR;
+    }
+    if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        qatomic_inc(&s->stats.tx_eagain);
+        return VIRTIO_MSG_ERROR_RETRY;
+    }
+
+    qatomic_inc(&s->stats.tx_errors);
+    warn_report("virtio-msg-bus-user: write failed on %s: %s",
+                s->cfg.dev_path ? s->cfg.dev_path : "<unknown>",
+                written < 0 ? strerror(errno) : "short write");
+    return VIRTIO_MSG_ERROR_MEMORY;
+}
+
+static int virtio_msg_bus_user_send_must_deliver(VirtIOMSGBusDevice *bd,
+                                                 VirtIOMSG *msg_req)
 {
     VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(bd);
     bool schedule = false;
     ssize_t written;
+    int ret;
 
     qemu_mutex_lock(&s->tx_lock);
     if (s->stopping) {
@@ -527,13 +600,16 @@ static int virtio_msg_bus_user_send(VirtIOMSGBusDevice *bd,
     }
 
     if (!QTAILQ_EMPTY(&s->tx_pending)) {
-        vmsg_user_queue_tx(s, msg_req);
+        ret = vmsg_user_queue_tx(s, msg_req);
         schedule = !s->tx_handler_enabled;
         qemu_mutex_unlock(&s->tx_lock);
         if (schedule) {
             qemu_bh_schedule(s->tx_bh);
         }
-        return VIRTIO_MSG_NO_ERROR;
+        if (ret != VIRTIO_MSG_NO_ERROR) {
+            qatomic_inc(&s->stats.tx_errors);
+        }
+        return ret;
     }
 
     written = write(s->fd, msg_req, sizeof *msg_req);
@@ -546,13 +622,16 @@ static int virtio_msg_bus_user_send(VirtIOMSGBusDevice *bd,
 
     if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
         qatomic_inc(&s->stats.tx_eagain);
-        vmsg_user_queue_tx(s, msg_req);
-        schedule = !s->tx_handler_enabled;
+        ret = vmsg_user_queue_tx(s, msg_req);
+        schedule = ret == VIRTIO_MSG_NO_ERROR && !s->tx_handler_enabled;
         qemu_mutex_unlock(&s->tx_lock);
         if (schedule) {
             qemu_bh_schedule(s->tx_bh);
         }
-        return VIRTIO_MSG_NO_ERROR;
+        if (ret != VIRTIO_MSG_NO_ERROR) {
+            qatomic_inc(&s->stats.tx_errors);
+        }
+        return ret;
     }
 
     qemu_mutex_unlock(&s->tx_lock);
@@ -1229,6 +1308,20 @@ virtio_msg_bus_user_get_remote_as(VirtIOMSGBusDevice *bd)
     return &s->as;
 }
 
+static void
+virtio_msg_bus_user_get_transport_caps(VirtIOMSGBusDevice *bd,
+                                       VirtIOMSGTransportCaps *caps)
+{
+    VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(bd);
+
+    caps->dma_as = &s->as;
+    caps->extra_features = 0;
+    caps->transport_features = 0;
+    caps->revision = VIRTIO_MSG_TRANSPORT_REVISION;
+    caps->max_msg_size = VMSG_USER_WIRE_SIZE;
+    caps->ready = s->fd >= 0;
+}
+
 static void virtio_msg_bus_user_unrealize(DeviceState *dev)
 {
     VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(dev);
@@ -1257,8 +1350,11 @@ static void virtio_msg_bus_user_unrealize(DeviceState *dev)
     qemu_mutex_lock(&s->tx_lock);
     while ((pending = QTAILQ_FIRST(&s->tx_pending))) {
         QTAILQ_REMOVE(&s->tx_pending, pending, next);
+        assert(s->tx_pending_count);
+        s->tx_pending_count--;
         g_free(pending);
     }
+    assert(!s->tx_pending_count);
     qemu_mutex_unlock(&s->tx_lock);
 
     g_free(s->cfg.dev_path);
@@ -1408,7 +1504,9 @@ static void virtio_msg_bus_user_class_init(ObjectClass *klass, const void *data)
 
     bdc->process = virtio_msg_bus_user_process;
     bdc->send = virtio_msg_bus_user_send;
+    bdc->send_must_deliver = virtio_msg_bus_user_send_must_deliver;
     bdc->get_remote_as = virtio_msg_bus_user_get_remote_as;
+    bdc->get_transport_caps = virtio_msg_bus_user_get_transport_caps;
 }
 
 static const TypeInfo virtio_msg_bus_user_info = {

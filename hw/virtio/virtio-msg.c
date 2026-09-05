@@ -21,6 +21,60 @@
 #include "trace.h"
 
 #define VIRTIO_MSG_VENDOR_ID 0x554D4551 /* 'QEMU' */
+#define VIRTIO_MSG_SUPPORTED_EXTRA_FEATURES \
+    (1ULL << VIRTIO_F_IOMMU_PLATFORM)
+#define VIRTIO_MSG_SUPPORTED_TRANSPORT_FEATURES 0ULL
+
+#define VIRTIO_MSG_VQ_FIELD_SIZE   (1U << 0)
+#define VIRTIO_MSG_VQ_FIELD_DESC   (1U << 1)
+#define VIRTIO_MSG_VQ_FIELD_DRIVER (1U << 2)
+#define VIRTIO_MSG_VQ_FIELD_DEVICE (1U << 3)
+#define VIRTIO_MSG_VQ_FIELDS_ALL   0xfU
+
+static uint16_t virtio_msg_active_max_msg_size(VirtIOMSGProxy *s)
+{
+    if (!s->latched_caps_valid || !s->latched_caps.ready ||
+        !s->latched_caps.max_msg_size) {
+        return VIRTIO_MSG_MAX_SIZE;
+    }
+
+    return s->latched_caps.max_msg_size;
+}
+
+static unsigned int virtio_msg_max_feature_blocks(VirtIOMSGProxy *s)
+{
+    size_t prefix = offsetof(VirtIOMSG,
+                             get_device_features_resp.features);
+    uint16_t max_size = virtio_msg_active_max_msg_size(s);
+
+    return max_size > prefix ? (max_size - prefix) / sizeof(uint32_t) : 0;
+}
+
+static unsigned int virtio_msg_max_config_bytes(VirtIOMSGProxy *s)
+{
+    size_t prefix = offsetof(VirtIOMSG, set_config.data);
+    uint16_t max_size = virtio_msg_active_max_msg_size(s);
+
+    return max_size > prefix ? max_size - prefix : 0;
+}
+
+static int virtio_msg_send_must_deliver(VirtIOMSGProxy *s, VirtIOMSG *msg)
+{
+    int ret;
+
+    if (le16_to_cpu(msg->msg_size) > virtio_msg_active_max_msg_size(s)) {
+        return VIRTIO_MSG_ERROR_BAD_MESSAGE;
+    }
+
+    ret = virtio_msg_bus_send_must_deliver(&s->msg_bus, msg);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: failed to send required message id %u: ret=%d\n",
+                      __func__, msg->msg_id, ret);
+    }
+
+    return ret;
+}
 
 static bool virtio_msg_bad(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
@@ -31,32 +85,40 @@ static bool virtio_msg_bad(VirtIOMSGProxy *s, VirtIOMSG *msg)
     min_size = virtio_msg_header_size();
     switch (msg->msg_id) {
     case VIRTIO_MSG_GET_DEVICE_STATUS:
-    case VIRTIO_MSG_DEVICE_INFO:
+    case VIRTIO_MSG_GET_DEVICE_INFO:
         break;
-    case VIRTIO_MSG_GET_FEATURES:
-        min_size += sizeof msg->get_features;
+    case VIRTIO_MSG_GET_DEVICE_FEATURES:
+        n = msg->get_device_features.num_blocks;
+        if (!n || n > virtio_msg_max_feature_blocks(s)) {
+            drop = true;
+            break;
+        }
+        min_size += sizeof msg->get_device_features;
         break;
-    case VIRTIO_MSG_SET_FEATURES:
-        n = msg->set_features.num;
+    case VIRTIO_MSG_SET_DRIVER_FEATURES:
+        n = msg->set_driver_features.num_blocks;
 
-        /* We expect at least one feature block.  */
-        if (n == 0 || n > VIRTIO_MSG_MAX_FEATURE_NUM) {
+        if (!n || n > virtio_msg_max_feature_blocks(s)) {
             drop = true;
             break;
         }
 
-        min_size += sizeof msg->set_features + n * 4;
+        min_size += sizeof msg->set_driver_features + n * 4;
         break;
     case VIRTIO_MSG_GET_CONFIG:
+        if (msg->get_config.length > virtio_msg_max_config_bytes(s)) {
+            drop = true;
+            break;
+        }
         min_size += sizeof msg->get_config;
         break;
     case VIRTIO_MSG_SET_CONFIG:
-        if (msg->set_config.size > VIRTIO_MSG_MAX_CONFIG_BYTES) {
+        if (msg->set_config.length > virtio_msg_max_config_bytes(s)) {
             drop = true;
             break;
         }
 
-        min_size += sizeof msg->set_config + msg->set_config.size;
+        min_size += sizeof msg->set_config + msg->set_config.length;
         break;
     case VIRTIO_MSG_SET_DEVICE_STATUS:
         min_size += sizeof msg->set_device_status;
@@ -70,6 +132,9 @@ static bool virtio_msg_bad(VirtIOMSGProxy *s, VirtIOMSG *msg)
     case VIRTIO_MSG_RESET_VQUEUE:
         min_size += sizeof msg->reset_vqueue;
         break;
+    case VIRTIO_MSG_GET_SHM:
+        min_size += sizeof msg->get_shm;
+        break;
     case VIRTIO_MSG_EVENT_AVAIL:
         min_size += sizeof msg->event_avail;
         break;
@@ -81,7 +146,8 @@ static bool virtio_msg_bad(VirtIOMSGProxy *s, VirtIOMSG *msg)
 
     /* Accept large messages allowing future backwards compatible extensions. */
     if (drop ||
-        msg->msg_size < min_size || msg->msg_size > VIRTIO_MSG_MAX_SIZE) {
+        msg->msg_size < min_size ||
+        msg->msg_size > virtio_msg_active_max_msg_size(s)) {
         return true;
     }
 
@@ -90,6 +156,33 @@ static bool virtio_msg_bad(VirtIOMSGProxy *s, VirtIOMSG *msg)
     }
 
     return false;
+}
+
+static bool virtio_msg_bus_bad(VirtIOMSGProxy *s, VirtIOMSG *msg)
+{
+    size_t min_size = virtio_msg_header_size();
+
+    if (msg->dev_num != 0 || msg->msg_size < min_size ||
+        msg->msg_size > virtio_msg_active_max_msg_size(s)) {
+        return true;
+    }
+
+    if (msg->type & VIRTIO_MSG_TYPE_RESPONSE) {
+        return false;
+    }
+
+    switch (msg->msg_id) {
+    case VIRTIO_MSG_BUS_GET_DEVICES:
+        min_size += sizeof(msg->bus_get_devices);
+        break;
+    case VIRTIO_MSG_BUS_PING:
+        min_size += sizeof(msg->bus_ping);
+        break;
+    default:
+        return true;
+    }
+
+    return msg->msg_size < min_size;
 }
 
 static VirtIODevice *virtio_msg_vdev(VirtIOMSGProxy *s, uint16_t dev_num)
@@ -113,16 +206,37 @@ static VirtIODevice *virtio_msg_lookup_vdev(VirtIOMSGProxy *s, uint16_t dev_num,
     return vdev;
 }
 
-static void virtio_msg_bus_get_devices(VirtIOMSGProxy *s,
-                                       VirtIOMSG *msg)
+static int virtio_msg_require_vdev(VirtIOMSGProxy *s, uint16_t dev_num,
+                                   VirtIODevice **vdev)
+{
+    VirtIODevice *target;
+
+    if (dev_num >= ARRAY_SIZE(s->devs)) {
+        return VIRTIO_MSG_ERROR_BAD_MESSAGE;
+    }
+
+    target = virtio_msg_vdev(s, dev_num);
+    if (!target) {
+        return VIRTIO_MSG_ERROR_NO_DEVICE;
+    }
+
+    if (vdev) {
+        *vdev = target;
+    }
+    return VIRTIO_MSG_NO_ERROR;
+}
+
+static int virtio_msg_bus_get_devices(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
     VirtIOMSG msg_resp;
     uint8_t data[VIRTIO_MSG_MAX_DEVS / 8] = {0};
     uint16_t req_offset = msg->bus_get_devices.offset;
-    uint16_t offset = MIN(req_offset, VIRTIO_MSG_MAX_DEVS);
-    uint16_t max_window = VIRTIO_MSG_MAX_DEVS - offset;
-    uint16_t num = MIN(msg->bus_get_devices.num, max_window);
-    uint16_t next_offset = offset + num;
+    uint16_t offset = req_offset;
+    uint16_t max_window = offset < VIRTIO_MSG_MAX_DEVS ?
+                          VIRTIO_MSG_MAX_DEVS - offset : 0;
+    uint16_t num = MIN(msg->bus_get_devices.count, max_window);
+    uint16_t next_offset = num && offset + num < VIRTIO_MSG_MAX_DEVS ?
+                           offset + num : 0;
     int i;
 
     for (i = 0; i < num; i++) {
@@ -135,63 +249,63 @@ static void virtio_msg_bus_get_devices(VirtIOMSGProxy *s,
     }
 
     virtio_msg_pack_bus_get_devices_resp(&msg_resp,
-                                         offset, num, next_offset,
+                                         msg->token, offset, num, next_offset,
                                          data);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
-static void virtio_msg_bus_ping(VirtIOMSGProxy *s, VirtIOMSG *msg)
+static int virtio_msg_bus_ping(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
     VirtIOMSG msg_resp;
 
-    virtio_msg_pack_bus_ping_resp(&msg_resp, msg->bus_ping.data);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+    virtio_msg_pack_bus_ping_resp(&msg_resp, msg->token,
+                                  msg->bus_ping.data);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
-static void virtio_msg_device_info(VirtIOMSGProxy *s,
-                                   VirtIOMSG *msg)
+static int virtio_msg_device_info(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
-    VirtIODevice *vdev = virtio_msg_vdev(s, msg->dev_num);
-    uint32_t config_len = 0;
-    uint32_t device_id = 0;
-    uint32_t max_vqs = 0;
+    VirtIODevice *vdev;
+    uint32_t max_virtqueues;
     VirtIOMSG msg_resp;
+    int ret;
 
-    if (vdev) {
-        device_id = vdev->device_id;
-        config_len = vdev->config_len;
-        max_vqs = virtio_get_num_queues(vdev);
-    } else {
-        error_report("%s: No virtio device on bus %s!",
-                     __func__, BUS(&s->devs[msg->dev_num].bus)->name);
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
     }
+    max_virtqueues = virtio_get_num_queues(vdev);
 
     virtio_msg_pack_get_device_info_resp(&msg_resp, msg->dev_num, msg->token,
-                                         device_id,
+                                         vdev->device_id,
                                          VIRTIO_MSG_VENDOR_ID,
-                                         /* Feature bits */
-                                         64,
-                                         config_len,
-                                         max_vqs,
+                                         /* 64 feature bits in 32-bit blocks */
+                                         2,
+                                         vdev->config_len,
+                                         max_virtqueues,
                                          0, 0);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
-static void virtio_msg_get_features(VirtIOMSGProxy *s,
-                                    VirtIOMSG *msg)
+static int virtio_msg_get_features(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
-    VirtIODevice *vdev = virtio_msg_lookup_vdev(s, msg->dev_num, __func__);
+    VirtIODevice *vdev;
     VirtIOMSG msg_resp;
-    uint32_t index = msg->get_features.index;
+    uint32_t index = msg->get_device_features.block_index;
     uint32_t f[VIRTIO_MSG_MAX_FEATURE_NUM] = { 0 };
-    uint32_t num = MIN(msg->get_features.num, VIRTIO_MSG_MAX_FEATURE_NUM);
+    uint32_t num = msg->get_device_features.num_blocks;
     uint64_t features = 0;
+    int ret;
 
-    if (vdev) {
-        VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
-
-        features = vdev->host_features & ~vdc->legacy_features;
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
     }
+
+    features = vdev->host_features &
+               ~VIRTIO_DEVICE_GET_CLASS(vdev)->legacy_features;
+    /* v23 carries VIRTIO_F_NOTIFICATION_DATA in EVENT_AVAIL. */
+    features &= ~(1ULL << VIRTIO_F_NOTIF_CONFIG_DATA);
 
     /* We only have 64 feature bits. If driver asks for more, return zeros  */
     if (index < 2) {
@@ -200,36 +314,47 @@ static void virtio_msg_get_features(VirtIOMSGProxy *s,
         f[1] = features >> 32;
     }
 
-    /* If index is out of bounds, we respond with num=0, f=0.  */
-    virtio_msg_pack_get_features_resp(&msg_resp, msg->dev_num, msg->token,
-                                      index, num, f);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+    /* Blocks beyond QEMU's 64 feature bits stay zero, as v23 requires. */
+    virtio_msg_pack_get_device_features_resp(&msg_resp, msg->dev_num,
+                                             msg->token, index, num, f);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
-static void virtio_msg_set_features(VirtIOMSGProxy *s,
-                                    VirtIOMSG *msg)
+static int virtio_msg_set_features(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
     VirtIOMSG msg_resp;
     unsigned int i;
     uint64_t f;
+    VirtIODevice *vdev;
+    int ret;
+
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
+    }
 
     f = s->devs[msg->dev_num].guest_features;
 
-    for (i = 0; i < msg->set_features.num; i++) {
-        unsigned int feature_index = i + msg->set_features.index;
+    for (i = 0; i < msg->set_driver_features.num_blocks; i++) {
+        uint64_t feature_index =
+            i + msg->set_driver_features.block_index;
 
         /* We only support up to 64bits  */
         if (feature_index >= 2) {
             break;
         }
 
-        f = deposit64(f, feature_index * 32, 32, msg->set_features.b32[i]);
+        f = deposit64(f, feature_index * 32, 32,
+                      msg->set_driver_features.features[i]);
     }
 
+    /* Keep NOTIFICATION_DATA; only NOTIF_CONFIG_DATA is unsupported. */
+    f &= ~(1ULL << VIRTIO_F_NOTIF_CONFIG_DATA);
     s->devs[msg->dev_num].guest_features = f;
 
-    virtio_msg_pack_set_features_resp(&msg_resp, msg->dev_num, msg->token);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+    virtio_msg_pack_set_driver_features_resp(&msg_resp, msg->dev_num,
+                                             msg->token);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
 static void virtio_msg_soft_reset(VirtIOMSGProxy *s, uint16_t dev_num)
@@ -238,29 +363,35 @@ static void virtio_msg_soft_reset(VirtIOMSGProxy *s, uint16_t dev_num)
 
     virtio_bus_reset(&s->devs[dev_num].bus);
     s->devs[dev_num].guest_features = 0;
+    memset(s->devs[dev_num].queue_enabled, 0,
+           sizeof(s->devs[dev_num].queue_enabled));
+    memset(s->devs[dev_num].queue_fields, 0,
+           sizeof(s->devs[dev_num].queue_fields));
 }
 
-static void virtio_msg_set_device_status(VirtIOMSGProxy *s,
-                                         VirtIOMSG *msg)
+static int virtio_msg_set_device_status(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
-    VirtIODevice *vdev = virtio_msg_vdev(s, msg->dev_num);
+    VirtIODevice *vdev;
     uint32_t status = msg->set_device_status.status;
     VirtIOMSG msg_resp;
+    int ret;
 
-    if (!vdev) {
-        return;
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
     }
 
     if (!(status & VIRTIO_CONFIG_S_DRIVER_OK)) {
         virtio_bus_stop_ioeventfd(&s->devs[msg->dev_num].bus);
     }
 
-    if (status & VIRTIO_CONFIG_S_FEATURES_OK) {
-        virtio_set_features(vdev, s->devs[msg->dev_num].guest_features);
+    if ((status & VIRTIO_CONFIG_S_FEATURES_OK) &&
+        virtio_set_features(vdev,
+                            s->devs[msg->dev_num].guest_features) < 0) {
+        status &= ~VIRTIO_CONFIG_S_FEATURES_OK;
     }
 
     virtio_set_status(vdev, status);
-    assert(vdev->status == status);
 
     if (status & VIRTIO_CONFIG_S_DRIVER_OK) {
         virtio_bus_start_ioeventfd(&s->devs[msg->dev_num].bus);
@@ -272,150 +403,281 @@ static void virtio_msg_set_device_status(VirtIOMSGProxy *s,
 
     virtio_msg_pack_set_device_status_resp(&msg_resp, msg->dev_num, msg->token,
                                            vdev->status);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
-static void virtio_msg_get_device_status(VirtIOMSGProxy *s,
-                                         VirtIOMSG *msg)
+static int virtio_msg_get_device_status(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
-    VirtIODevice *vdev = virtio_msg_lookup_vdev(s, msg->dev_num, __func__);
+    VirtIODevice *vdev;
     VirtIOMSG msg_resp;
-    uint32_t status = vdev ? vdev->status : 0;
+    int ret;
+
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
+    }
 
     virtio_msg_pack_get_device_status_resp(&msg_resp, msg->dev_num, msg->token,
-                                           status);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+                                           vdev->status);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
-static void virtio_msg_get_config(VirtIOMSGProxy *s,
-                                  VirtIOMSG *msg)
+static int virtio_msg_get_config(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
-    VirtIODevice *vdev = virtio_msg_lookup_vdev(s, msg->dev_num, __func__);
-    uint32_t size = msg->get_config.size;
+    VirtIODevice *vdev;
+    VirtioDeviceClass *vdc;
+    uint32_t size = msg->get_config.length;
     uint32_t offset = msg->get_config.offset;
     uint8_t data[VIRTIO_MSG_MAX_CONFIG_BYTES];
     VirtIOMSG msg_resp;
-    uint32_t generation = 0;
-    unsigned int i;
+    uint32_t response_size = size;
+    int ret;
 
-    if (size > VIRTIO_MSG_MAX_CONFIG_BYTES) {
-        return;
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
     }
 
     memset(data, 0, size);
-
-    if (vdev) {
-        for (i = 0; i < size; i++) {
-            data[i] = virtio_config_modern_readb(vdev, offset + i);
+    if (size && (offset > vdev->config_len ||
+                 size > vdev->config_len - offset)) {
+        response_size = 0;
+    } else {
+        vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
+        if (vdc->get_config) {
+            vdc->get_config(vdev, vdev->config);
         }
-        generation = vdev->generation;
+        memcpy(data, vdev->config + offset, size);
     }
 
     virtio_msg_pack_get_config_resp(&msg_resp, msg->dev_num, msg->token,
-                                    size, offset,
-                                    generation, data);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+                                    response_size, offset,
+                                    vdev->generation, data);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
-static void virtio_msg_set_config(VirtIOMSGProxy *s,
-                                  VirtIOMSG *msg)
+static int virtio_msg_set_config(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
-    VirtIODevice *vdev = virtio_msg_lookup_vdev(s, msg->dev_num, __func__);
+    VirtIODevice *vdev;
+    VirtioDeviceClass *vdc;
     uint32_t offset = msg->set_config.offset;
-    uint32_t size = msg->set_config.size;
+    uint32_t size = msg->set_config.length;
     uint8_t *data = msg->set_config.data;
     VirtIOMSG msg_resp;
-    uint32_t generation = 0;
-    unsigned int i;
+    uint32_t response_size = size;
+    int ret;
 
-    if (vdev) {
-        for (i = 0; i < size; i++) {
-            virtio_config_modern_writeb(vdev, offset + i, data[i]);
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
+    }
+
+    if (size && (offset > vdev->config_len ||
+                 size > vdev->config_len - offset)) {
+        response_size = 0;
+    } else {
+        /* Baseline profile: request generation is intentionally ignored. */
+        memcpy(vdev->config + offset, data, size);
+        vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
+        if (vdc->set_config) {
+            vdc->set_config(vdev, vdev->config);
         }
-        generation = vdev->generation;
+        if (size) {
+            vdev->generation++;
+        }
     }
 
     virtio_msg_pack_set_config_resp(&msg_resp, msg->dev_num, msg->token,
-                                    size, offset,
-                                    generation, data);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+                                    response_size, offset,
+                                    vdev->generation, data);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
-static void virtio_msg_get_vqueue(VirtIOMSGProxy *s,
-                                  VirtIOMSG *msg)
+static int virtio_msg_get_shm(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
-    VirtIODevice *vdev = virtio_msg_lookup_vdev(s, msg->dev_num, __func__);
+    VirtIOMSG msg_resp;
+    int ret;
+
+    ret = virtio_msg_require_vdev(s, msg->dev_num, NULL);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
+    }
+
+    /* This backend does not expose device-owned shared-memory regions. */
+    virtio_msg_pack_get_shm_resp(&msg_resp, msg->dev_num, msg->token,
+                                 msg->get_shm.shmid, 0, 0);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
+}
+
+static int virtio_msg_get_vqueue(VirtIOMSGProxy *s, VirtIOMSG *msg)
+{
+    VirtIODevice *vdev;
+    VirtIOMSGDev *mdev = &s->devs[msg->dev_num];
     uint32_t max_size = 0;
     uint32_t index = msg->get_vqueue.index;
+    uint32_t flags = 0;
     hwaddr desc = 0, avail = 0, used = 0;
     VirtIOMSG msg_resp;
-    uint32_t size = 0;
+    uint32_t cur_size = 0;
+    int ret;
 
-    if (index < VIRTIO_QUEUE_MAX && vdev) {
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
+    }
+
+    if (index < virtio_get_num_queues(vdev)) {
         max_size = virtio_queue_get_max_num(vdev, index);
-        size = virtio_queue_get_num(vdev, index);
-        if (size) {
-            virtio_queue_get_rings(vdev, index, &desc, &avail, &used);
+        if (mdev->queue_fields[index] & VIRTIO_MSG_VQ_FIELD_SIZE) {
+            cur_size = virtio_queue_get_num(vdev, index);
+        }
+        if (mdev->queue_fields[index] & VIRTIO_MSG_VQ_FIELD_DESC) {
+            desc = virtio_queue_get_desc_addr(vdev, index);
+        }
+        if (mdev->queue_fields[index] & VIRTIO_MSG_VQ_FIELD_DRIVER) {
+            avail = virtio_queue_get_avail_addr(vdev, index);
+        }
+        if (mdev->queue_fields[index] & VIRTIO_MSG_VQ_FIELD_DEVICE) {
+            used = virtio_queue_get_used_addr(vdev, index);
+        }
+        if (mdev->queue_enabled[index]) {
+            flags = VIRTIO_MSG_VQUEUE_F_ENABLED;
         }
         virtio_msg_pack_get_vqueue_resp(&msg_resp, msg->dev_num, msg->token,
-                                        index, max_size, size,
+                                        index, max_size, cur_size, flags,
                                         desc, avail, used);
     } else {
         /* OOB index or missing device, respond with all zeroes. */
         virtio_msg_pack_get_vqueue_resp(&msg_resp, msg->dev_num, msg->token,
-                                        index, 0, 0, 0, 0, 0);
+                                        index, 0, 0, 0, 0, 0, 0);
     }
 
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
-static void virtio_msg_set_vqueue(VirtIOMSGProxy *s, VirtIOMSG *msg)
+static int virtio_msg_set_vqueue(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
-    VirtIODevice *vdev = virtio_msg_lookup_vdev(s, msg->dev_num, __func__);
+    VirtIODevice *vdev;
+    VirtIOMSGDev *mdev = &s->devs[msg->dev_num];
     uint32_t index = msg->set_vqueue.index;
+    uint32_t flags = msg->set_vqueue.flags;
+    uint32_t state = flags & VIRTIO_MSG_VQUEUE_STATE_MASK;
+    bool update_size = !(flags & VIRTIO_MSG_VQUEUE_F_SIZE_IGNORE);
+    bool update_desc = !(flags & VIRTIO_MSG_VQUEUE_F_DESC_IGNORE);
+    bool update_driver = !(flags & VIRTIO_MSG_VQUEUE_F_DRIVER_IGNORE);
+    bool update_device = !(flags & VIRTIO_MSG_VQUEUE_F_DEVICE_IGNORE);
+    hwaddr desc, driver, device;
     VirtIOMSG msg_resp;
+    int ret;
 
-    if (!vdev || index >= VIRTIO_QUEUE_MAX) {
-        /* Missing device or OOB index, ignore. */
-        return;
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
+    }
+
+    if (index >= virtio_get_num_queues(vdev)) {
+        goto respond;
+    }
+    if (msg->set_vqueue.reserved ||
+        (flags & ~VIRTIO_MSG_VQUEUE_F_VALID_MASK) || state == 3) {
+        goto respond;
+    }
+    if (mdev->queue_enabled[index] &&
+        (state == VIRTIO_MSG_VQUEUE_STATE_DISABLED || update_size ||
+         update_desc || update_driver || update_device)) {
+        goto respond;
+    }
+    if (update_size &&
+        (!msg->set_vqueue.size ||
+         msg->set_vqueue.size > virtio_queue_get_max_num(vdev, index))) {
+        goto respond;
+    }
+
+    desc = virtio_queue_get_desc_addr(vdev, index);
+    driver = virtio_queue_get_avail_addr(vdev, index);
+    device = virtio_queue_get_used_addr(vdev, index);
+    if (update_desc) {
+        desc = msg->set_vqueue.desc_addr;
+    }
+    if (update_driver) {
+        driver = msg->set_vqueue.driver_addr;
+    }
+    if (update_device) {
+        device = msg->set_vqueue.device_addr;
+    }
+
+    if (state == VIRTIO_MSG_VQUEUE_STATE_ENABLED &&
+        ((mdev->queue_fields[index] |
+          (update_size ? VIRTIO_MSG_VQ_FIELD_SIZE : 0) |
+          (update_desc ? VIRTIO_MSG_VQ_FIELD_DESC : 0) |
+          (update_driver ? VIRTIO_MSG_VQ_FIELD_DRIVER : 0) |
+          (update_device ? VIRTIO_MSG_VQ_FIELD_DEVICE : 0)) !=
+         VIRTIO_MSG_VQ_FIELDS_ALL)) {
+        goto respond;
     }
 
     virtio_queue_set_vector(vdev, index, index);
-    virtio_queue_set_num(vdev, index, msg->set_vqueue.size);
-    virtio_queue_set_rings(vdev, index,
-                           msg->set_vqueue.descriptor_addr,
-                           msg->set_vqueue.driver_addr,
-                           msg->set_vqueue.device_addr);
-    virtio_queue_enable(vdev, index);
-
-    virtio_msg_pack_set_vqueue_resp(&msg_resp, msg->dev_num, msg->token);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
-}
-
-static void virtio_msg_reset_vqueue(VirtIOMSGProxy *s, VirtIOMSG *msg)
-{
-    VirtIODevice *vdev = virtio_msg_lookup_vdev(s, msg->dev_num, __func__);
-    VirtIOMSG msg_resp;
-
-    if (!vdev) {
-        return;
+    if (update_size) {
+        virtio_queue_set_num(vdev, index, msg->set_vqueue.size);
+        mdev->queue_fields[index] |= VIRTIO_MSG_VQ_FIELD_SIZE;
+    }
+    if (update_desc || update_driver || update_device) {
+        virtio_queue_set_rings(vdev, index, desc, driver, device);
+        if (update_desc) {
+            mdev->queue_fields[index] |= VIRTIO_MSG_VQ_FIELD_DESC;
+        }
+        if (update_driver) {
+            mdev->queue_fields[index] |= VIRTIO_MSG_VQ_FIELD_DRIVER;
+        }
+        if (update_device) {
+            mdev->queue_fields[index] |= VIRTIO_MSG_VQ_FIELD_DEVICE;
+        }
     }
 
-    virtio_queue_reset(vdev, msg->reset_vqueue.index);
+    if (state == VIRTIO_MSG_VQUEUE_STATE_ENABLED) {
+        mdev->queue_enabled[index] = true;
+        virtio_queue_enable(vdev, index);
+    }
 
-    virtio_msg_pack_reset_vqueue_resp(&msg_resp, msg->dev_num, msg->token);
-    virtio_msg_bus_send(&s->msg_bus, &msg_resp);
+respond:
+    virtio_msg_pack_set_vqueue_resp(&msg_resp, msg->dev_num, msg->token);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
 }
 
-static void virtio_msg_event_avail(VirtIOMSGProxy *s,
-                                   VirtIOMSG *msg)
+static int virtio_msg_reset_vqueue(VirtIOMSGProxy *s, VirtIOMSG *msg)
 {
-    VirtIODevice *vdev = virtio_msg_lookup_vdev(s, msg->dev_num, __func__);
-    uint16_t vq_idx = msg->event_avail.index;
-    VirtQueue *vq;
+    VirtIODevice *vdev;
+    VirtIOMSGDev *mdev = &s->devs[msg->dev_num];
+    VirtIOMSG msg_resp;
+    int ret;
 
-    if (!vdev) {
-        return;
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
+    }
+
+    if (msg->reset_vqueue.index < virtio_get_num_queues(vdev) &&
+        virtio_vdev_has_feature(vdev, VIRTIO_F_RING_RESET)) {
+        virtio_queue_reset(vdev, msg->reset_vqueue.index);
+        mdev->queue_enabled[msg->reset_vqueue.index] = false;
+        mdev->queue_fields[msg->reset_vqueue.index] = 0;
+    }
+
+    virtio_msg_pack_reset_vqueue_resp(&msg_resp, msg->dev_num, msg->token);
+    return virtio_msg_send_must_deliver(s, &msg_resp);
+}
+
+static int virtio_msg_event_avail(VirtIOMSGProxy *s, VirtIOMSG *msg)
+{
+    VirtIODevice *vdev;
+    VirtIOMSGDev *mdev = &s->devs[msg->dev_num];
+    uint16_t vq_idx = msg->event_avail.vq_index;
+    VirtQueue *vq;
+    int ret;
+
+    ret = virtio_msg_require_vdev(s, msg->dev_num, &vdev);
+    if (ret != VIRTIO_MSG_NO_ERROR) {
+        return ret;
     }
 
     if (!(vdev->status & VIRTIO_CONFIG_S_DRIVER_OK)) {
@@ -425,32 +687,31 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *s,
         virtio_msg_pack_event_config(&msg_ev, msg->dev_num,
                                      vdev->status, vdev->generation,
                                      0, 0, NULL);
-        virtio_msg_bus_send(&s->msg_bus, &msg_ev);
-        return;
+        return virtio_msg_send_must_deliver(s, &msg_ev);
     }
 
-    if (vq_idx >= VIRTIO_QUEUE_MAX) {
+    if (vq_idx >= virtio_get_num_queues(vdev)) {
         virtio_error(vdev, "Notification to bad VQ!");
-        return;
+        return VIRTIO_MSG_NO_ERROR;
     }
 
-    if (!virtio_queue_get_num(vdev, vq_idx)) {
+    if (!mdev->queue_enabled[vq_idx]) {
         virtio_error(vdev, "Notification to unconfigured VQ!");
-        return;
+        return VIRTIO_MSG_NO_ERROR;
     }
 
     vq = virtio_get_queue(vdev, vq_idx);
     if (virtio_vdev_has_feature(vdev, VIRTIO_F_NOTIFICATION_DATA)) {
-        uint32_t next_offset_wrap = msg->event_avail.next_offset_wrap;
+        uint32_t next_offset = msg->event_avail.next_offset;
         uint16_t qsize = virtio_queue_get_num(vdev, vq_idx);
-        uint32_t offset = next_offset_wrap & 0x7fffffff;
-        bool wrap = next_offset_wrap & 0x80000000;
+        uint32_t offset = next_offset & 0x7fffffff;
+        bool wrap = next_offset & 0x80000000;
         uint16_t data;
 
         if (offset > 0x7fff || offset >= qsize) {
             virtio_error(vdev, "Next offset to large!");
             /* Bail out without notification???  */
-            return;
+            return VIRTIO_MSG_NO_ERROR;
         }
 
         data = wrap << 15;
@@ -458,16 +719,16 @@ static void virtio_msg_event_avail(VirtIOMSGProxy *s,
 
         virtio_queue_set_shadow_avail_idx(vq, data);
     }
-    virtio_queue_notify(vdev, msg->event_avail.index);
+    virtio_queue_notify(vdev, msg->event_avail.vq_index);
+    return VIRTIO_MSG_NO_ERROR;
 }
 
-typedef void (*VirtIOMSGHandler)(VirtIOMSGProxy *s,
-                                 VirtIOMSG *msg);
+typedef int (*VirtIOMSGHandler)(VirtIOMSGProxy *s, VirtIOMSG *msg);
 
 static const VirtIOMSGHandler msg_handlers[] = {
-    [VIRTIO_MSG_DEVICE_INFO] = virtio_msg_device_info,
-    [VIRTIO_MSG_GET_FEATURES] = virtio_msg_get_features,
-    [VIRTIO_MSG_SET_FEATURES] = virtio_msg_set_features,
+    [VIRTIO_MSG_GET_DEVICE_INFO] = virtio_msg_device_info,
+    [VIRTIO_MSG_GET_DEVICE_FEATURES] = virtio_msg_get_features,
+    [VIRTIO_MSG_SET_DRIVER_FEATURES] = virtio_msg_set_features,
     [VIRTIO_MSG_GET_DEVICE_STATUS] = virtio_msg_get_device_status,
     [VIRTIO_MSG_SET_DEVICE_STATUS] = virtio_msg_set_device_status,
     [VIRTIO_MSG_GET_CONFIG] = virtio_msg_get_config,
@@ -475,6 +736,7 @@ static const VirtIOMSGHandler msg_handlers[] = {
     [VIRTIO_MSG_GET_VQUEUE] = virtio_msg_get_vqueue,
     [VIRTIO_MSG_SET_VQUEUE] = virtio_msg_set_vqueue,
     [VIRTIO_MSG_RESET_VQUEUE] = virtio_msg_reset_vqueue,
+    [VIRTIO_MSG_GET_SHM] = virtio_msg_get_shm,
     [VIRTIO_MSG_EVENT_AVAIL] = virtio_msg_event_avail,
 };
 
@@ -482,11 +744,12 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
 {
     VirtIOMSGProxy *s = VIRTIO_MSG(bd->opaque);
     VirtIOMSGHandler handler;
+    uint8_t msg_type = msg->type & VIRTIO_MSG_TYPE_MASK;
 
     /* virtio_msg_print(msg); */
 
     /* We handle some generic bus messages. */
-    if (msg->type & VIRTIO_MSG_TYPE_BUS) {
+    if (msg_type & VIRTIO_MSG_TYPE_BUS) {
         /*
          * Only requests get an answer.  Replying to a reply is what turns a
          * single keepalive BUS_PING into a storm: the peer answers our ping
@@ -495,33 +758,36 @@ static int virtio_msg_receive_msg(VirtIOMSGBusDevice *bd, VirtIOMSG *msg)
          * Mbit/s.  The device-message path below already drops responses; the
          * bus path returns before ever reaching that check.
          */
-        if (msg->type & VIRTIO_MSG_TYPE_RESPONSE) {
+        if (virtio_msg_bus_bad(s, msg)) {
+            return VIRTIO_MSG_NO_ERROR;
+        }
+        if (msg_type & VIRTIO_MSG_TYPE_RESPONSE) {
             return VIRTIO_MSG_NO_ERROR;
         }
 
         if (msg->msg_id == VIRTIO_MSG_BUS_GET_DEVICES) {
-            virtio_msg_bus_get_devices(s, msg);
+            return virtio_msg_bus_get_devices(s, msg);
         }
         if (msg->msg_id == VIRTIO_MSG_BUS_PING) {
-            virtio_msg_bus_ping(s, msg);
+            return virtio_msg_bus_ping(s, msg);
         }
         return VIRTIO_MSG_NO_ERROR;
     }
 
     if (msg->msg_id >= ARRAY_SIZE(msg_handlers)) {
-        return VIRTIO_MSG_ERROR_UNSUPPORTED_MESSAGE_ID;
+        return VIRTIO_MSG_NO_ERROR;
     }
 
     handler = msg_handlers[msg->msg_id];
 
     /* We don't expect responses.  */
-    if ((msg->type & VIRTIO_MSG_TYPE_RESPONSE) || virtio_msg_bad(s, msg)) {
+    if ((msg_type & VIRTIO_MSG_TYPE_RESPONSE) || virtio_msg_bad(s, msg)) {
         /* Drop bad messages.  */
-        return VIRTIO_MSG_ERROR_BAD_MESSAGE;
+        return VIRTIO_MSG_NO_ERROR;
     }
 
     if (handler) {
-        handler(s, msg);
+        return handler(s, msg);
     }
 
     return VIRTIO_MSG_NO_ERROR;
@@ -543,9 +809,9 @@ static void virtio_msg_notify(DeviceState *opaque, uint16_t vector)
         return;
     }
 
-    if (vector < VIRTIO_QUEUE_MAX) {
+    if (vector < VIRTIO_QUEUE_MAX && mdev->queue_enabled[vector]) {
         virtio_msg_pack_event_used(&msg, mdev->dev_num, vector);
-        virtio_msg_bus_send(&s->msg_bus, &msg);
+        virtio_msg_send_must_deliver(s, &msg);
         return;
     }
 
@@ -553,7 +819,7 @@ static void virtio_msg_notify(DeviceState *opaque, uint16_t vector)
         virtio_msg_pack_event_config(&msg, mdev->dev_num,
                                      vdev->status, vdev->generation,
                                      0, 0, NULL);
-        virtio_msg_bus_send(&s->msg_bus, &msg);
+        virtio_msg_send_must_deliver(s, &msg);
         return;
     }
 }
@@ -655,10 +921,14 @@ static void virtio_msg_vmstate_change(DeviceState *d, bool running)
 
 static const VMStateDescription vmstate_virtio_msg_dev = {
     .name = "virtio_msg/dev",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (VMStateField[]) {
         VMSTATE_UINT64(guest_features, VirtIOMSGDev),
+        VMSTATE_BOOL_ARRAY_V(queue_enabled, VirtIOMSGDev,
+                             VIRTIO_QUEUE_MAX, 2),
+        VMSTATE_UINT8_ARRAY_V(queue_fields, VirtIOMSGDev,
+                              VIRTIO_QUEUE_MAX, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -851,6 +1121,63 @@ assign_error:
     return r;
 }
 
+static void virtio_msg_reset_transport_caps(VirtIOMSGProxy *s)
+{
+    s->latched_caps = (VirtIOMSGTransportCaps) {
+        .dma_as = &address_space_memory,
+        .revision = VIRTIO_MSG_TRANSPORT_REVISION,
+        .max_msg_size = VIRTIO_MSG_MAX_SIZE,
+    };
+    s->latched_caps_valid = false;
+}
+
+static bool virtio_msg_latch_transport_caps(VirtIOMSGProxy *s, Error **errp)
+{
+    VirtIOMSGTransportCaps caps;
+
+    if (s->latched_caps_valid) {
+        return true;
+    }
+
+    virtio_msg_bus_get_transport_caps(&s->msg_bus, &caps);
+    if (!caps.ready) {
+        error_setg(errp, "virtio-msg transport is not ready");
+        return false;
+    }
+    if (caps.revision != VIRTIO_MSG_TRANSPORT_REVISION) {
+        error_setg(errp,
+                   "virtio-msg transport reported unsupported revision %u",
+                   caps.revision);
+        return false;
+    }
+    if (caps.max_msg_size < VIRTIO_MSG_MIN_SIZE ||
+        caps.max_msg_size > sizeof(VirtIOMSG)) {
+        error_setg(errp,
+                   "virtio-msg transport reported max message size %u "
+                   "outside supported range %u..%zu",
+                   caps.max_msg_size, VIRTIO_MSG_MIN_SIZE,
+                   sizeof(VirtIOMSG));
+        return false;
+    }
+    if (caps.extra_features & ~VIRTIO_MSG_SUPPORTED_EXTRA_FEATURES) {
+        error_setg(errp,
+                   "virtio-msg transport reported unsupported extra "
+                   "features 0x%" PRIx64,
+                   (uint64_t)(caps.extra_features &
+                              ~VIRTIO_MSG_SUPPORTED_EXTRA_FEATURES));
+        return false;
+    }
+    if (!caps.dma_as) {
+        error_setg(errp, "virtio-msg transport reported no DMA address space");
+        return false;
+    }
+
+    caps.transport_features &= VIRTIO_MSG_SUPPORTED_TRANSPORT_FEATURES;
+    s->latched_caps = caps;
+    s->latched_caps_valid = true;
+    return true;
+}
+
 static void virtio_msg_pre_plugged(DeviceState *d, Error **errp)
 {
     VirtIOMSGDev *mdev = VIRTIO_MSG_DEV(d);
@@ -861,7 +1188,14 @@ static void virtio_msg_pre_plugged(DeviceState *d, Error **errp)
         return;
     }
 
+    if (!virtio_msg_latch_transport_caps(s, errp)) {
+        return;
+    }
+
     virtio_add_feature(&vdev->host_features, VIRTIO_F_VERSION_1);
+    vdev->host_features |= s->latched_caps.extra_features;
+    virtio_clear_feature(&vdev->host_features,
+                         VIRTIO_F_NOTIF_CONFIG_DATA);
 }
 
 static AddressSpace *virtio_msg_get_dma_as(DeviceState *d)
@@ -876,10 +1210,13 @@ static AddressSpace *virtio_msg_get_dma_as(DeviceState *d)
      */
     VirtIOMSGDev *mdev = VIRTIO_MSG_DEV(d);
     VirtIOMSGProxy *s = VIRTIO_MSG(mdev->proxy);
-    AddressSpace *as;
 
-    as = virtio_msg_bus_get_remote_as(&s->msg_bus);
-    return as;
+    if (!s->latched_caps_valid || !s->latched_caps.ready ||
+        !s->latched_caps.dma_as) {
+        return &address_space_memory;
+    }
+
+    return s->latched_caps.dma_as;
 }
 
 static int virtio_msg_query_nvectors(DeviceState *d)
@@ -887,11 +1224,20 @@ static int virtio_msg_query_nvectors(DeviceState *d)
     return VIRTIO_QUEUE_MAX;
 }
 
+static bool virtio_msg_queue_enabled(DeviceState *d, int n)
+{
+    VirtIOMSGDev *mdev = VIRTIO_MSG_DEV(d);
+
+    return n >= 0 && n < VIRTIO_QUEUE_MAX && mdev->queue_enabled[n];
+}
+
 static void virtio_msg_realize(DeviceState *d, Error **errp)
 {
     VirtIOMSGProxy *s = VIRTIO_MSG(d);
     Object *o = OBJECT(d);
     int i;
+
+    virtio_msg_reset_transport_caps(s);
 
     for (i = 0; i < ARRAY_SIZE(s->devs); i++) {
         g_autofree char *outer_bus_name = g_strdup_printf("bus%d", i);
@@ -967,6 +1313,7 @@ static void virtio_msg_bus_class_init(ObjectClass *klass, const void *data)
     k->has_variable_vring_alignment = true;
     k->get_dma_as = virtio_msg_get_dma_as;
     k->query_nvectors = virtio_msg_query_nvectors;
+    k->queue_enabled = virtio_msg_queue_enabled;
 
     k->set_guest_notifiers = virtio_msg_set_guest_notifiers;
     k->ioeventfd_enabled = virtio_msg_ioeventfd_enabled;
