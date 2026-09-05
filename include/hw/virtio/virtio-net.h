@@ -17,6 +17,7 @@
 #include "qemu/units.h"
 #include "standard-headers/linux/virtio_net.h"
 #include "hw/virtio/virtio.h"
+#include "hw/virtio/virtio-dma-offload.h"
 #include "net/announce.h"
 #include "qemu/option_int.h"
 #include "qom/object.h"
@@ -163,6 +164,8 @@ typedef struct VirtIONetQueue {
     uint32_t tx_waiting;
     struct {
         VirtQueueElement *elem;
+        QEMUIOVector qiov;
+        bool dma_pending;
     } async_tx;
     /*
      * Where a DMA offload gathers this queue's TX chains, when the transport
@@ -171,6 +174,8 @@ typedef struct VirtIONetQueue {
      * this queue never has two gathered chains outstanding.
      */
     void *tx_slot;
+    VirtQueueDMA tx_dma;
+    bool dma_stopping;
     struct VirtIONet *n;
 } VirtIONetQueue;
 

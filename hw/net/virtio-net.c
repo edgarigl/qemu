@@ -574,6 +574,7 @@ static RxFilterInfo *virtio_net_query_rxfilter(NetClientState *nc)
 static void virtio_net_queue_reset(VirtIODevice *vdev, uint32_t queue_index)
 {
     VirtIONet *n = VIRTIO_NET(vdev);
+    VirtIONetQueue *q;
     NetClientState *nc;
 
     /* validate queue_index and skip for cvq */
@@ -582,6 +583,7 @@ static void virtio_net_queue_reset(VirtIODevice *vdev, uint32_t queue_index)
     }
 
     nc = qemu_get_subqueue(n->nic, vq2q(queue_index));
+    q = virtio_net_get_subqueue(nc);
 
     if (!nc->peer) {
         return;
@@ -592,7 +594,10 @@ static void virtio_net_queue_reset(VirtIODevice *vdev, uint32_t queue_index)
         vhost_net_virtqueue_reset(vdev, nc, queue_index);
     }
 
+    q->dma_stopping = true;
+    virtio_dma_offload_drain(vdev->dma_as);
     flush_or_purge_queued_packets(nc);
+    q->dma_stopping = false;
 }
 
 static void virtio_net_queue_enable(VirtIODevice *vdev, uint32_t queue_index)
@@ -2719,11 +2724,13 @@ static void virtio_net_tx_complete(NetClientState *nc, ssize_t len)
     VirtIODevice *vdev = VIRTIO_DEVICE(n);
     int ret;
 
+    virtqueue_dma_complete(&q->tx_dma);
     virtqueue_push(q->tx_vq, q->async_tx.elem, 0);
     virtio_notify(vdev, q->tx_vq);
 
     g_free(q->async_tx.elem);
     q->async_tx.elem = NULL;
+    q->async_tx.dma_pending = false;
 
     virtio_queue_set_notification(q->tx_vq, 1);
     ret = virtio_net_flush_tx(q);
@@ -2741,6 +2748,35 @@ static void virtio_net_tx_complete(NetClientState *nc, ssize_t len)
                       qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + n->tx_timeout);
         }
         q->tx_waiting = 1;
+    }
+}
+
+static void virtio_net_dma_tx_complete(void *opaque, int status)
+{
+    VirtIONetQueue *q = opaque;
+    VirtIONet *n = q->n;
+    NetClientState *nc = qemu_get_subqueue(n->nic,
+                                           vq2q(virtio_get_queue_index(
+                                               q->tx_vq)));
+    QEMUIOVector *qiov = status ? &q->async_tx.qiov : &q->tx_dma.iov;
+    ssize_t ret;
+
+    q->async_tx.dma_pending = false;
+    if (q->dma_stopping) {
+        virtqueue_dma_complete(&q->tx_dma);
+        virtqueue_detach_element(q->tx_vq, q->async_tx.elem, 0);
+        g_free(q->async_tx.elem);
+        q->async_tx.elem = NULL;
+        return;
+    }
+
+    if (status) {
+        virtqueue_dma_complete(&q->tx_dma);
+    }
+    ret = qemu_sendv_packet_async(nc, qiov->iov, qiov->niov,
+                                  virtio_net_tx_complete);
+    if (ret != 0) {
+        virtio_net_tx_complete(nc, ret);
     }
 }
 
@@ -2844,6 +2880,34 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
             size_t total = iov_size(out_sg, out_num);
             VirtIODMAFallbackReason reason = VIRTIO_DMA_FALLBACK_BELOW_MIN;
             bool gathered = false;
+
+            if (off->submit_async && out_sg == elem->out_sg &&
+                total >= off->min_len) {
+                VirtIODMAResult result;
+
+                qemu_iovec_init_external(&q->async_tx.qiov,
+                                         out_sg, out_num);
+                result = virtqueue_dma_prepare(vdev->dma_as,
+                                               &q->async_tx.qiov, 1,
+                                               NULL, &q->tx_dma);
+                if (result == VIRTIO_DMA_OK) {
+                    q->async_tx.elem = elem;
+                    q->async_tx.dma_pending = true;
+                    result = virtqueue_dma_submit_async(
+                        &q->tx_dma, &q->async_tx.qiov,
+                        VIRTIO_DMA_FROM_REMOTE,
+                        qemu_get_current_aio_context(),
+                        virtio_net_dma_tx_complete, q);
+                    if (result == VIRTIO_DMA_OK) {
+                        virtio_net_flush_tx_completions(q, num_packets);
+                        virtio_queue_set_notification(q->tx_vq, 0);
+                        return -EBUSY;
+                    }
+                    q->async_tx.elem = NULL;
+                    q->async_tx.dma_pending = false;
+                    virtqueue_dma_complete(&q->tx_dma);
+                }
+            }
 
             if (total >= off->min_len) {
                 if (!q->tx_slot) {
@@ -3074,6 +3138,7 @@ static void virtio_net_add_queue(VirtIONet *n, int index)
 
     n->vqs[index].tx_waiting = 0;
     n->vqs[index].n = n;
+    virtqueue_dma_init(&n->vqs[index].tx_dma);
 }
 
 static void virtio_net_del_queue(VirtIONet *n, int index)
@@ -3082,6 +3147,8 @@ static void virtio_net_del_queue(VirtIONet *n, int index)
     VirtIONetQueue *q = &n->vqs[index];
     NetClientState *nc = qemu_get_subqueue(n->nic, index);
 
+    q->dma_stopping = true;
+    virtio_dma_offload_drain(vdev->dma_as);
     qemu_purge_queued_packets(nc);
 
     virtio_del_queue(vdev, index * 2);
@@ -3108,6 +3175,7 @@ static void virtio_net_del_queue(VirtIONet *n, int index)
         }
         q->tx_slot = NULL;
     }
+    virtqueue_dma_complete(&q->tx_dma);
 
     virtio_del_queue(vdev, index * 2 + 1);
 }
@@ -4219,9 +4287,15 @@ static void virtio_net_reset(VirtIODevice *vdev)
     memcpy(&n->mac[0], &n->nic->conf->macaddr, sizeof(n->mac));
     qemu_format_nic_info_str(qemu_get_queue(n->nic), n->mac);
 
+    for (i = 0; i < n->max_queue_pairs; i++) {
+        n->vqs[i].dma_stopping = true;
+    }
+    virtio_dma_offload_drain(vdev->dma_as);
+
     /* Flush any async TX */
     for (i = 0;  i < n->max_queue_pairs; i++) {
         flush_or_purge_queued_packets(qemu_get_subqueue(n->nic, i));
+        n->vqs[i].dma_stopping = false;
     }
 
     virtio_net_disable_rss(n);

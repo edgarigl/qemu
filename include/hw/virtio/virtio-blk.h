@@ -87,6 +87,9 @@ struct VirtIOBlock {
         uint64_t retry_wakeups;
         uint64_t wait_ns;
         uint64_t max_wait_ns;
+        uint64_t async_submissions;
+        uint64_t async_completions;
+        uint64_t async_errors;
     } dma_stats;
 };
 
@@ -117,6 +120,7 @@ typedef struct VirtIOBlockReq {
      */
     VirtQueueDMA dma;
     QTAILQ_ENTRY(VirtIOBlockReq) dma_next;
+    QTAILQ_ENTRY(VirtIOBlockReq) dma_async_next;
     unsigned int dma_pending_op;
     int64_t dma_wait_start_ns;
     size_t in_len;

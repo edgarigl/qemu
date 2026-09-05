@@ -73,6 +73,7 @@ void virtqueue_dma_complete(VirtQueueDMA *dma)
     if (!dma->active) {
         return;
     }
+    assert(!dma->async_inflight);
 
     if (virtio_dma_offload_get(dma->as) == off) {
         if (off->slots_release) {
@@ -116,6 +117,15 @@ void virtqueue_dma_waiter_cancel(VirtIODMASlotWaiter *waiter)
     waiter->as = NULL;
     waiter->queued = false;
     waiter->granted = false;
+}
+
+void virtio_dma_offload_drain(AddressSpace *as)
+{
+    const VirtIODMAOffload *off = virtio_dma_offload_get(as);
+
+    if (off && off->drain_async) {
+        off->drain_async(off->opaque);
+    }
 }
 
 static size_t virtqueue_dma_next_chunk(const VirtIODMAOffload *off,
@@ -162,11 +172,11 @@ static size_t virtqueue_dma_next_chunk(const VirtIODMAOffload *off,
     return len;
 }
 
-VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
-                                     const QEMUIOVector *source,
-                                     unsigned int max_slots,
-                                     VirtIODMASlotWaiter *waiter,
-                                     VirtQueueDMA *dma)
+VirtIODMAResult virtqueue_dma_prepare(AddressSpace *as,
+                                      const QEMUIOVector *remote,
+                                      unsigned int max_slots,
+                                      VirtIODMASlotWaiter *waiter,
+                                      VirtQueueDMA *dma)
 {
     VirtIODMAFallbackReason reason = VIRTIO_DMA_FALLBACK_BELOW_MIN;
     const VirtIODMAOffload *off = virtio_dma_offload_get(as);
@@ -179,19 +189,19 @@ VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
     if (!off) {
         return VIRTIO_DMA_FALLBACK;
     }
-    if (source->size < off->min_len) {
+    if (remote->size < off->min_len) {
         virtio_dma_offload_record_fallback(
-            off, VIRTIO_DMA_FALLBACK_BELOW_MIN, source->size);
+            off, VIRTIO_DMA_FALLBACK_BELOW_MIN, remote->size);
         return VIRTIO_DMA_FALLBACK;
     }
     if (!off->max_len || !off->max_segs || !max_slots) {
         virtio_dma_offload_record_fallback(
-            off, VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE, source->size);
+            off, VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE, remote->size);
         return VIRTIO_DMA_FALLBACK;
     }
 
     lengths = g_new(size_t, max_slots);
-    while (i < source->niov) {
+    while (i < remote->niov) {
         unsigned int nsegs;
         size_t len;
 
@@ -200,7 +210,7 @@ VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
             goto fallback;
         }
 
-        len = virtqueue_dma_next_chunk(off, source, &i, &iov_offset,
+        len = virtqueue_dma_next_chunk(off, remote, &i, &iov_offset,
                                        NULL, &nsegs);
         if (!nsegs) {
             reason = VIRTIO_DMA_FALLBACK_SLOT_TOO_LARGE;
@@ -229,7 +239,7 @@ VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
             g_free(lengths);
             if (result == VIRTIO_DMA_FALLBACK) {
                 virtio_dma_offload_record_fallback(off, reason,
-                                                   source->size);
+                                                   remote->size);
                 if (waiter) {
                     waiter->offload = NULL;
                     waiter->as = NULL;
@@ -255,15 +265,48 @@ VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
                     return VIRTIO_DMA_RETRY;
                 }
                 virtio_dma_offload_record_fallback(off, reason,
-                                                   source->size);
+                                                   remote->size);
                 return VIRTIO_DMA_FALLBACK;
             }
         }
     }
 
     qemu_iovec_init(&dma->iov, nslots);
-    i = 0;
-    iov_offset = 0;
+    for (i = 0; i < nslots; i++) {
+        qemu_iovec_add(&dma->iov, slots[i], lengths[i]);
+    }
+    dma->offload = off;
+    dma->as = as;
+    dma->slots = slots;
+    dma->slot_lengths = lengths;
+    dma->nslots = nslots;
+    dma->active = true;
+    return VIRTIO_DMA_OK;
+
+fallback:
+    g_free(lengths);
+    virtio_dma_offload_record_fallback(off, reason, remote->size);
+    return VIRTIO_DMA_FALLBACK;
+}
+
+VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
+                                     const QEMUIOVector *source,
+                                     unsigned int max_slots,
+                                     VirtIODMASlotWaiter *waiter,
+                                     VirtQueueDMA *dma)
+{
+    VirtIODMAFallbackReason reason = VIRTIO_DMA_FALLBACK_DMA_ERROR;
+    const VirtIODMAOffload *off;
+    VirtIODMAResult result;
+    unsigned int i = 0, slot = 0;
+    size_t iov_offset = 0;
+
+    result = virtqueue_dma_prepare(as, source, max_slots, waiter, dma);
+    if (result != VIRTIO_DMA_OK) {
+        return result;
+    }
+    off = dma->offload;
+
     while (i < source->niov) {
         g_autofree struct iovec *sg = g_new(struct iovec, off->max_segs);
         unsigned int nsegs;
@@ -271,38 +314,92 @@ VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
 
         len = virtqueue_dma_next_chunk(off, source, &i, &iov_offset,
                                        sg, &nsegs);
-        assert(dma->nslots < nslots && len == lengths[dma->nslots]);
-        if (!off->gather(off->opaque, slots[dma->nslots], sg,
+        assert(slot < dma->nslots && len == dma->slot_lengths[slot]);
+        if (!off->gather(off->opaque, dma->slots[slot], sg,
                          nsegs, len, &reason)) {
-            unsigned int j;
-
-            if (off->slots_release) {
-                off->slots_release(off->opaque, nslots, slots, lengths);
-            } else {
-                for (j = 0; j < nslots; j++) {
-                    off->slot_delete(off->opaque, slots[j], lengths[j]);
-                }
-            }
-            qemu_iovec_destroy(&dma->iov);
-            g_free(slots);
-            g_free(lengths);
+            virtqueue_dma_complete(dma);
             virtio_dma_offload_record_fallback(off, reason, source->size);
             return VIRTIO_DMA_FALLBACK;
         }
-
-        qemu_iovec_add(&dma->iov, slots[dma->nslots], len);
-        dma->nslots++;
+        slot++;
     }
 
-    dma->offload = off;
-    dma->as = as;
-    dma->slots = slots;
-    dma->slot_lengths = lengths;
-    dma->active = true;
     return VIRTIO_DMA_OK;
+}
 
-fallback:
-    g_free(lengths);
-    virtio_dma_offload_record_fallback(off, reason, source->size);
-    return VIRTIO_DMA_FALLBACK;
+static void virtqueue_dma_async_done(void *opaque, int status)
+{
+    VirtQueueDMA *dma = opaque;
+    VirtIODMAAsyncCallback *cb = dma->async_cb;
+    void *cb_opaque = dma->async_opaque;
+
+    dma->async_inflight = false;
+    cb(cb_opaque, status);
+}
+
+VirtIODMAResult virtqueue_dma_submit_async(
+    VirtQueueDMA *dma, const QEMUIOVector *remote,
+    VirtIODMADirection direction, AioContext *ctx,
+    VirtIODMAAsyncCallback *cb, void *cb_opaque)
+{
+    const VirtIODMAOffload *off = dma->offload;
+    g_autofree VirtIODMASegment *segments = NULL;
+    VirtIODMAFallbackReason reason = VIRTIO_DMA_FALLBACK_DMA_ERROR;
+    VirtIODMAResult result;
+    unsigned int i = 0, slot = 0, nsegs = 0;
+    size_t iov_offset = 0, slot_offset = 0;
+
+    if (!dma->active || !dma->offload->submit_async) {
+        return VIRTIO_DMA_FALLBACK;
+    }
+
+    segments = g_new(VirtIODMASegment, remote->niov + dma->nslots);
+    while (i < remote->niov) {
+        size_t remote_left;
+        size_t local_left;
+        size_t len;
+
+        while (i < remote->niov &&
+               iov_offset == remote->iov[i].iov_len) {
+            i++;
+            iov_offset = 0;
+        }
+        if (i == remote->niov) {
+            break;
+        }
+        assert(slot < dma->nslots);
+
+        remote_left = remote->iov[i].iov_len - iov_offset;
+        local_left = dma->slot_lengths[slot] - slot_offset;
+        len = MIN(remote_left, local_left);
+        segments[nsegs].remote =
+            (uint8_t *)remote->iov[i].iov_base + iov_offset;
+        segments[nsegs].local = (uint8_t *)dma->slots[slot] + slot_offset;
+        segments[nsegs].len = len;
+        nsegs++;
+        iov_offset += len;
+        slot_offset += len;
+
+        if (slot_offset == dma->slot_lengths[slot]) {
+            slot++;
+            slot_offset = 0;
+        }
+    }
+    assert(slot == dma->nslots && slot_offset == 0);
+    if (!off->max_async_segs || nsegs > off->max_async_segs) {
+        virtio_dma_offload_record_fallback(
+            off, VIRTIO_DMA_FALLBACK_TOO_MANY_SEGS, remote->size);
+        return VIRTIO_DMA_FALLBACK;
+    }
+
+    dma->async_cb = cb;
+    dma->async_opaque = cb_opaque;
+    dma->async_inflight = true;
+
+    result = off->submit_async(off->opaque, segments, nsegs, direction,
+                               ctx, virtqueue_dma_async_done, dma, &reason);
+    if (result != VIRTIO_DMA_OK) {
+        dma->async_inflight = false;
+    }
+    return result;
 }

@@ -29,6 +29,7 @@
 #include "qemu/iov.h"
 #include "qemu/notify.h"
 #include "qemu/queue.h"
+#include "qemu/typedefs.h"
 #include "system/memory.h"
 
 typedef enum VirtIODMAFallbackReason {
@@ -50,6 +51,19 @@ typedef enum VirtIODMAResult {
     VIRTIO_DMA_RETRY,
 } VirtIODMAResult;
 
+typedef enum VirtIODMADirection {
+    VIRTIO_DMA_FROM_REMOTE,
+    VIRTIO_DMA_TO_REMOTE,
+} VirtIODMADirection;
+
+typedef void VirtIODMAAsyncCallback(void *opaque, int status);
+
+typedef struct VirtIODMASegment {
+    void *remote;
+    void *local;
+    size_t len;
+} VirtIODMASegment;
+
 typedef struct VirtIODMASlotWaiter {
     Notifier notifier;
     QTAILQ_ENTRY(VirtIODMASlotWaiter) next;
@@ -67,6 +81,9 @@ typedef struct VirtQueueDMA {
     void **slots;
     size_t *slot_lengths;
     unsigned int nslots;
+    VirtIODMAAsyncCallback *async_cb;
+    void *async_opaque;
+    bool async_inflight;
     bool active;
 } VirtQueueDMA;
 
@@ -99,6 +116,16 @@ typedef struct VirtIODMAOffload {
      */
     bool (*scatter)(void *opaque, const void *slot, const struct iovec *sg,
                     unsigned int num, size_t len);
+
+    VirtIODMAResult (*submit_async)(void *opaque,
+                                    const VirtIODMASegment *segments,
+                                    unsigned int nsegs,
+                                    VirtIODMADirection direction,
+                                    AioContext *ctx,
+                                    VirtIODMAAsyncCallback *cb,
+                                    void *cb_opaque,
+                                    VirtIODMAFallbackReason *reason);
+    void (*drain_async)(void *opaque);
 
     /*
      * Slots come from the transport because the engine can only reach memory
@@ -141,6 +168,8 @@ typedef struct VirtIODMAOffload {
     size_t max_len;
     unsigned int max_segs;
     unsigned int max_slots;
+    unsigned int max_async_segs;
+    bool async_scatter;
 
     void *opaque;
 } VirtIODMAOffload;
@@ -166,6 +195,16 @@ void virtqueue_dma_cancel(VirtQueueDMA *dma);
 void virtqueue_dma_waiter_init(VirtIODMASlotWaiter *waiter,
                                void (*notify)(Notifier *, void *));
 void virtqueue_dma_waiter_cancel(VirtIODMASlotWaiter *waiter);
+void virtio_dma_offload_drain(AddressSpace *as);
+VirtIODMAResult virtqueue_dma_prepare(AddressSpace *as,
+                                      const QEMUIOVector *remote,
+                                      unsigned int max_slots,
+                                      VirtIODMASlotWaiter *waiter,
+                                      VirtQueueDMA *dma);
+VirtIODMAResult virtqueue_dma_submit_async(
+    VirtQueueDMA *dma, const QEMUIOVector *remote,
+    VirtIODMADirection direction, AioContext *ctx,
+    VirtIODMAAsyncCallback *cb, void *cb_opaque);
 
 static inline void
 virtio_dma_offload_record_fallback(const VirtIODMAOffload *off,

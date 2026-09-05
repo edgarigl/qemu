@@ -47,6 +47,7 @@
 #include "qapi/error.h"
 #include "qemu/bitmap.h"
 #include "qemu/error-report.h"
+#include "qemu/event_notifier.h"
 #include "qemu/queue.h"
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
@@ -81,6 +82,7 @@ struct virtio_msg_user_dma_seg {
 };
 
 #define VIRTIO_MSG_USER_DMA_MAX_SEGS 64
+#define VIRTIO_MSG_USER_DMA_ASYNC_MAX_SEGS 512
 
 struct virtio_msg_user_dma_vec {
     uint64_t segs;
@@ -97,6 +99,34 @@ struct virtio_msg_user_dma_vec {
 #define VIRTIO_MSG_USER_DMA_VEC \
     _IOWR('v', 0x03, struct virtio_msg_user_dma_vec)
 
+struct virtio_msg_user_dma_async_submit {
+    uint64_t segs;
+    uint64_t cookie;
+    uint32_t nsegs;
+    uint32_t dir;
+    uint32_t flags;
+    uint32_t reserved;
+};
+
+struct virtio_msg_user_dma_async_completion {
+    uint64_t cookie;
+    int32_t status;
+    uint32_t done;
+};
+
+struct virtio_msg_user_dma_eventfd {
+    int32_t fd;
+    uint32_t flags;
+};
+
+#define VIRTIO_MSG_USER_DMA_ASYNC_SUBMIT \
+    _IOW('v', 0x04, struct virtio_msg_user_dma_async_submit)
+#define VIRTIO_MSG_USER_DMA_ASYNC_REAP \
+    _IOR('v', 0x05, struct virtio_msg_user_dma_async_completion)
+#define VIRTIO_MSG_USER_DMA_ASYNC_EVENTFD \
+    _IOW('v', 0x06, struct virtio_msg_user_dma_eventfd)
+#define VIRTIO_MSG_USER_DMA_ASYNC_DRAIN _IO('v', 0x07)
+
 #define TYPE_VIRTIO_MSG_BUS_USER "virtio-msg-bus-user"
 OBJECT_DECLARE_SIMPLE_TYPE(VirtIOMSGBusUser,
                            VIRTIO_MSG_BUS_USER)
@@ -105,6 +135,16 @@ typedef struct VmsgUserPending {
     VirtIOMSG msg;
     QTAILQ_ENTRY(VmsgUserPending) next;
 } VmsgUserPending;
+
+typedef struct VmsgUserDMAAsync {
+    uint64_t cookie;
+    AioContext *ctx;
+    VirtIODMAAsyncCallback *cb;
+    void *opaque;
+    int status;
+    unsigned int nsegs;
+    struct virtio_msg_user_dma_seg segs[];
+} VmsgUserDMAAsync;
 
 typedef struct VirtIOMSGBusUser {
     VirtIOMSGBusDevice parent_obj;
@@ -123,6 +163,11 @@ typedef struct VirtIOMSGBusUser {
     QemuMutex pool_lock;
     QTAILQ_HEAD(, VirtIODMASlotWaiter) slot_waiters;
     VirtIODMASlotWaiter *slot_waiter_owner;
+    EventNotifier dma_notifier;
+    GHashTable *dma_async_ops;
+    QemuMutex dma_async_lock;
+    uint64_t dma_next_cookie;
+    bool dma_async_ready;
     /*
      * Latched when the driver reports the engine unstoppable.  Read from the
      * iothreads that allocate slots as well as the main loop, hence atomic;
@@ -159,6 +204,9 @@ typedef struct VirtIOMSGBusUser {
         uint64_t dma_completions;
         uint64_t dma_bytes;
         uint64_t dma_segments;
+        uint64_t dma_async_submissions;
+        uint64_t dma_async_completions;
+        uint64_t dma_async_errors;
         uint64_t fallback_count[VIRTIO_DMA_FALLBACK__MAX];
         uint64_t fallback_bytes[VIRTIO_DMA_FALLBACK__MAX];
     } stats;
@@ -171,6 +219,8 @@ typedef struct VirtIOMSGBusUser {
         uint64_t dma_min;
         uint32_t dma_slots;
         bool dma_nowait;
+        bool dma_async;
+        bool dma_async_scatter;
     } cfg;
 } VirtIOMSGBusUser;
 
@@ -259,7 +309,10 @@ static char *vmsg_user_get_stats(Object *obj, Error **errp)
         " pool_retries=%" PRIu64 " pool_waiters=%" PRIu64
         " pool_waiter_wakeups=%" PRIu64 "\n"
         "dma_requests=%" PRIu64 " dma_completions=%" PRIu64
-        " dma_bytes=%" PRIu64 " dma_segments=%" PRIu64 "\n",
+        " dma_bytes=%" PRIu64 " dma_segments=%" PRIu64 "\n"
+        "dma_async_submissions=%" PRIu64
+        " dma_async_completions=%" PRIu64
+        " dma_async_errors=%" PRIu64 "\n",
         qatomic_read(&s->stats.rx_messages),
         qatomic_read(&s->stats.tx_messages),
         qatomic_read(&s->stats.tx_eagain),
@@ -279,7 +332,10 @@ static char *vmsg_user_get_stats(Object *obj, Error **errp)
         qatomic_read(&s->stats.dma_requests),
         qatomic_read(&s->stats.dma_completions),
         qatomic_read(&s->stats.dma_bytes),
-        qatomic_read(&s->stats.dma_segments));
+        qatomic_read(&s->stats.dma_segments),
+        qatomic_read(&s->stats.dma_async_submissions),
+        qatomic_read(&s->stats.dma_async_completions),
+        qatomic_read(&s->stats.dma_async_errors));
 
     for (i = 0; i < VIRTIO_DMA_FALLBACK__MAX; i++) {
         g_string_append_printf(out, "fallback_%s=%" PRIu64
@@ -852,6 +908,237 @@ static bool vmsg_user_scatter(void *opaque, const void *slot,
                              VIRTIO_MSG_USER_DMA_TO_HOST, &reason);
 }
 
+static void vmsg_user_dma_async_dispatch(void *opaque)
+{
+    VmsgUserDMAAsync *op = opaque;
+
+    op->cb(op->opaque, op->status);
+    g_free(op);
+}
+
+static void vmsg_user_dma_reap(VirtIOMSGBusUser *s, bool wait_callbacks)
+{
+    struct virtio_msg_user_dma_async_completion completion;
+
+    while (ioctl(s->fd, VIRTIO_MSG_USER_DMA_ASYNC_REAP,
+                 &completion) == 0) {
+        VmsgUserDMAAsync *op;
+
+        qemu_mutex_lock(&s->dma_async_lock);
+        op = g_hash_table_lookup(s->dma_async_ops, &completion.cookie);
+        if (op) {
+            g_hash_table_steal(s->dma_async_ops, &completion.cookie);
+        }
+        qemu_mutex_unlock(&s->dma_async_lock);
+
+        if (!op) {
+            warn_report("virtio-msg-bus-user: unknown DMA cookie 0x%" PRIx64,
+                        completion.cookie);
+            continue;
+        }
+
+        op->status = completion.status;
+        if (!op->status && completion.done != op->nsegs) {
+            op->status = -EIO;
+        }
+        if (op->status == -EHWPOISON) {
+            vmsg_user_pool_retire(s);
+        }
+        qatomic_inc(&s->stats.dma_async_completions);
+        if (op->status) {
+            qatomic_inc(&s->stats.dma_async_errors);
+        }
+        if (wait_callbacks) {
+            if (op->ctx == qemu_get_current_aio_context()) {
+                vmsg_user_dma_async_dispatch(op);
+            } else {
+                aio_wait_bh_oneshot(op->ctx,
+                                    vmsg_user_dma_async_dispatch, op);
+            }
+        } else {
+            aio_bh_schedule_oneshot(op->ctx,
+                                    vmsg_user_dma_async_dispatch, op);
+        }
+    }
+
+    if (errno != EAGAIN && errno != ENODEV) {
+        warn_report("virtio-msg-bus-user: DMA reap failed: %s",
+                    strerror(errno));
+    }
+}
+
+static void vmsg_user_dma_async_event(EventNotifier *notifier)
+{
+    VirtIOMSGBusUser *s = container_of(notifier, VirtIOMSGBusUser,
+                                       dma_notifier);
+
+    event_notifier_test_and_clear(&s->dma_notifier);
+    vmsg_user_dma_reap(s, false);
+}
+
+static void vmsg_user_dma_async_drain(void *opaque)
+{
+    VirtIOMSGBusUser *s = opaque;
+
+    if (!s->dma_async_ready) {
+        return;
+    }
+    if (ioctl(s->fd, VIRTIO_MSG_USER_DMA_ASYNC_DRAIN) < 0 && errno != ENODEV) {
+        warn_report("virtio-msg-bus-user: DMA drain failed: %s",
+                    strerror(errno));
+    }
+    event_notifier_test_and_clear(&s->dma_notifier);
+    vmsg_user_dma_reap(s, true);
+}
+
+static VirtIODMAResult
+vmsg_user_submit_async(void *opaque, const VirtIODMASegment *segments,
+                       unsigned int num,
+                       VirtIODMADirection direction, AioContext *ctx,
+                       VirtIODMAAsyncCallback *cb, void *cb_opaque,
+                       VirtIODMAFallbackReason *reason)
+{
+    VirtIOMSGBusUser *s = opaque;
+    struct virtio_msg_user_dma_async_submit submit = {};
+    uint8_t *window = memory_region_get_ram_ptr(&s->mr_host);
+    VmsgUserDMAAsync *op;
+    unsigned int i;
+
+    if (!s->dma_async_ready || qatomic_read(&s->pool_dead)) {
+        *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
+        return VIRTIO_DMA_FALLBACK;
+    }
+    if (direction == VIRTIO_DMA_TO_REMOTE && !s->cfg.dma_async_scatter) {
+        *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
+        return VIRTIO_DMA_FALLBACK;
+    }
+    if (num > VIRTIO_MSG_USER_DMA_ASYNC_MAX_SEGS) {
+        *reason = VIRTIO_DMA_FALLBACK_TOO_MANY_SEGS;
+        return VIRTIO_DMA_FALLBACK;
+    }
+
+    for (i = 0; i < num; i++) {
+        uint8_t *remote = segments[i].remote;
+        uint8_t *local = segments[i].local;
+
+        if (remote < window || remote + segments[i].len >
+                               window + s->cfg.mem_size ||
+            local < (uint8_t *)s->pool || local + segments[i].len >
+                                          (uint8_t *)s->pool + s->pool_size) {
+            *reason = VIRTIO_DMA_FALLBACK_UNSUPPORTED_BUFFER;
+            return VIRTIO_DMA_FALLBACK;
+        }
+    }
+
+    op = g_malloc0(sizeof(*op) + num * sizeof(op->segs[0]));
+    op->ctx = ctx;
+    op->cb = cb;
+    op->opaque = cb_opaque;
+    op->nsegs = num;
+    for (i = 0; i < num; i++) {
+        uint8_t *remote = segments[i].remote;
+        uint8_t *local = segments[i].local;
+
+        op->segs[i].host_off = remote - window;
+        op->segs[i].pool_off = local - (uint8_t *)s->pool;
+        op->segs[i].len = segments[i].len;
+    }
+
+    qemu_mutex_lock(&s->dma_async_lock);
+    do {
+        op->cookie = ++s->dma_next_cookie;
+    } while (!op->cookie || g_hash_table_contains(s->dma_async_ops,
+                                                  &op->cookie));
+    g_hash_table_insert(s->dma_async_ops, &op->cookie, op);
+    qemu_mutex_unlock(&s->dma_async_lock);
+
+    submit.segs = (uintptr_t)op->segs;
+    submit.cookie = op->cookie;
+    submit.nsegs = num;
+    submit.dir = direction == VIRTIO_DMA_TO_REMOTE ?
+                 VIRTIO_MSG_USER_DMA_TO_HOST :
+                 VIRTIO_MSG_USER_DMA_FROM_HOST;
+
+    if (ioctl(s->fd, VIRTIO_MSG_USER_DMA_ASYNC_SUBMIT, &submit) < 0) {
+        int saved_errno = errno;
+
+        qemu_mutex_lock(&s->dma_async_lock);
+        g_hash_table_steal(s->dma_async_ops, &op->cookie);
+        qemu_mutex_unlock(&s->dma_async_lock);
+        g_free(op);
+
+        if (saved_errno == EAGAIN) {
+            *reason = VIRTIO_DMA_FALLBACK_DMA_BUSY;
+            return VIRTIO_DMA_RETRY;
+        }
+        if (saved_errno == EHWPOISON) {
+            vmsg_user_pool_retire(s);
+            *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
+        } else {
+            *reason = saved_errno == ENOTTY || saved_errno == ENODEV ?
+                      VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE :
+                      VIRTIO_DMA_FALLBACK_DMA_ERROR;
+        }
+        return VIRTIO_DMA_FALLBACK;
+    }
+
+    qatomic_inc(&s->stats.dma_async_submissions);
+    return VIRTIO_DMA_OK;
+}
+
+static void vmsg_user_dma_async_init(VirtIOMSGBusUser *s)
+{
+    struct virtio_msg_user_dma_eventfd cfg;
+
+    if (event_notifier_init(&s->dma_notifier, false) < 0) {
+        warn_report("virtio-msg-bus-user: cannot create DMA eventfd; "
+                    "using synchronous DMA");
+        return;
+    }
+    cfg.fd = event_notifier_get_fd(&s->dma_notifier);
+    cfg.flags = 0;
+    if (ioctl(s->fd, VIRTIO_MSG_USER_DMA_ASYNC_EVENTFD, &cfg) < 0) {
+        warn_report("virtio-msg-bus-user: asynchronous DMA is unavailable; "
+                    "using synchronous DMA");
+        event_notifier_cleanup(&s->dma_notifier);
+        return;
+    }
+    if (ioctl(s->fd, VIRTIO_MSG_USER_DMA_ASYNC_DRAIN) < 0) {
+        warn_report("virtio-msg-bus-user: asynchronous DMA cannot drain; "
+                    "using synchronous DMA");
+        cfg.fd = -1;
+        ioctl(s->fd, VIRTIO_MSG_USER_DMA_ASYNC_EVENTFD, &cfg);
+        event_notifier_cleanup(&s->dma_notifier);
+        return;
+    }
+
+    aio_set_event_notifier(qemu_get_aio_context(), &s->dma_notifier,
+                           vmsg_user_dma_async_event, NULL, NULL);
+    s->dma_async_ready = true;
+    s->offload.submit_async = vmsg_user_submit_async;
+    s->offload.drain_async = vmsg_user_dma_async_drain;
+}
+
+static void vmsg_user_dma_async_cleanup(VirtIOMSGBusUser *s)
+{
+    struct virtio_msg_user_dma_eventfd cfg = {
+        .fd = -1,
+    };
+
+    if (!s->dma_async_ready) {
+        return;
+    }
+
+    aio_set_event_notifier(qemu_get_aio_context(), &s->dma_notifier,
+                           NULL, NULL, NULL);
+    ioctl(s->fd, VIRTIO_MSG_USER_DMA_ASYNC_EVENTFD, &cfg);
+    event_notifier_cleanup(&s->dma_notifier);
+    s->dma_async_ready = false;
+    s->offload.submit_async = NULL;
+    s->offload.drain_async = NULL;
+    assert(g_hash_table_size(s->dma_async_ops) == 0);
+}
+
 static void vmsg_user_pool_init(VirtIOMSGBusUser *s)
 {
     struct virtio_msg_user_pool_info info;
@@ -900,7 +1187,13 @@ static void vmsg_user_pool_init(VirtIOMSGBusUser *s)
     s->offload.max_len = VMSG_USER_SLOT_SIZE;
     s->offload.max_segs = VIRTIO_MSG_USER_DMA_MAX_SEGS;
     s->offload.max_slots = s->pool_slots;
+    s->offload.max_async_segs = VIRTIO_MSG_USER_DMA_ASYNC_MAX_SEGS;
+    s->offload.async_scatter = s->cfg.dma_async_scatter;
     s->offload.opaque = s;
+
+    if (s->cfg.dma_async) {
+        vmsg_user_dma_async_init(s);
+    }
 
     virtio_dma_offload_register(&s->as, &s->offload);
 }
@@ -911,6 +1204,7 @@ static void vmsg_user_pool_free(VirtIOMSGBusUser *s)
         return;
     }
 
+    vmsg_user_dma_async_cleanup(s);
     vmsg_user_pool_retire(s);
     virtio_dma_offload_unregister(&s->as);
     munmap(s->pool, s->pool_size);
@@ -1066,6 +1360,9 @@ static const Property virtio_msg_bus_user_props[] = {
     DEFINE_PROP_UINT64("dma-min", VirtIOMSGBusUser, cfg.dma_min, 0),
     DEFINE_PROP_UINT32("dma-slots", VirtIOMSGBusUser, cfg.dma_slots, 0),
     DEFINE_PROP_BOOL("dma-nowait", VirtIOMSGBusUser, cfg.dma_nowait, false),
+    DEFINE_PROP_BOOL("dma-async", VirtIOMSGBusUser, cfg.dma_async, false),
+    DEFINE_PROP_BOOL("dma-async-scatter", VirtIOMSGBusUser,
+                     cfg.dma_async_scatter, false),
 };
 
 static void virtio_msg_bus_user_init(Object *obj)
@@ -1075,8 +1372,10 @@ static void virtio_msg_bus_user_init(Object *obj)
     s->fd = -1;
     qemu_mutex_init(&s->tx_lock);
     qemu_mutex_init(&s->pool_lock);
+    qemu_mutex_init(&s->dma_async_lock);
     QTAILQ_INIT(&s->tx_pending);
     QTAILQ_INIT(&s->slot_waiters);
+    s->dma_async_ops = g_hash_table_new(g_int64_hash, g_int64_equal);
     object_property_add_str(obj, "stats", vmsg_user_get_stats, NULL);
 }
 
@@ -1085,6 +1384,8 @@ static void virtio_msg_bus_user_finalize(Object *obj)
     VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(obj);
 
     qemu_mutex_destroy(&s->pool_lock);
+    g_hash_table_destroy(s->dma_async_ops);
+    qemu_mutex_destroy(&s->dma_async_lock);
     qemu_mutex_destroy(&s->tx_lock);
 }
 
