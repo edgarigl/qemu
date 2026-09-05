@@ -594,10 +594,10 @@ static void virtio_net_queue_reset(VirtIODevice *vdev, uint32_t queue_index)
         vhost_net_virtqueue_reset(vdev, nc, queue_index);
     }
 
-    q->dma_stopping = true;
+    virtqueue_dma_queue_stop(&q->dma_queue);
     virtio_dma_offload_drain(vdev->dma_as);
     flush_or_purge_queued_packets(nc);
-    q->dma_stopping = false;
+    virtqueue_dma_queue_start(&q->dma_queue);
 }
 
 static void virtio_net_queue_enable(VirtIODevice *vdev, uint32_t queue_index)
@@ -2762,7 +2762,7 @@ static void virtio_net_dma_tx_complete(void *opaque, int status)
     ssize_t ret;
 
     q->async_tx.dma_pending = false;
-    if (q->dma_stopping) {
+    if (virtqueue_dma_queue_stopping(&q->dma_queue)) {
         virtqueue_dma_complete(&q->tx_dma);
         virtqueue_detach_element(q->tx_vq, q->async_tx.elem, 0);
         g_free(q->async_tx.elem);
@@ -2887,26 +2887,21 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
 
                 qemu_iovec_init_external(&q->async_tx.qiov,
                                          out_sg, out_num);
-                result = virtqueue_dma_prepare(vdev->dma_as,
-                                               &q->async_tx.qiov, 1,
-                                               NULL, &q->tx_dma);
+                q->async_tx.elem = elem;
+                q->async_tx.dma_pending = true;
+                result = virtqueue_dma_prepare_submit_async(
+                    &q->dma_queue, vdev->dma_as, &q->tx_dma,
+                    &q->async_tx.qiov, 1, NULL,
+                    VIRTIO_DMA_FROM_REMOTE,
+                    qemu_get_current_aio_context(),
+                    virtio_net_dma_tx_complete, q);
                 if (result == VIRTIO_DMA_OK) {
-                    q->async_tx.elem = elem;
-                    q->async_tx.dma_pending = true;
-                    result = virtqueue_dma_submit_async(
-                        &q->tx_dma, &q->async_tx.qiov,
-                        VIRTIO_DMA_FROM_REMOTE,
-                        qemu_get_current_aio_context(),
-                        virtio_net_dma_tx_complete, q);
-                    if (result == VIRTIO_DMA_OK) {
-                        virtio_net_flush_tx_completions(q, num_packets);
-                        virtio_queue_set_notification(q->tx_vq, 0);
-                        return -EBUSY;
-                    }
-                    q->async_tx.elem = NULL;
-                    q->async_tx.dma_pending = false;
-                    virtqueue_dma_complete(&q->tx_dma);
+                    virtio_net_flush_tx_completions(q, num_packets);
+                    virtio_queue_set_notification(q->tx_vq, 0);
+                    return -EBUSY;
                 }
+                q->async_tx.elem = NULL;
+                q->async_tx.dma_pending = false;
             }
 
             if (total >= off->min_len) {
@@ -3139,6 +3134,7 @@ static void virtio_net_add_queue(VirtIONet *n, int index)
     n->vqs[index].tx_waiting = 0;
     n->vqs[index].n = n;
     virtqueue_dma_init(&n->vqs[index].tx_dma);
+    virtqueue_dma_queue_init(&n->vqs[index].dma_queue);
 }
 
 static void virtio_net_del_queue(VirtIONet *n, int index)
@@ -3147,7 +3143,7 @@ static void virtio_net_del_queue(VirtIONet *n, int index)
     VirtIONetQueue *q = &n->vqs[index];
     NetClientState *nc = qemu_get_subqueue(n->nic, index);
 
-    q->dma_stopping = true;
+    virtqueue_dma_queue_stop(&q->dma_queue);
     virtio_dma_offload_drain(vdev->dma_as);
     qemu_purge_queued_packets(nc);
 
@@ -4288,14 +4284,14 @@ static void virtio_net_reset(VirtIODevice *vdev)
     qemu_format_nic_info_str(qemu_get_queue(n->nic), n->mac);
 
     for (i = 0; i < n->max_queue_pairs; i++) {
-        n->vqs[i].dma_stopping = true;
+        virtqueue_dma_queue_stop(&n->vqs[i].dma_queue);
     }
     virtio_dma_offload_drain(vdev->dma_as);
 
     /* Flush any async TX */
     for (i = 0;  i < n->max_queue_pairs; i++) {
         flush_or_purge_queued_packets(qemu_get_subqueue(n->nic, i));
-        n->vqs[i].dma_stopping = false;
+        virtqueue_dma_queue_start(&n->vqs[i].dma_queue);
     }
 
     virtio_net_disable_rss(n);

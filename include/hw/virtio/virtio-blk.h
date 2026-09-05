@@ -113,14 +113,13 @@ typedef struct VirtIOBlockReq {
     QEMUIOVector qiov;
     /*
      * Where a DMA offload gathered this write, when the transport offers one.
-     * @dma_qiov describes the slots and replaces @qiov for the duration of the
+     * @dma.iov describes the slots and replaces @qiov for the duration of the
      * block request, so both have to live until it completes; the slots go
      * back to the transport there too.  Only the head request of a merge
      * carries these -- it is the one the completion callback is given.
      */
     VirtQueueDMA dma;
     QTAILQ_ENTRY(VirtIOBlockReq) dma_next;
-    QTAILQ_ENTRY(VirtIOBlockReq) dma_async_next;
     unsigned int dma_pending_op;
     int64_t dma_wait_start_ns;
     size_t in_len;

@@ -2518,6 +2518,8 @@ M: Stefan Hajnoczi <stefanha@redhat.com>
 L: qemu-block@nongnu.org
 S: Supported
 F: hw/block/virtio-blk-common.c
+F: hw/block/virtio-blk-dma.c
+F: hw/block/virtio-blk-dma.h
 F: hw/block/virtio-blk.c
 F: hw/block/dataplane/*
 F: include/hw/virtio/virtio-blk-common.h

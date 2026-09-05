@@ -65,6 +65,32 @@ void virtqueue_dma_init(VirtQueueDMA *dma)
     memset(dma, 0, sizeof(*dma));
 }
 
+void virtqueue_dma_queue_init(VirtQueueDMAState *queue)
+{
+    memset(queue, 0, sizeof(*queue));
+}
+
+void virtqueue_dma_queue_start(VirtQueueDMAState *queue)
+{
+    assert(!qatomic_read(&queue->inflight));
+    qatomic_set(&queue->stopping, false);
+}
+
+void virtqueue_dma_queue_stop(VirtQueueDMAState *queue)
+{
+    qatomic_set(&queue->stopping, true);
+}
+
+bool virtqueue_dma_queue_stopping(const VirtQueueDMAState *queue)
+{
+    return qatomic_read(&queue->stopping);
+}
+
+unsigned int virtqueue_dma_queue_inflight(const VirtQueueDMAState *queue)
+{
+    return qatomic_read(&queue->inflight);
+}
+
 void virtqueue_dma_complete(VirtQueueDMA *dma)
 {
     const VirtIODMAOffload *off = dma->offload;
@@ -330,15 +356,19 @@ VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
 static void virtqueue_dma_async_done(void *opaque, int status)
 {
     VirtQueueDMA *dma = opaque;
+    VirtQueueDMAState *queue = dma->async_queue;
     VirtIODMAAsyncCallback *cb = dma->async_cb;
     void *cb_opaque = dma->async_opaque;
 
     dma->async_inflight = false;
+    dma->async_queue = NULL;
+    qatomic_dec(&queue->inflight);
     cb(cb_opaque, status);
 }
 
 VirtIODMAResult virtqueue_dma_submit_async(
-    VirtQueueDMA *dma, const QEMUIOVector *remote,
+    VirtQueueDMAState *queue, VirtQueueDMA *dma,
+    const QEMUIOVector *remote,
     VirtIODMADirection direction, AioContext *ctx,
     VirtIODMAAsyncCallback *cb, void *cb_opaque)
 {
@@ -351,6 +381,10 @@ VirtIODMAResult virtqueue_dma_submit_async(
 
     if (!dma->active || !dma->offload->submit_async) {
         return VIRTIO_DMA_FALLBACK;
+    }
+    if (virtqueue_dma_queue_stopping(queue) ||
+        virtqueue_dma_queue_inflight(queue) >= off->max_async_requests) {
+        return VIRTIO_DMA_RETRY;
     }
 
     segments = g_new(VirtIODMASegment, remote->niov + dma->nslots);
@@ -394,12 +428,46 @@ VirtIODMAResult virtqueue_dma_submit_async(
 
     dma->async_cb = cb;
     dma->async_opaque = cb_opaque;
+    dma->async_queue = queue;
     dma->async_inflight = true;
+    qatomic_inc(&queue->inflight);
 
     result = off->submit_async(off->opaque, segments, nsegs, direction,
                                ctx, virtqueue_dma_async_done, dma, &reason);
     if (result != VIRTIO_DMA_OK) {
+        qatomic_dec(&queue->inflight);
         dma->async_inflight = false;
+        dma->async_queue = NULL;
+    }
+    return result;
+}
+
+VirtIODMAResult virtqueue_dma_prepare_submit_async(
+    VirtQueueDMAState *queue, AddressSpace *as, VirtQueueDMA *dma,
+    const QEMUIOVector *remote, unsigned int max_slots,
+    VirtIODMASlotWaiter *waiter, VirtIODMADirection direction,
+    AioContext *ctx, VirtIODMAAsyncCallback *cb, void *cb_opaque)
+{
+    const VirtIODMAOffload *off = virtio_dma_offload_get(as);
+    VirtIODMAResult result;
+
+    if (!off || !off->submit_async) {
+        return VIRTIO_DMA_FALLBACK;
+    }
+    if (virtqueue_dma_queue_stopping(queue) ||
+        virtqueue_dma_queue_inflight(queue) >= off->max_async_requests) {
+        return VIRTIO_DMA_RETRY;
+    }
+
+    result = virtqueue_dma_prepare(as, remote, max_slots, waiter, dma);
+    if (result != VIRTIO_DMA_OK) {
+        return result;
+    }
+
+    result = virtqueue_dma_submit_async(queue, dma, remote, direction, ctx,
+                                        cb, cb_opaque);
+    if (result != VIRTIO_DMA_OK) {
+        virtqueue_dma_complete(dma);
     }
     return result;
 }

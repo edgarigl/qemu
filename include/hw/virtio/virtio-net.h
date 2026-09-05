@@ -175,7 +175,7 @@ typedef struct VirtIONetQueue {
      */
     void *tx_slot;
     VirtQueueDMA tx_dma;
-    bool dma_stopping;
+    VirtQueueDMAState dma_queue;
     struct VirtIONet *n;
 } VirtIONetQueue;
 

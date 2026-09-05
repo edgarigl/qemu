@@ -74,6 +74,16 @@ typedef struct VirtIODMASlotWaiter {
     bool granted;
 } VirtIODMASlotWaiter;
 
+/*
+ * Per-virtqueue asynchronous DMA state.  Device models still own the
+ * request and decide what follows the DMA; this only centralises admission,
+ * in-flight accounting and the stop gate shared by their data paths.
+ */
+typedef struct VirtQueueDMAState {
+    unsigned int inflight;
+    bool stopping;
+} VirtQueueDMAState;
+
 typedef struct VirtQueueDMA {
     const struct VirtIODMAOffload *offload;
     AddressSpace *as;
@@ -83,6 +93,7 @@ typedef struct VirtQueueDMA {
     unsigned int nslots;
     VirtIODMAAsyncCallback *async_cb;
     void *async_opaque;
+    VirtQueueDMAState *async_queue;
     bool async_inflight;
     bool active;
 } VirtQueueDMA;
@@ -186,6 +197,11 @@ void virtio_dma_offload_unregister(AddressSpace *as);
 const VirtIODMAOffload *virtio_dma_offload_get(AddressSpace *as);
 
 void virtqueue_dma_init(VirtQueueDMA *dma);
+void virtqueue_dma_queue_init(VirtQueueDMAState *queue);
+void virtqueue_dma_queue_start(VirtQueueDMAState *queue);
+void virtqueue_dma_queue_stop(VirtQueueDMAState *queue);
+bool virtqueue_dma_queue_stopping(const VirtQueueDMAState *queue);
+unsigned int virtqueue_dma_queue_inflight(const VirtQueueDMAState *queue);
 VirtIODMAResult virtqueue_dma_gather(AddressSpace *as,
                                      const QEMUIOVector *source,
                                      unsigned int max_slots,
@@ -203,9 +219,15 @@ VirtIODMAResult virtqueue_dma_prepare(AddressSpace *as,
                                       VirtIODMASlotWaiter *waiter,
                                       VirtQueueDMA *dma);
 VirtIODMAResult virtqueue_dma_submit_async(
-    VirtQueueDMA *dma, const QEMUIOVector *remote,
+    VirtQueueDMAState *queue, VirtQueueDMA *dma,
+    const QEMUIOVector *remote,
     VirtIODMADirection direction, AioContext *ctx,
     VirtIODMAAsyncCallback *cb, void *cb_opaque);
+VirtIODMAResult virtqueue_dma_prepare_submit_async(
+    VirtQueueDMAState *queue, AddressSpace *as, VirtQueueDMA *dma,
+    const QEMUIOVector *remote, unsigned int max_slots,
+    VirtIODMASlotWaiter *waiter, VirtIODMADirection direction,
+    AioContext *ctx, VirtIODMAAsyncCallback *cb, void *cb_opaque);
 
 static inline void
 virtio_dma_offload_record_fallback(const VirtIODMAOffload *off,
