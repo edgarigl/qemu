@@ -50,6 +50,7 @@ enum {
     VIRTIO_BLK_DMA_PENDING_NONE,
     VIRTIO_BLK_DMA_PENDING_WRITE,
     VIRTIO_BLK_DMA_PENDING_READ,
+    VIRTIO_BLK_DMA_PENDING_SCATTER,
     VIRTIO_BLK_DMA_PENDING_FLUSH,
 };
 
@@ -409,6 +410,33 @@ static void virtio_blk_dma_scatter_complete(void *opaque, int status)
     blk_dec_in_flight(s->conf.conf.blk);
 }
 
+static VirtIODMAResult virtio_blk_start_scatter(VirtIOBlockReq *req)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(req->dev);
+    VirtIOBlockDMAQueue *q = virtio_blk_dma_queue(req->dev, req->vq);
+    const VirtIODMAOffload *off = virtio_dma_offload_get(vdev->dma_as);
+    VirtIODMAResult result;
+
+    if (!off || !off->submit_async || !off->async_scatter) {
+        return VIRTIO_DMA_FALLBACK;
+    }
+    if (q->async_inflight >= off->max_async_requests) {
+        return VIRTIO_DMA_RETRY;
+    }
+
+    virtio_blk_track_async(req);
+    result = virtqueue_dma_submit_async(
+        &req->dma, &req->qiov, VIRTIO_DMA_TO_REMOTE,
+        qemu_get_current_aio_context(), virtio_blk_dma_scatter_complete,
+        req);
+    if (result != VIRTIO_DMA_OK) {
+        virtio_blk_untrack_async(req);
+        return result;
+    }
+    qatomic_inc(&req->dev->dma_stats.async_submissions);
+    return VIRTIO_DMA_OK;
+}
+
 static void virtio_blk_rw_complete(void *opaque, int ret)
 {
     VirtIOBlockReq *req = opaque;
@@ -424,16 +452,15 @@ static void virtio_blk_rw_complete(void *opaque, int ret)
     if (!ret && req->dma.active && !(type & VIRTIO_BLK_T_OUT)) {
         VirtIODMAResult result;
 
-        virtio_blk_track_async(req);
-        result = virtqueue_dma_submit_async(
-            &req->dma, &req->qiov, VIRTIO_DMA_TO_REMOTE,
-            qemu_get_current_aio_context(), virtio_blk_dma_scatter_complete,
-            req);
+        result = virtio_blk_start_scatter(req);
         if (result == VIRTIO_DMA_OK) {
-            qatomic_inc(&req->dev->dma_stats.async_submissions);
             return;
         }
-        virtio_blk_untrack_async(req);
+        if (result == VIRTIO_DMA_RETRY &&
+            virtio_blk_dma_queue_request(req,
+                                         VIRTIO_BLK_DMA_PENDING_SCATTER)) {
+            return;
+        }
         ret = -EIO;
     }
 
@@ -1417,16 +1444,21 @@ static void virtio_blk_dma_retry_bh(void *opaque)
     qatomic_set(&q->retry_running, true);
     while ((req = QTAILQ_FIRST(&q->pending))) {
         unsigned int op = req->dma_pending_op;
+        VirtIODMAResult result = VIRTIO_DMA_OK;
 
         if (op == VIRTIO_BLK_DMA_PENDING_WRITE ||
-            op == VIRTIO_BLK_DMA_PENDING_READ) {
+            op == VIRTIO_BLK_DMA_PENDING_READ ||
+            op == VIRTIO_BLK_DMA_PENDING_SCATTER) {
             uint64_t wake_seq = qatomic_read(&q->wake_seq);
-            VirtIODMAResult result;
 
             qatomic_inc(&q->s->dma_stats.retry_attempts);
-            result = op == VIRTIO_BLK_DMA_PENDING_WRITE ?
-                     virtio_blk_start_write(req) :
-                     virtio_blk_start_read(req);
+            if (op == VIRTIO_BLK_DMA_PENDING_WRITE) {
+                result = virtio_blk_start_write(req);
+            } else if (op == VIRTIO_BLK_DMA_PENDING_READ) {
+                result = virtio_blk_start_read(req);
+            } else {
+                result = virtio_blk_start_scatter(req);
+            }
             if (result == VIRTIO_DMA_RETRY) {
                 qatomic_set(&q->retry_running, false);
                 /* A release raced this attempt while callbacks were muted. */
@@ -1449,6 +1481,9 @@ static void virtio_blk_dma_retry_bh(void *opaque)
         virtio_blk_dma_account_wait(req);
         if (op == VIRTIO_BLK_DMA_PENDING_FLUSH) {
             blk_aio_flush(q->s->blk, virtio_blk_flush_complete, req);
+        } else if (op == VIRTIO_BLK_DMA_PENDING_SCATTER &&
+                   result != VIRTIO_DMA_OK) {
+            virtio_blk_rw_complete_finish(req, -EIO);
         }
     }
     qatomic_set(&q->blocked, false);
