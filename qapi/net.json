@@ -425,6 +425,9 @@
 # @poll-us: maximum number of microseconds that could be spent on busy
 #     polling for tap (since 2.7)
 #
+# @rx-batch: maximum number of packets handled by one readable-fd
+#     callback.  The default is 50.  (since 11.2)
+#
 # Since: 1.2
 ##
 { 'struct': 'NetdevTapOptions',
@@ -443,7 +446,8 @@
     '*vhostfds':   'str',
     '*vhostforce': 'bool',
     '*queues':     'uint32',
-    '*poll-us':    'uint32'} }
+    '*poll-us':    'uint32',
+    '*rx-batch':   'uint32'} }
 
 ##
 # @NetdevSocketOptions:

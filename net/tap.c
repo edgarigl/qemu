@@ -83,8 +83,12 @@ typedef struct TAPState {
     bool enabled;
     VHostNetState *vhost_net;
     unsigned host_vnet_hdr_len;
+    uint32_t rx_batch;
     Notifier exit;
 } TAPState;
+
+#define TAP_DEFAULT_RX_BATCH 50
+#define TAP_MAX_RX_BATCH 1024
 
 static void launch_script(const char *setup_script, const char *ifname,
                           int fd, Error **errp);
@@ -241,7 +245,7 @@ static void tap_send(void *opaque)
          * stalling the guest.
          */
         packets++;
-        if (packets >= 50) {
+        if (packets >= s->rx_batch) {
             break;
         }
     }
@@ -417,7 +421,8 @@ static TAPState *net_tap_fd_init(NetClientState *peer,
                                  const char *model,
                                  const char *name,
                                  int fd,
-                                 int vnet_hdr)
+                                 int vnet_hdr,
+                                 uint32_t rx_batch)
 {
     NetOffloads ol = {};
     NetClientState *nc;
@@ -428,6 +433,7 @@ static TAPState *net_tap_fd_init(NetClientState *peer,
     s = DO_UPCAST(TAPState, nc, nc);
 
     s->fd = fd;
+    s->rx_batch = rx_batch;
     s->host_vnet_hdr_len = vnet_hdr ? sizeof(struct virtio_net_hdr) : 0;
     s->using_vnet_hdr = false;
     s->has_ufo = tap_probe_has_ufo(s->fd);
@@ -662,7 +668,8 @@ int net_init_bridge(const Netdev *netdev, const char *name,
         close(fd);
         return -1;
     }
-    s = net_tap_fd_init(peer, "bridge", name, fd, vnet_hdr);
+    s = net_tap_fd_init(peer, "bridge", name, fd, vnet_hdr,
+                        TAP_DEFAULT_RX_BATCH);
 
     qemu_set_info_str(&s->nc, "helper=%s,br=%s", helper, br);
 
@@ -709,7 +716,9 @@ static bool net_init_tap_one(const NetdevTapOptions *tap, NetClientState *peer,
                              int vnet_hdr, int fd, Error **errp)
 {
     TAPState *s = net_tap_fd_init(peer, tap->helper ? "bridge" : "tap",
-                                  name, fd, vnet_hdr);
+                                  name, fd, vnet_hdr,
+                                  tap->has_rx_batch ? tap->rx_batch :
+                                  TAP_DEFAULT_RX_BATCH);
     bool sndbuf_required = tap->has_sndbuf;
     int sndbuf =
         (tap->has_sndbuf && tap->sndbuf) ? MIN(tap->sndbuf, INT_MAX) : INT_MAX;
@@ -875,6 +884,13 @@ int net_init_tap(const Netdev *netdev, const char *name,
 
     if (tap->has_vhost && !tap->vhost && (tap->vhostfds || tap->vhostfd)) {
         error_setg(errp, "vhostfd(s)= is not valid without vhost");
+        return -1;
+    }
+
+    if (tap->has_rx_batch &&
+        (tap->rx_batch == 0 || tap->rx_batch > TAP_MAX_RX_BATCH)) {
+        error_setg(errp, "rx-batch must be between 1 and %u",
+                   TAP_MAX_RX_BATCH);
         return -1;
     }
 
