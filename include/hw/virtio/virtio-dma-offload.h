@@ -169,6 +169,7 @@ typedef struct VirtIODMAOffload {
     unsigned int max_segs;
     unsigned int max_slots;
     unsigned int max_async_segs;
+    unsigned int max_async_requests;
     bool async_scatter;
 
     void *opaque;

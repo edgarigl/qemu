@@ -218,6 +218,7 @@ typedef struct VirtIOMSGBusUser {
         uint64_t mem_size;
         uint64_t dma_min;
         uint32_t dma_slots;
+        uint32_t dma_async_depth;
         bool dma_nowait;
         bool dma_async;
         bool dma_async_scatter;
@@ -234,6 +235,7 @@ typedef struct VirtIOMSGBusUser {
  * and the 4 MB pool still divides into a useful number of them.
  */
 #define VMSG_USER_SLOT_SIZE   (128 * 1024)
+#define VMSG_USER_DMA_ASYNC_DEPTH 1
 
 /*
  * Below this, don't.  Measured on rave2: the engine runs a gathered chain at
@@ -1192,6 +1194,10 @@ static void vmsg_user_pool_init(VirtIOMSGBusUser *s)
     s->offload.opaque = s;
 
     if (s->cfg.dma_async) {
+        if (!s->cfg.dma_async_depth) {
+            s->cfg.dma_async_depth = VMSG_USER_DMA_ASYNC_DEPTH;
+        }
+        s->offload.max_async_requests = s->cfg.dma_async_depth;
         vmsg_user_dma_async_init(s);
     }
 
@@ -1363,6 +1369,8 @@ static const Property virtio_msg_bus_user_props[] = {
     DEFINE_PROP_BOOL("dma-async", VirtIOMSGBusUser, cfg.dma_async, false),
     DEFINE_PROP_BOOL("dma-async-scatter", VirtIOMSGBusUser,
                      cfg.dma_async_scatter, false),
+    DEFINE_PROP_UINT32("dma-async-depth", VirtIOMSGBusUser,
+                       cfg.dma_async_depth, 0),
 };
 
 static void virtio_msg_bus_user_init(Object *obj)
