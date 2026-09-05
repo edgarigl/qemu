@@ -16,6 +16,7 @@
 
 #include "standard-headers/linux/virtio_blk.h"
 #include "hw/virtio/virtio.h"
+#include "hw/virtio/virtio-dma-offload.h"
 #include "hw/block/block.h"
 #include "system/iothread.h"
 #include "system/block-backend.h"
@@ -51,6 +52,7 @@ struct VirtIOBlkConf
 };
 
 struct VirtIOBlockReq;
+struct VirtIOBlockDMAQueue;
 struct VirtIOBlock {
     VirtIODevice parent_obj;
     BlockBackend *blk;
@@ -74,11 +76,17 @@ struct VirtIOBlock {
     uint64_t host_features;
     size_t config_size;
     BlockRAMRegistrar blk_ram_registrar;
+    struct VirtIOBlockDMAQueue *dma_queues;
 
     struct {
         uint64_t merged_submissions;
         uint64_t merged_requests;
         uint64_t merged_bytes;
+        uint64_t deferred_submissions;
+        uint64_t retry_attempts;
+        uint64_t retry_wakeups;
+        uint64_t wait_ns;
+        uint64_t max_wait_ns;
     } dma_stats;
 };
 
@@ -107,10 +115,10 @@ typedef struct VirtIOBlockReq {
      * back to the transport there too.  Only the head request of a merge
      * carries these -- it is the one the completion callback is given.
      */
-    QEMUIOVector dma_qiov;
-    void *dma_slots[VIRTIO_BLK_MAX_DMA_SLOTS];
-    size_t dma_slot_len[VIRTIO_BLK_MAX_DMA_SLOTS];
-    unsigned int dma_nslots;
+    VirtQueueDMA dma;
+    QTAILQ_ENTRY(VirtIOBlockReq) dma_next;
+    unsigned int dma_pending_op;
+    int64_t dma_wait_start_ns;
     size_t in_len;
     struct VirtIOBlockReq *next;
     struct VirtIOBlockReq *mr_next;

@@ -43,6 +43,36 @@
 #define VIRTIO_BLK_MAX_ZONES_PER_BATCH 4096
 
 static void virtio_blk_ioeventfd_attach(VirtIOBlock *s);
+static void virtio_blk_rw_complete(void *opaque, int ret);
+
+enum {
+    VIRTIO_BLK_DMA_PENDING_NONE,
+    VIRTIO_BLK_DMA_PENDING_WRITE,
+    VIRTIO_BLK_DMA_PENDING_FLUSH,
+};
+
+typedef struct VirtIOBlockDMAQueue {
+    VirtIOBlock *s;
+    VirtQueue *vq;
+    QEMUBH *retry_bh;
+    Notifier slot_notifier;
+    const VirtIODMAOffload *offload;
+    QTAILQ_HEAD(, VirtIOBlockReq) pending;
+    bool blocked;
+    bool stopping;
+    bool retry_running;
+    bool notifier_registered;
+    uint64_t wake_seq;
+} VirtIOBlockDMAQueue;
+
+static VirtIOBlockDMAQueue *virtio_blk_dma_queue(VirtIOBlock *s,
+                                                  VirtQueue *vq)
+{
+    unsigned int index = virtio_get_queue_index(vq);
+
+    assert(index < s->conf.num_queues);
+    return &s->dma_queues[index];
+}
 
 static char *virtio_blk_get_dma_stats(Object *obj, Error **errp)
 {
@@ -50,10 +80,17 @@ static char *virtio_blk_get_dma_stats(Object *obj, Error **errp)
 
     return g_strdup_printf(
         "merged_submissions=%" PRIu64 " merged_requests=%" PRIu64
-        " merged_bytes=%" PRIu64,
+        " merged_bytes=%" PRIu64 " deferred_submissions=%" PRIu64
+        " retry_attempts=%" PRIu64 " retry_wakeups=%" PRIu64
+        " wait_ns=%" PRIu64 " max_wait_ns=%" PRIu64,
         qatomic_read(&s->dma_stats.merged_submissions),
         qatomic_read(&s->dma_stats.merged_requests),
-        qatomic_read(&s->dma_stats.merged_bytes));
+        qatomic_read(&s->dma_stats.merged_bytes),
+        qatomic_read(&s->dma_stats.deferred_submissions),
+        qatomic_read(&s->dma_stats.retry_attempts),
+        qatomic_read(&s->dma_stats.retry_wakeups),
+        qatomic_read(&s->dma_stats.wait_ns),
+        qatomic_read(&s->dma_stats.max_wait_ns));
 }
 
 static void virtio_blk_init_request(VirtIOBlock *s, VirtQueue *vq,
@@ -65,126 +102,88 @@ static void virtio_blk_init_request(VirtIOBlock *s, VirtQueue *vq,
     req->in_len = 0;
     req->next = NULL;
     req->mr_next = NULL;
-    req->dma_nslots = 0;
+    virtqueue_dma_init(&req->dma);
+    req->dma_pending_op = VIRTIO_BLK_DMA_PENDING_NONE;
+    req->dma_wait_start_ns = 0;
 }
 
 /* Hand back whatever the offload gathered for @req, if anything. */
 static void virtio_blk_dma_release(VirtIOBlockReq *req)
 {
-    const VirtIODMAOffload *off;
-    unsigned int i;
-
-    if (!req->dma_nslots) {
-        return;
-    }
-
-    /*
-     * Looked up rather than remembered: the transport is a separate device
-     * and may already have unrealized, in which case the slots died with the
-     * mapping they came from and there is nothing to give back.
-     */
-    off = virtio_dma_offload_get(VIRTIO_DEVICE(req->dev)->dma_as);
-    if (off) {
-        for (i = 0; i < req->dma_nslots; i++) {
-            off->slot_delete(off->opaque, req->dma_slots[i],
-                             req->dma_slot_len[i]);
-        }
-    }
-
-    req->dma_nslots = 0;
-    qemu_iovec_destroy(&req->dma_qiov);
+    virtqueue_dma_complete(&req->dma);
 }
 
-/*
- * Pull a write's buffers into memory the engine can name, and describe the
- * result in @req->dma_qiov.  Returns NULL if nothing was gathered, and the
- * caller then writes from the driver's buffers as before.
- *
- * The chain is cut into pieces that fit one slot, because a write is whatever
- * size the guest asked for while a slot is a fixed size and the engine takes a
- * bounded number of segments.  A piece that will not fit, or that the engine
- * declines, is simply passed through -- the resulting qiov is then part slots
- * and part driver buffers, which is correct, just less of a win.
- */
-static QEMUIOVector *virtio_blk_dma_gather(VirtIOBlockReq *req,
-                                           QEMUIOVector *qiov)
+static void virtio_blk_dma_slot_available(Notifier *notifier, void *data);
+
+static bool virtio_blk_dma_register_notifier(VirtIOBlockDMAQueue *q)
 {
     const VirtIODMAOffload *off;
-    int i = 0;
 
-    off = virtio_dma_offload_get(VIRTIO_DEVICE(req->dev)->dma_as);
-    if (!off) {
-        return NULL;
-    }
-    if (qiov->size < off->min_len) {
-        virtio_dma_offload_record_fallback(
-            off, VIRTIO_DMA_FALLBACK_BELOW_MIN, qiov->size);
-        return NULL;
+    if (q->notifier_registered) {
+        return true;
     }
 
-    qemu_iovec_init(&req->dma_qiov, qiov->niov);
-
-    while (i < qiov->niov) {
-        size_t len = 0;
-        void *slot;
-        VirtIODMAFallbackReason reason = VIRTIO_DMA_FALLBACK_BELOW_MIN;
-        int n;
-
-        /* The longest run from here that one slot takes. */
-        for (n = 0; i + n < qiov->niov && n < off->max_segs; n++) {
-            if (len + qiov->iov[i + n].iov_len > off->max_len) {
-                break;
-            }
-            len += qiov->iov[i + n].iov_len;
-        }
-
-        if (!n) {
-            reason = VIRTIO_DMA_FALLBACK_SLOT_TOO_LARGE;
-            slot = NULL;
-        } else if (len < off->min_len) {
-            slot = NULL;
-        } else {
-            slot = off->slot_new(off->opaque, len, &reason);
-        }
-        if (slot && off->gather(off->opaque, slot, &qiov->iov[i], n, len,
-                                &reason)) {
-            req->dma_slots[req->dma_nslots] = slot;
-            req->dma_slot_len[req->dma_nslots] = len;
-            req->dma_nslots++;
-            qemu_iovec_add(&req->dma_qiov, slot, len);
-            i += n;
-
-            if (req->dma_nslots == VIRTIO_BLK_MAX_DMA_SLOTS) {
-                break;
-            }
-            continue;
-        }
-
-        if (slot) {
-            off->slot_delete(off->opaque, slot, len);
-        }
-
-        /* Not gathered: pass this buffer through and try again at the next. */
-        virtio_dma_offload_record_fallback(off, reason,
-                                           qiov->iov[i].iov_len);
-        qemu_iovec_add(&req->dma_qiov, qiov->iov[i].iov_base,
-                       qiov->iov[i].iov_len);
-        i++;
+    off = virtio_dma_offload_get(VIRTIO_DEVICE(q->s)->dma_as);
+    if (!off || !off->slot_notifier_add || !off->slot_notifier_remove) {
+        return false;
     }
 
-    if (!req->dma_nslots) {
-        qemu_iovec_destroy(&req->dma_qiov);
-        return NULL;
+    q->offload = off;
+    q->slot_notifier.notify = virtio_blk_dma_slot_available;
+    off->slot_notifier_add(off->opaque, &q->slot_notifier);
+    q->notifier_registered = true;
+    return true;
+}
+
+static bool virtio_blk_dma_queue_request(VirtIOBlockReq *req,
+                                         unsigned int op)
+{
+    VirtIOBlockDMAQueue *q = virtio_blk_dma_queue(req->dev, req->vq);
+
+    if (!virtio_blk_dma_register_notifier(q)) {
+        return false;
     }
 
-    for (; i < qiov->niov; i++) {
-        virtio_dma_offload_record_fallback(
-            off, VIRTIO_DMA_FALLBACK_SLOT_LIMIT, qiov->iov[i].iov_len);
-        qemu_iovec_add(&req->dma_qiov, qiov->iov[i].iov_base,
-                       qiov->iov[i].iov_len);
+    req->dma_pending_op = op;
+    req->dma_wait_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    QTAILQ_INSERT_TAIL(&q->pending, req, dma_next);
+    qatomic_set(&q->blocked, true);
+    qatomic_inc(&req->dev->dma_stats.deferred_submissions);
+
+    /* Close the failed-reservation/notifier race with one immediate retry. */
+    if (!qatomic_read(&q->stopping)) {
+        qemu_bh_schedule(q->retry_bh);
+    }
+    return true;
+}
+
+static void virtio_blk_submit_rw(VirtIOBlockReq *req, bool is_write)
+{
+    VirtIOBlock *s = req->dev;
+    QEMUIOVector *qiov = req->dma.active ? &req->dma.iov : &req->qiov;
+    BdrvRequestFlags flags = 0;
+
+    if (!req->dma.active && blk_ram_registrar_ok(&s->blk_ram_registrar)) {
+        flags |= BDRV_REQ_REGISTERED_BUF;
     }
 
-    return &req->dma_qiov;
+    if (is_write) {
+        blk_aio_pwritev(s->blk,
+                        req->sector_num << BDRV_SECTOR_BITS, qiov,
+                        flags, virtio_blk_rw_complete, req);
+    } else {
+        blk_aio_preadv(s->blk,
+                       req->sector_num << BDRV_SECTOR_BITS, qiov,
+                       flags, virtio_blk_rw_complete, req);
+    }
+}
+
+static VirtIODMAResult virtio_blk_prepare_write(VirtIOBlockReq *req)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(req->dev);
+
+    return virtqueue_dma_gather(vdev->dma_as, &req->qiov,
+                                VIRTIO_BLK_MAX_DMA_SLOTS, &req->dma);
 }
 
 void virtio_blk_req_complete(VirtIOBlockReq *req, unsigned char status)
@@ -357,10 +356,10 @@ static inline void submit_requests(VirtIOBlock *s, MultiReqBuffer *mrb,
                                    int start, int num_reqs, int niov)
 {
     BlockBackend *blk = s->blk;
+    VirtIOBlockReq *req = mrb->reqs[start];
     QEMUIOVector *qiov = &mrb->reqs[start]->qiov;
     int64_t sector_num = mrb->reqs[start]->sector_num;
     bool is_write = mrb->is_write;
-    BdrvRequestFlags flags = 0;
 
     if (num_reqs > 1) {
         int i;
@@ -406,30 +405,20 @@ static inline void submit_requests(VirtIOBlock *s, MultiReqBuffer *mrb,
      * this transport is already the fast direction.
      */
     if (is_write) {
-        QEMUIOVector *dma_qiov = virtio_blk_dma_gather(mrb->reqs[start], qiov);
+        VirtIOBlockDMAQueue *q = virtio_blk_dma_queue(s, req->vq);
+        VirtIODMAResult result = VIRTIO_DMA_RETRY;
 
-        if (dma_qiov) {
-            qiov = dma_qiov;
+        if (!qatomic_read(&q->blocked)) {
+            result = virtio_blk_prepare_write(req);
         }
-    }
-
-    /*
-     * Only the driver's buffers are registered with the block layer; slots
-     * belong to the transport and are not, so the hint has to go with them.
-     */
-    if (!mrb->reqs[start]->dma_nslots &&
-        blk_ram_registrar_ok(&s->blk_ram_registrar)) {
-        flags |= BDRV_REQ_REGISTERED_BUF;
-    }
-
-    if (is_write) {
-        blk_aio_pwritev(blk, sector_num << BDRV_SECTOR_BITS, qiov,
-                        flags, virtio_blk_rw_complete,
-                        mrb->reqs[start]);
+        if (result == VIRTIO_DMA_RETRY &&
+            virtio_blk_dma_queue_request(req,
+                                         VIRTIO_BLK_DMA_PENDING_WRITE)) {
+            return;
+        }
+        virtio_blk_submit_rw(req, true);
     } else {
-        blk_aio_preadv(blk, sector_num << BDRV_SECTOR_BITS, qiov,
-                       flags, virtio_blk_rw_complete,
-                       mrb->reqs[start]);
+        virtio_blk_submit_rw(req, false);
     }
 }
 
@@ -545,7 +534,15 @@ static void virtio_blk_handle_flush(VirtIOBlockReq *req, MultiReqBuffer *mrb)
     if (mrb->is_write && mrb->num_reqs > 0) {
         virtio_blk_submit_multireq(s, mrb);
     }
-    blk_aio_flush(s->blk, virtio_blk_flush_complete, req);
+    if (qatomic_read(&virtio_blk_dma_queue(s, req->vq)->blocked)) {
+        if (virtio_blk_dma_queue_request(req,
+                                         VIRTIO_BLK_DMA_PENDING_FLUSH)) {
+            return;
+        }
+        blk_aio_flush(s->blk, virtio_blk_flush_complete, req);
+    } else {
+        blk_aio_flush(s->blk, virtio_blk_flush_complete, req);
+    }
 }
 
 static bool virtio_blk_sect_range_ok(VirtIOBlock *dev,
@@ -1206,11 +1203,206 @@ static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
     return 0;
 }
 
+static void virtio_blk_dma_update_max_wait(VirtIOBlock *s, uint64_t wait_ns)
+{
+    uint64_t old = qatomic_read(&s->dma_stats.max_wait_ns);
+
+    while (wait_ns > old) {
+        uint64_t seen = qatomic_cmpxchg(&s->dma_stats.max_wait_ns,
+                                       old, wait_ns);
+
+        if (seen == old) {
+            break;
+        }
+        old = seen;
+    }
+}
+
+static void virtio_blk_dma_account_wait(VirtIOBlockReq *req)
+{
+    uint64_t wait_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) -
+                       req->dma_wait_start_ns;
+
+    qatomic_add(&req->dev->dma_stats.wait_ns, wait_ns);
+    virtio_blk_dma_update_max_wait(req->dev, wait_ns);
+    req->dma_wait_start_ns = 0;
+}
+
+static void virtio_blk_dma_retry_bh(void *opaque)
+{
+    VirtIOBlockDMAQueue *q = opaque;
+    VirtIOBlockReq *req;
+    bool resume = false;
+
+    if (qatomic_read(&q->stopping)) {
+        return;
+    }
+
+    qatomic_set(&q->retry_running, true);
+    while ((req = QTAILQ_FIRST(&q->pending))) {
+        unsigned int op = req->dma_pending_op;
+
+        if (op == VIRTIO_BLK_DMA_PENDING_WRITE) {
+            uint64_t wake_seq = qatomic_read(&q->wake_seq);
+
+            qatomic_inc(&q->s->dma_stats.retry_attempts);
+            if (virtio_blk_prepare_write(req) == VIRTIO_DMA_RETRY) {
+                qatomic_set(&q->retry_running, false);
+                /* A release raced this attempt while callbacks were muted. */
+                if (qatomic_read(&q->wake_seq) != wake_seq &&
+                    !qatomic_read(&q->stopping)) {
+                    qemu_bh_schedule(q->retry_bh);
+                }
+                return;
+            }
+        } else {
+            assert(req->dma_pending_op == VIRTIO_BLK_DMA_PENDING_FLUSH);
+        }
+
+        QTAILQ_REMOVE(&q->pending, req, dma_next);
+        req->dma_pending_op = VIRTIO_BLK_DMA_PENDING_NONE;
+        virtio_blk_dma_account_wait(req);
+        if (op == VIRTIO_BLK_DMA_PENDING_WRITE) {
+            virtio_blk_submit_rw(req, true);
+        } else {
+            blk_aio_flush(q->s->blk, virtio_blk_flush_complete, req);
+        }
+    }
+
+    qatomic_set(&q->blocked, false);
+    qatomic_set(&q->retry_running, false);
+    if (!qatomic_read(&q->stopping)) {
+        resume = true;
+    }
+
+    if (resume) {
+        virtio_blk_handle_vq(q->s, q->vq);
+    }
+}
+
+static void virtio_blk_dma_slot_available(Notifier *notifier, void *data)
+{
+    VirtIOBlockDMAQueue *q = container_of(notifier, VirtIOBlockDMAQueue,
+                                          slot_notifier);
+
+    qatomic_inc(&q->wake_seq);
+    if (qatomic_read(&q->blocked) && !qatomic_read(&q->stopping) &&
+        !qatomic_read(&q->retry_running)) {
+        qatomic_inc(&q->s->dma_stats.retry_wakeups);
+        qemu_bh_schedule(q->retry_bh);
+    }
+}
+
+static void virtio_blk_dma_drop_chain(VirtIOBlockReq *req)
+{
+    VirtIOBlockReq *next;
+
+    virtio_blk_dma_release(req);
+    if (req->qiov.nalloc != -1) {
+        qemu_iovec_destroy(&req->qiov);
+    }
+
+    while (req) {
+        next = req->mr_next;
+        virtqueue_detach_element(req->vq, &req->elem, 0);
+        g_free(req);
+        req = next;
+    }
+}
+
+static void virtio_blk_dma_purge_queue_bh(void *opaque)
+{
+    VirtIOBlockDMAQueue *q = opaque;
+    VirtIOBlockReq *req;
+
+    qemu_bh_cancel(q->retry_bh);
+    while ((req = QTAILQ_FIRST(&q->pending))) {
+        QTAILQ_REMOVE(&q->pending, req, dma_next);
+        virtio_blk_dma_drop_chain(req);
+    }
+    qatomic_set(&q->blocked, false);
+    qatomic_set(&q->retry_running, false);
+}
+
+static void virtio_blk_dma_queues_stop(VirtIOBlock *s)
+{
+    unsigned int i;
+
+    for (i = 0; i < s->conf.num_queues; i++) {
+        qatomic_set(&s->dma_queues[i].stopping, true);
+    }
+}
+
+static void virtio_blk_dma_queues_purge(VirtIOBlock *s)
+{
+    unsigned int i;
+
+    for (i = 0; i < s->conf.num_queues; i++) {
+        aio_wait_bh_oneshot(s->vq_aio_context[i],
+                            virtio_blk_dma_purge_queue_bh,
+                            &s->dma_queues[i]);
+    }
+}
+
+static void virtio_blk_dma_queues_start(VirtIOBlock *s)
+{
+    unsigned int i;
+
+    for (i = 0; i < s->conf.num_queues; i++) {
+        qatomic_set(&s->dma_queues[i].stopping, false);
+    }
+}
+
+static void virtio_blk_dma_queues_init(VirtIOBlock *s)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(s);
+    unsigned int i;
+
+    s->dma_queues = g_new0(VirtIOBlockDMAQueue, s->conf.num_queues);
+    for (i = 0; i < s->conf.num_queues; i++) {
+        VirtIOBlockDMAQueue *q = &s->dma_queues[i];
+
+        q->s = s;
+        q->vq = virtio_get_queue(vdev, i);
+        QTAILQ_INIT(&q->pending);
+        q->retry_bh = aio_bh_new(s->vq_aio_context[i],
+                                 virtio_blk_dma_retry_bh, q);
+        virtio_blk_dma_register_notifier(q);
+    }
+}
+
+static void virtio_blk_dma_queues_cleanup(VirtIOBlock *s)
+{
+    unsigned int i;
+
+    for (i = 0; i < s->conf.num_queues; i++) {
+        VirtIOBlockDMAQueue *q = &s->dma_queues[i];
+
+        if (q->notifier_registered) {
+            q->offload->slot_notifier_remove(q->offload->opaque,
+                                             &q->slot_notifier);
+            q->notifier_registered = false;
+        }
+    }
+
+    virtio_blk_dma_queues_purge(s);
+    for (i = 0; i < s->conf.num_queues; i++) {
+        qemu_bh_delete(s->dma_queues[i].retry_bh);
+    }
+    g_free(s->dma_queues);
+    s->dma_queues = NULL;
+}
+
 void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
 {
+    VirtIOBlockDMAQueue *q = virtio_blk_dma_queue(s, vq);
     VirtIOBlockReq *req;
     MultiReqBuffer mrb = {};
     bool suppress_notifications = virtio_queue_get_notification(vq);
+
+    if (qatomic_read(&q->blocked) || qatomic_read(&q->stopping)) {
+        return;
+    }
 
     defer_call_begin();
 
@@ -1219,7 +1411,8 @@ void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
             virtio_queue_set_notification(vq, 0);
         }
 
-        while ((req = virtio_blk_get_request(s, vq))) {
+        while (!qatomic_read(&q->blocked) &&
+               (req = virtio_blk_get_request(s, vq))) {
             if (virtio_blk_handle_request(req, &mrb)) {
                 virtqueue_detach_element(req->vq, &req->elem, 0);
                 g_free(req);
@@ -1230,7 +1423,7 @@ void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
         if (suppress_notifications) {
             virtio_queue_set_notification(vq, 1);
         }
-    } while (!virtio_queue_empty(vq));
+    } while (!qatomic_read(&q->blocked) && !virtio_queue_empty(vq));
 
     if (mrb.num_reqs) {
         virtio_blk_submit_multireq(s, &mrb);
@@ -1343,7 +1536,9 @@ static void virtio_blk_reset(VirtIODevice *vdev)
     assert(!s->ioeventfd_started);
 
     /* ...but requests may still be in flight. */
+    virtio_blk_dma_queues_stop(s);
     blk_drain(s->blk);
+    virtio_blk_dma_queues_purge(s);
 
     /* We drop queued requests after blk_drain() because blk_drain() itself can
      * produce them. */
@@ -1360,6 +1555,7 @@ static void virtio_blk_reset(VirtIODevice *vdev)
     }
 
     blk_set_enable_write_cache(s->blk, s->original_wce);
+    virtio_blk_dma_queues_start(s);
 }
 
 /* coalesce internal state, copy to pci i/o region 0
@@ -2026,6 +2222,8 @@ static void virtio_blk_device_realize(DeviceState *dev, Error **errp)
         return;
     }
 
+    virtio_blk_dma_queues_init(s);
+
     /*
      * This must be after virtio_init() so virtio_blk_dma_restart_cb() gets
      * called after ->start_ioeventfd() has already set blk's AioContext.
@@ -2051,7 +2249,9 @@ static void virtio_blk_device_unrealize(DeviceState *dev)
     VirtIOBlkConf *conf = &s->conf;
     unsigned i;
 
+    virtio_blk_dma_queues_stop(s);
     blk_drain(s->blk);
+    virtio_blk_dma_queues_cleanup(s);
     del_boot_device_lchs(dev, "/disk@0,0");
     virtio_blk_vq_aio_context_cleanup(s);
     for (i = 0; i < conf->num_queues; i++) {

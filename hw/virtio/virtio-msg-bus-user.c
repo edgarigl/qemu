@@ -120,6 +120,8 @@ typedef struct VirtIOMSGBusUser {
     uint64_t pool_size;
     unsigned long *pool_used;   /* one bit per slot */
     unsigned int pool_slots;
+    QemuMutex pool_lock;
+    NotifierList slot_notifiers;
     /*
      * Latched when the driver reports the engine unstoppable.  Read from the
      * iothreads that allocate slots as well as the main loop, hence atomic;
@@ -149,6 +151,7 @@ typedef struct VirtIOMSGBusUser {
         uint64_t slots_released;
         uint64_t slots_in_use;
         uint64_t pool_high_water;
+        uint64_t pool_retries;
         uint64_t dma_requests;
         uint64_t dma_completions;
         uint64_t dma_bytes;
@@ -248,7 +251,8 @@ static char *vmsg_user_get_stats(Object *obj, Error **errp)
         " tx_pending=%" PRIu64 "\n"
         "slot_requests=%" PRIu64 " slots_allocated=%" PRIu64
         " slots_released=%" PRIu64 " slots_in_use=%" PRIu64
-        " pool_high_water=%" PRIu64 " pool_slots=%u\n"
+        " pool_high_water=%" PRIu64 " pool_slots=%u"
+        " pool_retries=%" PRIu64 "\n"
         "dma_requests=%" PRIu64 " dma_completions=%" PRIu64
         " dma_bytes=%" PRIu64 " dma_segments=%" PRIu64 "\n",
         qatomic_read(&s->stats.rx_messages),
@@ -264,6 +268,7 @@ static char *vmsg_user_get_stats(Object *obj, Error **errp)
         qatomic_read(&s->stats.slots_released),
         qatomic_read(&s->stats.slots_in_use),
         qatomic_read(&s->stats.pool_high_water), s->pool_slots,
+        qatomic_read(&s->stats.pool_retries),
         qatomic_read(&s->stats.dma_requests),
         qatomic_read(&s->stats.dma_completions),
         qatomic_read(&s->stats.dma_bytes),
@@ -504,55 +509,131 @@ static int virtio_msg_bus_user_send(VirtIOMSGBusDevice *bd,
  * collision per 9000 allocations with two blk devices on two iothreads, which
  * is silent data corruption, both writers gathering into one buffer.
  */
-static void *vmsg_user_slot_new(void *opaque, size_t len,
-                                VirtIODMAFallbackReason *reason)
+static VirtIODMAResult
+vmsg_user_slots_reserve(void *opaque, unsigned int nslots,
+                        const size_t *lengths, void **slots,
+                        VirtIODMAFallbackReason *reason)
+{
+    VirtIOMSGBusUser *s = opaque;
+    unsigned int free_slots = 0;
+    unsigned int i, n = 0;
+
+    qatomic_add(&s->stats.slot_requests, nslots);
+
+    if (!s->pool || qatomic_read(&s->pool_dead)) {
+        *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
+        return VIRTIO_DMA_FALLBACK;
+    }
+    if (nslots > s->pool_slots) {
+        *reason = VIRTIO_DMA_FALLBACK_SLOT_LIMIT;
+        return VIRTIO_DMA_FALLBACK;
+    }
+    for (i = 0; i < nslots; i++) {
+        if (lengths[i] > VMSG_USER_SLOT_SIZE) {
+            *reason = VIRTIO_DMA_FALLBACK_SLOT_TOO_LARGE;
+            return VIRTIO_DMA_FALLBACK;
+        }
+    }
+
+    qemu_mutex_lock(&s->pool_lock);
+    for (i = 0; i < s->pool_slots; i++) {
+        if (!test_bit(i, s->pool_used)) {
+            free_slots++;
+        }
+    }
+    if (free_slots < nslots) {
+        qemu_mutex_unlock(&s->pool_lock);
+        qatomic_inc(&s->stats.pool_retries);
+        *reason = VIRTIO_DMA_FALLBACK_POOL_FULL;
+        return VIRTIO_DMA_RETRY;
+    }
+
+    for (i = 0; i < s->pool_slots && n < nslots; i++) {
+        if (!test_bit(i, s->pool_used)) {
+            set_bit(i, s->pool_used);
+            slots[n++] = (uint8_t *)s->pool +
+                         (size_t)i * VMSG_USER_SLOT_SIZE;
+        }
+    }
+
+    qatomic_add(&s->stats.slots_allocated, nslots);
+    vmsg_user_update_pool_high_water(
+        s, qatomic_add_fetch(&s->stats.slots_in_use, nslots));
+    qemu_mutex_unlock(&s->pool_lock);
+    return VIRTIO_DMA_OK;
+}
+
+static void vmsg_user_slots_release(void *opaque, unsigned int nslots,
+                                    void **slots, const size_t *lengths)
 {
     VirtIOMSGBusUser *s = opaque;
     unsigned int i;
 
-    qatomic_inc(&s->stats.slot_requests);
+    (void)lengths;
 
     if (!s->pool || qatomic_read(&s->pool_dead)) {
-        *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
-        return NULL;
-    }
-    if (len > VMSG_USER_SLOT_SIZE) {
-        *reason = VIRTIO_DMA_FALLBACK_SLOT_TOO_LARGE;
-        return NULL;
+        return;
     }
 
-    for (i = 0; i < s->pool_slots; i++) {
-        if (!test_and_set_bit_atomic(i, s->pool_used)) {
-            uint64_t in_use = qatomic_inc_fetch(&s->stats.slots_in_use);
+    qemu_mutex_lock(&s->pool_lock);
+    for (i = 0; i < nslots; i++) {
+        size_t off = (uint8_t *)slots[i] - (uint8_t *)s->pool;
 
-            qatomic_inc(&s->stats.slots_allocated);
-            vmsg_user_update_pool_high_water(s, in_use);
-            return (uint8_t *)s->pool + (size_t)i * VMSG_USER_SLOT_SIZE;
-        }
+        clear_bit(off / VMSG_USER_SLOT_SIZE, s->pool_used);
+    }
+    qatomic_add(&s->stats.slots_released, nslots);
+    qatomic_sub(&s->stats.slots_in_use, nslots);
+    notifier_list_notify(&s->slot_notifiers, NULL);
+    qemu_mutex_unlock(&s->pool_lock);
+}
+
+static void *vmsg_user_slot_new(void *opaque, size_t len,
+                                VirtIODMAFallbackReason *reason)
+{
+    void *slot;
+
+    if (vmsg_user_slots_reserve(opaque, 1, &len, &slot, reason) ==
+        VIRTIO_DMA_OK) {
+        return slot;
     }
 
-    *reason = VIRTIO_DMA_FALLBACK_POOL_FULL;
     return NULL;
 }
 
 static void vmsg_user_slot_delete(void *opaque, void *slot, size_t len)
 {
     VirtIOMSGBusUser *s = opaque;
-    size_t off;
-
-    /*
-     * A dead engine may still be writing this slot, so it is not free and
-     * never becomes free again.  Leaking it is the point: the bit stays set
-     * so nothing else is ever pointed at these bytes.
-     */
-    if (!s->pool || !slot || qatomic_read(&s->pool_dead)) {
+    if (!slot) {
         return;
     }
 
-    off = (uint8_t *)slot - (uint8_t *)s->pool;
-    clear_bit_atomic(off / VMSG_USER_SLOT_SIZE, s->pool_used);
-    qatomic_inc(&s->stats.slots_released);
-    qatomic_dec(&s->stats.slots_in_use);
+    vmsg_user_slots_release(s, 1, &slot, &len);
+}
+
+static void vmsg_user_slot_notifier_add(void *opaque, Notifier *notifier)
+{
+    VirtIOMSGBusUser *s = opaque;
+
+    qemu_mutex_lock(&s->pool_lock);
+    notifier_list_add(&s->slot_notifiers, notifier);
+    qemu_mutex_unlock(&s->pool_lock);
+}
+
+static void vmsg_user_slot_notifier_remove(void *opaque, Notifier *notifier)
+{
+    VirtIOMSGBusUser *s = opaque;
+
+    qemu_mutex_lock(&s->pool_lock);
+    notifier_remove(notifier);
+    qemu_mutex_unlock(&s->pool_lock);
+}
+
+static void vmsg_user_pool_retire(VirtIOMSGBusUser *s)
+{
+    qatomic_set(&s->pool_dead, true);
+    qemu_mutex_lock(&s->pool_lock);
+    notifier_list_notify(&s->slot_notifiers, NULL);
+    qemu_mutex_unlock(&s->pool_lock);
 }
 
 /*
@@ -632,7 +713,7 @@ static bool vmsg_user_dma_vec(VirtIOMSGBusUser *s, const void *slot,
              * over the window with the CPU as it did before there was an
              * engine.  Only a device reset brings it back.
              */
-            qatomic_set(&s->pool_dead, true);
+            vmsg_user_pool_retire(s);
             *reason = VIRTIO_DMA_FALLBACK_POOL_UNAVAILABLE;
             error_report("virtio-msg-bus-user: the DMA engine could not be "
                          "stopped; retiring the pool and copying with the CPU");
@@ -725,6 +806,10 @@ static void vmsg_user_pool_init(VirtIOMSGBusUser *s)
     s->offload.scatter = vmsg_user_scatter;
     s->offload.slot_new = vmsg_user_slot_new;
     s->offload.slot_delete = vmsg_user_slot_delete;
+    s->offload.slots_reserve = vmsg_user_slots_reserve;
+    s->offload.slots_release = vmsg_user_slots_release;
+    s->offload.slot_notifier_add = vmsg_user_slot_notifier_add;
+    s->offload.slot_notifier_remove = vmsg_user_slot_notifier_remove;
     s->offload.record_fallback = vmsg_user_record_fallback;
     s->offload.min_len = s->cfg.dma_min;
     s->offload.max_len = VMSG_USER_SLOT_SIZE;
@@ -740,6 +825,7 @@ static void vmsg_user_pool_free(VirtIOMSGBusUser *s)
         return;
     }
 
+    vmsg_user_pool_retire(s);
     virtio_dma_offload_unregister(&s->as);
     munmap(s->pool, s->pool_size);
     g_free(s->pool_used);
@@ -901,7 +987,9 @@ static void virtio_msg_bus_user_init(Object *obj)
 
     s->fd = -1;
     qemu_mutex_init(&s->tx_lock);
+    qemu_mutex_init(&s->pool_lock);
     QTAILQ_INIT(&s->tx_pending);
+    notifier_list_init(&s->slot_notifiers);
     object_property_add_str(obj, "stats", vmsg_user_get_stats, NULL);
 }
 
@@ -909,6 +997,7 @@ static void virtio_msg_bus_user_finalize(Object *obj)
 {
     VirtIOMSGBusUser *s = VIRTIO_MSG_BUS_USER(obj);
 
+    qemu_mutex_destroy(&s->pool_lock);
     qemu_mutex_destroy(&s->tx_lock);
 }
 
