@@ -768,12 +768,13 @@ static bool net_init_tap_one(const NetdevTapOptions *tap, NetClientState *peer,
             }
         }
         options.opaque = (void *)(uintptr_t)vhostfd;
-        options.nvqs = 2;
+        options.nvqs = tap->has_vhost_rx_only && tap->vhost_rx_only ? 1 : 2;
         options.feature_bits = kernel_feature_bits;
         options.get_acked_features = NULL;
         options.save_acked_features = NULL;
         options.max_tx_queue_size = 0;
         options.is_vhost_user = false;
+        options.rx_only = tap->has_vhost_rx_only && tap->vhost_rx_only;
 
         s->vhost_net = vhost_net_init(&options);
         if (!s->vhost_net) {
@@ -882,6 +883,12 @@ int net_init_tap(const Netdev *netdev, const char *name,
     assert(netdev->type == NET_CLIENT_DRIVER_TAP);
     tap = &netdev->u.tap;
 
+    if (tap->has_vhost_rx_only && tap->vhost_rx_only &&
+        (!tap->has_vhost || !tap->vhost)) {
+        error_setg(errp, "vhost-rx-only requires vhost=on");
+        return -1;
+    }
+
     if (tap->has_vhost && !tap->vhost && (tap->vhostfds || tap->vhostfd)) {
         error_setg(errp, "vhostfd(s)= is not valid without vhost");
         return -1;
@@ -910,6 +917,10 @@ int net_init_tap(const Netdev *netdev, const char *name,
     queues = tap_parse_fds_and_queues(tap, &fds, errp);
     if (queues < 0) {
         return -1;
+    }
+    if (tap->has_vhost_rx_only && tap->vhost_rx_only && queues != 1) {
+        error_setg(errp, "vhost-rx-only currently requires one queue pair");
+        goto fail;
     }
 
     /*

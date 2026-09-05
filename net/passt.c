@@ -382,6 +382,7 @@ static int passt_vhost_user_start(NetPasstState *s, VhostUserState *be)
     options.get_acked_features = passt_get_acked_features;
     options.save_acked_features = passt_save_acked_features;
     options.is_vhost_user = true;
+    options.rx_only = false;
 
     net = vhost_net_init(&options);
     if (!net) {

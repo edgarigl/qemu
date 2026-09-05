@@ -19,12 +19,15 @@ typedef struct VhostNetOptions {
     const int *feature_bits;
     int max_tx_queue_size;
     bool is_vhost_user;
+    bool rx_only;
     GetAckedFeatures *get_acked_features;
     SaveAcketFeatures *save_acked_features;
     void *opaque;
 } VhostNetOptions;
 
 uint64_t vhost_net_get_max_queues(VHostNetState *net);
+bool vhost_net_is_rx_only(VHostNetState *net);
+bool vhost_net_owns_virtqueue(VHostNetState *net, int idx);
 struct vhost_net *vhost_net_init(VhostNetOptions *options);
 
 int vhost_net_start(VirtIODevice *dev, NetClientState *ncs,

@@ -134,6 +134,7 @@ struct vhost_net {
     int max_tx_queue_size;
     SaveAcketFeatures *save_acked_features;
     bool is_vhost_user;
+    bool rx_only;
     NetClientState *nc;
 };
 

@@ -68,6 +68,17 @@ uint64_t vhost_net_get_max_queues(VHostNetState *net)
     return net->dev.max_queues;
 }
 
+bool vhost_net_is_rx_only(VHostNetState *net)
+{
+    return net->rx_only;
+}
+
+bool vhost_net_owns_virtqueue(VHostNetState *net, int idx)
+{
+    return idx >= net->dev.vq_index &&
+           idx < net->dev.vq_index + net->dev.nvqs;
+}
+
 void vhost_net_get_acked_features_ex(VHostNetState *net, uint64_t *features)
 {
     virtio_features_copy(features, net->dev.acked_features_ex);
@@ -254,6 +265,7 @@ struct vhost_net *vhost_net_init(VhostNetOptions *options)
     net->save_acked_features = options->save_acked_features;
     net->max_tx_queue_size = options->max_tx_queue_size;
     net->is_vhost_user = options->is_vhost_user;
+    net->rx_only = options->rx_only;
     virtio_features_clear(features);
 
     net->dev.max_queues = 1;
@@ -415,15 +427,29 @@ int vhost_net_start(VirtIODevice *dev, NetClientState *ncs,
     BusState *qbus = BUS(qdev_get_parent_bus(DEVICE(dev)));
     VirtioBusState *vbus = VIRTIO_BUS(qbus);
     VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(vbus);
-    int total_notifiers = data_queue_pairs * 2 + cvq;
+    bool rx_only = vhost_net_is_rx_only(
+        get_vhost_net(qemu_get_peer(ncs, 0)));
+    int total_notifiers;
     VirtIONet *n = VIRTIO_NET(dev);
-    int nvhosts = data_queue_pairs + cvq;
+    int nvhosts;
     struct vhost_net *net;
-    int r, e, i, index_end = data_queue_pairs * 2;
+    int r, e, i, index_end;
     NetClientState *peer;
 
-    if (cvq) {
-        index_end += 1;
+    if (rx_only) {
+        /* Queue zero is RX. TX and the control queue remain in QEMU. */
+        if (data_queue_pairs != 1) {
+            error_report("receive-only vhost requires one queue pair");
+            return -EINVAL;
+        }
+        total_notifiers = 1;
+        nvhosts = 1;
+        index_end = 1;
+        cvq = 0;
+    } else {
+        total_notifiers = data_queue_pairs * 2 + cvq;
+        nvhosts = data_queue_pairs + cvq;
+        index_end = data_queue_pairs * 2 + !!cvq;
     }
 
     if (!k->set_guest_notifiers) {
@@ -512,9 +538,15 @@ void vhost_net_stop(VirtIODevice *dev, NetClientState *ncs,
     VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(vbus);
     VirtIONet *n = VIRTIO_NET(dev);
     NetClientState *peer;
-    int total_notifiers = data_queue_pairs * 2 + cvq;
-    int nvhosts = data_queue_pairs + cvq;
+    bool rx_only = vhost_net_is_rx_only(
+        get_vhost_net(qemu_get_peer(ncs, 0)));
+    int total_notifiers = rx_only ? 1 : data_queue_pairs * 2 + cvq;
+    int nvhosts = rx_only ? 1 : data_queue_pairs + cvq;
     int i, r;
+
+    if (rx_only) {
+        cvq = 0;
+    }
 
     for (i = 0; i < nvhosts; i++) {
         if (i < data_queue_pairs) {

@@ -24,6 +24,16 @@ uint64_t vhost_net_get_max_queues(VHostNetState *net)
     return 1;
 }
 
+bool vhost_net_is_rx_only(VHostNetState *net)
+{
+    return false;
+}
+
+bool vhost_net_owns_virtqueue(VHostNetState *net, int idx)
+{
+    return false;
+}
+
 struct vhost_net *vhost_net_init(VhostNetOptions *options)
 {
     error_report("vhost-net support is not compiled in");

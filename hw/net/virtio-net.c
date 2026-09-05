@@ -284,13 +284,16 @@ static void virtio_net_vhost_status(VirtIONet *n, uint8_t status)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(n);
     NetClientState *nc = qemu_get_queue(n->nic);
+    VHostNetState *vhost_net = get_vhost_net(nc->peer);
+    bool rx_only;
     int queue_pairs = n->multiqueue ? n->max_queue_pairs : 1;
     int cvq = virtio_vdev_has_feature(vdev, VIRTIO_NET_F_CTRL_VQ) ?
               n->max_ncs - n->max_queue_pairs : 0;
 
-    if (!get_vhost_net(nc->peer)) {
+    if (!vhost_net) {
         return;
     }
+    rx_only = vhost_net_is_rx_only(vhost_net);
 
     if ((virtio_net_started(n, status) && !nc->peer->link_down) ==
         !!n->vhost_started) {
@@ -312,9 +315,11 @@ static void virtio_net_vhost_status(VirtIONet *n, uint8_t status)
         for (i = 0;  i < queue_pairs; i++) {
             NetClientState *qnc = qemu_get_subqueue(n->nic, i);
 
-            /* Purge both directions: TX and RX. */
+            /* RX moves to vhost. Full vhost also takes TX. */
             qemu_net_queue_purge(qnc->peer->incoming_queue, qnc);
-            qemu_net_queue_purge(qnc->incoming_queue, qnc->peer);
+            if (!rx_only) {
+                qemu_net_queue_purge(qnc->incoming_queue, qnc->peer);
+            }
         }
 
         if (virtio_has_feature(vdev->guest_features, VIRTIO_NET_F_MTU)) {
@@ -328,15 +333,18 @@ static void virtio_net_vhost_status(VirtIONet *n, uint8_t status)
         }
 
         n->vhost_started = 1;
+        n->vhost_rx_only = rx_only;
         r = vhost_net_start(vdev, n->nic->ncs, queue_pairs, cvq);
         if (r < 0) {
             error_report("unable to start vhost net: %d: "
                          "falling back on userspace virtio", -r);
             n->vhost_started = 0;
+            n->vhost_rx_only = false;
         }
     } else {
         vhost_net_stop(vdev, n->nic->ncs, queue_pairs, cvq);
         n->vhost_started = 0;
+        n->vhost_rx_only = false;
     }
 }
 
@@ -414,7 +422,8 @@ static int virtio_net_set_status(struct VirtIODevice *vdev, uint8_t status)
 
     for (i = 0; i < n->max_queue_pairs; i++) {
         NetClientState *ncs = qemu_get_subqueue(n->nic, i);
-        bool queue_started;
+        bool rx_started;
+        bool tx_started;
         q = &n->vqs[i];
 
         if ((!n->multiqueue && i != 0) || i >= n->curr_queue_pairs) {
@@ -422,10 +431,12 @@ static int virtio_net_set_status(struct VirtIODevice *vdev, uint8_t status)
         } else {
             queue_status = status;
         }
-        queue_started =
-            virtio_net_started(n, queue_status) && !n->vhost_started;
+        rx_started = virtio_net_started(n, queue_status) &&
+                     !n->vhost_started;
+        tx_started = virtio_net_started(n, queue_status) &&
+                     (!n->vhost_started || n->vhost_rx_only);
 
-        if (queue_started) {
+        if (rx_started) {
             qemu_flush_queued_packets(ncs);
         }
 
@@ -433,7 +444,7 @@ static int virtio_net_set_status(struct VirtIODevice *vdev, uint8_t status)
             continue;
         }
 
-        if (queue_started) {
+        if (tx_started) {
             if (q->tx_timer) {
                 timer_mod(q->tx_timer,
                                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + n->tx_timeout);
@@ -590,6 +601,7 @@ static void virtio_net_queue_reset(VirtIODevice *vdev, uint32_t queue_index)
     }
 
     if (get_vhost_net(nc->peer) &&
+        vhost_net_owns_virtqueue(get_vhost_net(nc->peer), queue_index) &&
         nc->peer->info->type == NET_CLIENT_DRIVER_TAP) {
         vhost_net_virtqueue_reset(vdev, nc, queue_index);
     }
@@ -618,6 +630,7 @@ static void virtio_net_queue_enable(VirtIODevice *vdev, uint32_t queue_index)
     }
 
     if (get_vhost_net(nc->peer) &&
+        vhost_net_owns_virtqueue(get_vhost_net(nc->peer), queue_index) &&
         nc->peer->info->type == NET_CLIENT_DRIVER_TAP) {
         r = vhost_net_virtqueue_restart(vdev, nc, queue_index);
         if (r < 0) {
@@ -2988,7 +3001,7 @@ static void virtio_net_handle_tx_bh(VirtIODevice *vdev, VirtQueue *vq)
     VirtIONet *n = VIRTIO_NET(vdev);
     VirtIONetQueue *q = &n->vqs[vq2q(virtio_get_queue_index(vq))];
 
-    if (unlikely(n->vhost_started)) {
+    if (unlikely(n->vhost_started && !n->vhost_rx_only)) {
         return;
     }
 
@@ -3804,6 +3817,7 @@ static bool virtio_net_guest_notifier_pending(VirtIODevice *vdev, int idx)
 {
     VirtIONet *n = VIRTIO_NET(vdev);
     NetClientState *nc;
+    VHostNetState *net;
     assert(n->vhost_started);
     if (!n->multiqueue && idx == 2) {
         /* Must guard against invalid features and bogus queue index
@@ -3826,9 +3840,13 @@ static bool virtio_net_guest_notifier_pending(VirtIODevice *vdev, int idx)
      */
 
     if (idx == VIRTIO_CONFIG_IRQ_IDX) {
-        return vhost_net_config_pending(get_vhost_net(nc->peer));
+        net = get_vhost_net(nc->peer);
+        return net && !vhost_net_is_rx_only(net) &&
+               vhost_net_config_pending(net);
     }
-    return vhost_net_virtqueue_pending(get_vhost_net(nc->peer), idx);
+    net = get_vhost_net(nc->peer);
+    return net && vhost_net_owns_virtqueue(net, idx) &&
+           vhost_net_virtqueue_pending(net, idx);
 }
 
 static void virtio_net_guest_notifier_mask(VirtIODevice *vdev, int idx,
@@ -3836,6 +3854,7 @@ static void virtio_net_guest_notifier_mask(VirtIODevice *vdev, int idx,
 {
     VirtIONet *n = VIRTIO_NET(vdev);
     NetClientState *nc;
+    VHostNetState *net;
     assert(n->vhost_started);
     if (!n->multiqueue && idx == 2) {
         /* Must guard against invalid features and bogus queue index
@@ -3858,10 +3877,16 @@ static void virtio_net_guest_notifier_mask(VirtIODevice *vdev, int idx,
      */
 
     if (idx == VIRTIO_CONFIG_IRQ_IDX) {
-        vhost_net_config_mask(get_vhost_net(nc->peer), vdev, mask);
+        net = get_vhost_net(nc->peer);
+        if (net && !vhost_net_is_rx_only(net)) {
+            vhost_net_config_mask(net, vdev, mask);
+        }
         return;
     }
-    vhost_net_virtqueue_mask(get_vhost_net(nc->peer), vdev, idx, mask);
+    net = get_vhost_net(nc->peer);
+    if (net && vhost_net_owns_virtqueue(net, idx)) {
+        vhost_net_virtqueue_mask(net, vdev, idx, mask);
+    }
 }
 
 static void virtio_net_set_config_size(VirtIONet *n, uint64_t host_features)

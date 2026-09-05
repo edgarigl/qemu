@@ -413,6 +413,9 @@
 #
 # @vhost: enable vhost-net network accelerator
 #
+# @vhost-rx-only: give only the receive virtqueue to kernel vhost-net,
+#     leaving transmit and control in QEMU (since 11.2)
+#
 # @vhostfd: file descriptor of an already opened vhost net device
 #
 # @vhostfds: file descriptors of multiple already opened vhost net
@@ -442,6 +445,7 @@
     '*sndbuf':     'size',
     '*vnet_hdr':   'bool',
     '*vhost':      'bool',
+    '*vhost-rx-only': 'bool',
     '*vhostfd':    'str',
     '*vhostfds':   'str',
     '*vhostforce': 'bool',
