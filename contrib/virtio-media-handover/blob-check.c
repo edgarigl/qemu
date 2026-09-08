@@ -16,7 +16,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <xf86drm.h>
-#include <virtgpu_drm.h>
+#include "virtgpu-blob.h"
 #include <vulkan/vulkan.h>
 
 #define MAX_BUFFERS 16
