@@ -1538,9 +1538,8 @@ void virtio_gpu_device_realize(DeviceState *qdev, Error **errp)
             error_setg(errp, "invalid external blob range (maximum 64 buffers)");
             return;
         }
-        if (!virtio_gpu_virgl_enabled(g->parent_obj.conf) &&
-            !virtio_gpu_rutabaga_enabled(g->parent_obj.conf)) {
-            error_setg(errp, "external blobs require virgl or rutabaga");
+        if (!virtio_gpu_virgl_enabled(g->parent_obj.conf)) {
+            error_setg(errp, "external blobs currently require virgl/Venus");
             return;
         }
     }

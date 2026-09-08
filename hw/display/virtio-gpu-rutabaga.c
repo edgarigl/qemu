@@ -675,8 +675,6 @@ rutabaga_cmd_resource_create_blob(VirtIOGPU *g,
     g_autofree struct virtio_gpu_simple_resource *res = NULL;
     struct virtio_gpu_resource_create_blob cblob;
     struct rutabaga_create_blob rc_blob = { 0 };
-    struct rutabaga_handle external_handle = { 0 };
-    int external_fd = -1;
 
     VirtIOGPURutabaga *vr = VIRTIO_GPU_RUTABAGA(g);
 
@@ -706,20 +704,9 @@ rutabaga_cmd_resource_create_blob(VirtIOGPU *g,
     vecs.iovecs = res->iov;
     vecs.num_iovecs = res->iov_cnt;
 
-    result = virtio_gpu_external_blob_fd(g, &cblob, &external_fd);
-    if (result < 0) {
-        virtio_gpu_cleanup_mapping(g, res);
-        CHECK(false, cmd);
-    }
-    if (result == 1) {
-        external_handle.os_handle = external_fd;
-        external_handle.handle_type = RUTABAGA_HANDLE_TYPE_MEM_DMABUF;
-    }
-    /* Rutabaga takes ownership of the external fd, including on failure. */
     result = rutabaga_resource_create_blob(vr->rutabaga, cblob.hdr.ctx_id,
                                            cblob.resource_id, &rc_blob, &vecs,
-                                           external_fd >= 0 ?
-                                           &external_handle : NULL);
+                                           NULL);
 
     if (result && cblob.blob_mem != VIRTIO_GPU_BLOB_MEM_HOST3D) {
         virtio_gpu_cleanup_mapping(g, res);

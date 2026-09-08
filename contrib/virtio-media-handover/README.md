@@ -13,7 +13,7 @@ a frame. Performance results from it would not represent a streaming pipeline.
 
 ## QEMU interface
 
-Use a virgl/Venus or Rutabaga GPU with these additional properties:
+Use a virgl/Venus GPU with these additional properties:
 
 ```
 x-blob-import-fdset=42,x-blob-import-count=4
@@ -26,6 +26,14 @@ USE_SHAREABLE must be set. Ordinary blob IDs keep their existing behavior.
 The feature is disabled unless an fdset base is configured, and blocks migration.
 The host must authorize the buffers for this VM; this is an experimental local
 interface, not an addition to the virtio specification.
+
+Rutabaga/gfxstream is not supported by this experiment. Passing the external fd
+to Rutabaga created a guest handle, but gfxstream could not attach the resource
+and aborted at Vulkan import with "Failed to get allocation info for
+ColorBuffer". The final QEMU code rejects this configuration at realize time.
+Android therefore needs renderer resource/import work as well as gralloc/HAL
+integration before it can use this dom0-owned pool. The existing guest-allocated
+gfxstream capture path is unaffected.
 
 Supply dma-bufs with QMP `add-fd` and SCM_RIGHTS. Keep the pool and its fdsets
 stable until consumers have finished. Each GPU import retains its own fd
@@ -95,10 +103,12 @@ software-filled source; a UVC camera still has its USB ingest copy.
 
 A persistent dom0 service can allocate this pool and begin its boot preview
 before Android exists. Android later imports the pool through virtio-gpu.
-The service keeps camera capture active and changes presentation only after
-Android has imported buffers and presented a first frame. Retire the native
-preview after its final scanout/presentation release. A presentation-ready
-acknowledgement is different from boot completion or capture DQBUF.
+The service keeps camera capture active. Android imports the pool and submits
+a ready surface to the dom0 compositor. After its GPU acquire fence signals,
+the compositor switches at a display refresh. Retire the native preview only
+after presentation feedback and its final scanout release. Boot completion or
+capture DQBUF alone cannot acknowledge this handover. The compositor keeps
+ownership of the physical display throughout.
 
 If Android must allocate its own gralloc blobs, QEMU can instead export those
 host fds to the service and switch capture pools. Old pool users must drain
