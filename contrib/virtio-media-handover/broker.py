@@ -19,6 +19,7 @@ import shlex
 import socket
 import struct
 import subprocess
+import sys
 
 DMA_BUF_IOCTL_SYNC = 0x40086200
 SYNC_READ = 1
@@ -219,9 +220,16 @@ def run(args) -> None:
             except (BrokenPipeError, subprocess.TimeoutExpired):
                 capture.terminate()
                 capture.wait(timeout=5)
-        # Reader processes have completed before source slots can be reused.
+        # Stop capture before dropping refs, including on reader failure.
+        failed_clients = set()
         for client, fdset, fd in installed:
-            client.execute("remove-fd", {"fdset-id": fdset, "fd": fd})
+            if client in failed_clients:
+                continue
+            try:
+                client.execute("remove-fd", {"fdset-id": fdset, "fd": fd})
+            except (OSError, RuntimeError, ValueError) as error:
+                print(f"QMP cleanup failed: {error}", file=sys.stderr)
+                failed_clients.add(client)
         for client in clients:
             client.close()
         pool.close()
