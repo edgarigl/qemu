@@ -7,6 +7,7 @@ LDLIBS += $(shell pkg-config --libs libdrm vulkan)
 all: blob-check
 
 blob-check: blob-check.c virtgpu-blob.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDLIBS) -o $@
 
 clean:
 	rm -f blob-check

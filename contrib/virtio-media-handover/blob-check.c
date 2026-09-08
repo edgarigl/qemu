@@ -319,12 +319,21 @@ static int guest_check(uint64_t size, uint32_t expected,
 
 static void queue_capture(int camera, int fd, uint32_t index)
 {
+    off_t size = lseek(fd, 0, SEEK_END);
     struct v4l2_buffer buffer = {
         .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
         .memory = V4L2_MEMORY_DMABUF, .index = index, .m.fd = fd,
     };
+    if (size < 0 || (uint64_t)size > UINT32_MAX) {
+        fprintf(stderr, "invalid capture dma-buf size\n");
+        exit(EXIT_FAILURE);
+    }
+    buffer.length = size;
     dmabuf_sync(fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
     if (ioctl(camera, VIDIOC_QBUF, &buffer) < 0) {
+        int saved_errno = errno;
+        dmabuf_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+        errno = saved_errno;
         fail("capture QBUF");
     }
 }
