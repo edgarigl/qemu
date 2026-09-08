@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Exercise a dom0-owned dma-buf pool with native and guest GPU consumers.
 
 QMP installs fds once. A frame is released only after every reader's GPU has
@@ -61,8 +62,9 @@ class Pool:
         try:
             for _ in range(count):
                 # Linear ARGB storage has enough space for the YUYV test source.
+                format_code = int.from_bytes(b"AR24", "little")
                 bo = self.library.gbm_bo_create(self.device, width, height,
-                                                int.from_bytes(b"AR24", "little"),
+                                                format_code,
                                                 (1 << 2) | (1 << 4))
                 if not bo:
                     raise OSError(ctypes.get_errno(), "gbm_bo_create")
@@ -193,12 +195,14 @@ def run(args) -> None:
                 # Keep native consumption for the first overlap frame too.
                 if frame <= args.native_first or not args.guest:
                     jobs.append(("dom0", executor.submit(
-                        check, [local, "native", str(fd), str(size), hex(expected)],
+                        check, [local, "native", str(fd), str(size),
+                                hex(expected)],
                         pass_fds=[fd], env=native_env)))
                 if frame >= args.native_first:
                     for host, _, capset, icd in args.guest:
                         remote = shlex.join(["env", f"VK_DRIVER_FILES={icd}",
-                                             args.guest_binary, "guest", str(size),
+                                             args.guest_binary, "guest",
+                                             str(size),
                                              hex(expected), str(slot), capset])
                         jobs.append((host, executor.submit(
                             check, ["ssh", "-o", "BatchMode=yes", "-o",
@@ -206,7 +210,8 @@ def run(args) -> None:
                 for name, future in jobs:
                     print(f"frame={frame} slot={slot} reader={name} "
                           f"{future.result()}", flush=True)
-            print(f"RELEASE slot={slot} sequence={sequence} readers={len(jobs)}",
+            print(f"RELEASE slot={slot} sequence={sequence} "
+                  f"readers={len(jobs)}",
                   flush=True)
             if capture:
                 capture.stdin.write(f"RELEASE {slot} {sequence}\n")
@@ -249,11 +254,13 @@ def main() -> None:
     parser.add_argument("--native-first", type=int, default=2)
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--height", type=int, default=64)
-    parser.add_argument("--camera", help="V4L2 capture node; otherwise use patterns")
+    parser.add_argument("--camera",
+                        help="V4L2 capture node; otherwise use patterns")
     args = parser.parse_args()
     if not 2 <= args.buffers <= 16 or args.frames <= args.native_first:
         parser.error("use 2..16 buffers and more frames than native-first")
-    if min(args.width, args.height) <= 0 or args.native_first < 0 or args.fdset < 0:
+    if (min(args.width, args.height) <= 0 or args.native_first < 0 or
+            args.fdset < 0):
         parser.error("invalid size, frame count, or fdset")
     run(args)
 

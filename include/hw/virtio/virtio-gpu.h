@@ -316,9 +316,8 @@ void virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
                                    struct virtio_gpu_resp_edid *edid);
 /* virtio-gpu.c */
 /* Return 1 with an owned fd, 0 for a normal blob, or a negative errno. */
-int virtio_gpu_external_blob_fd(VirtIOGPU *g,
-                               const struct virtio_gpu_resource_create_blob *blob,
-                               int *fd);
+int virtio_gpu_external_blob_fd(
+    VirtIOGPU *g, const struct virtio_gpu_resource_create_blob *blob, int *fd);
 struct virtio_gpu_simple_resource *
 virtio_gpu_find_resource(VirtIOGPU *g, uint32_t resource_id);
 

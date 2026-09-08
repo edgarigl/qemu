@@ -42,9 +42,8 @@ virtio_gpu_find_check_resource(VirtIOGPU *g, uint32_t resource_id,
 
 static void virtio_gpu_reset_bh(void *opaque);
 
-int virtio_gpu_external_blob_fd(VirtIOGPU *g,
-                               const struct virtio_gpu_resource_create_blob *blob,
-                               int *fd)
+int virtio_gpu_external_blob_fd(
+    VirtIOGPU *g, const struct virtio_gpu_resource_create_blob *blob, int *fd)
 {
     g_autofree char *path = NULL;
     uint64_t slot = blob->blob_id - g->external_blob_id;
@@ -1535,7 +1534,8 @@ void virtio_gpu_device_realize(DeviceState *qdev, Error **errp)
     if (g->external_blob_fdset >= 0) {
         if (!g->external_blob_count || g->external_blob_count > 64 ||
             g->external_blob_id > UINT64_MAX - (g->external_blob_count - 1)) {
-            error_setg(errp, "invalid external blob range (maximum 64 buffers)");
+            error_setg(errp,
+                       "invalid external blob range (maximum 64 buffers)");
             return;
         }
         if (!virtio_gpu_virgl_enabled(g->parent_obj.conf)) {
@@ -1753,8 +1753,10 @@ static const Property virtio_gpu_properties[] = {
     DEFINE_PROP_BIT("blob", VirtIOGPU, parent_obj.conf.flags,
                     VIRTIO_GPU_FLAG_BLOB_ENABLED, false),
     DEFINE_PROP_SIZE("hostmem", VirtIOGPU, parent_obj.conf.hostmem, 0),
-    DEFINE_PROP_INT32("x-blob-import-fdset", VirtIOGPU, external_blob_fdset, -1),
-    DEFINE_PROP_UINT32("x-blob-import-count", VirtIOGPU, external_blob_count, 1),
+    DEFINE_PROP_INT32("x-blob-import-fdset", VirtIOGPU,
+                      external_blob_fdset, -1),
+    DEFINE_PROP_UINT32("x-blob-import-count", VirtIOGPU,
+                       external_blob_count, 1),
     DEFINE_PROP_UINT64("x-blob-import-id", VirtIOGPU, external_blob_id,
                        0xffff000000000000ULL),
     DEFINE_PROP_UINT8("x-scanout-vmstate-version", VirtIOGPU, scanout_vmstate_version, 2),

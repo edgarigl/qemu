@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 # Dom0-owned camera buffer experiment
 
 This prototype tests the missing storage-import leg of multi-VM camera sharing:

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-/* Linux virtgpu UAPI additions missing from older libdrm installations. */
+/* MIT UAPI definitions from Linux include/uapi/drm/virtgpu_drm.h. */
+/* These additions are missing from older libdrm installations. */
 #ifndef HANDOVER_VIRTGPU_BLOB_H
 #define HANDOVER_VIRTGPU_BLOB_H
 

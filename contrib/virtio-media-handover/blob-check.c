@@ -41,6 +41,7 @@ static uint64_t number(const char *s)
     uint64_t value;
 
     errno = 0;
+    /* This standalone utility does not link QEMU's parsing helpers. */
     value = strtoull(s, &end, 0);
     if (errno || !*s || *end || *s == '-') {
         fprintf(stderr, "invalid number: %s\n", s);
@@ -179,7 +180,8 @@ static int gpu_check(int fd, uint64_t size, uint32_t expected)
     VkMemoryFdPropertiesKHR fdprops = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
     };
-    VK_CHECK(fd_properties(device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+    VK_CHECK(fd_properties(device,
+                            VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
                             fd, &fdprops));
     VkImportMemoryFdInfoKHR import = {
         .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
@@ -439,7 +441,8 @@ int main(int argc, char **argv)
         for (int i = 5; i < argc; i++) {
             fds[i - 5] = number(argv[i]);
         }
-        return capture(argv[2], number(argv[3]), number(argv[4]), argc - 5, fds);
+        return capture(argv[2], number(argv[3]), number(argv[4]),
+                       argc - 5, fds);
     }
     fprintf(stderr, "usage:\n"
             "  %s native FD SIZE EXPECTED_FNV32\n"
