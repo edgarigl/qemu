@@ -42,6 +42,53 @@ virtio_gpu_find_check_resource(VirtIOGPU *g, uint32_t resource_id,
 
 static void virtio_gpu_reset_bh(void *opaque);
 
+int virtio_gpu_external_blob_fd(VirtIOGPU *g,
+                               const struct virtio_gpu_resource_create_blob *blob,
+                               int *fd)
+{
+    g_autofree char *path = NULL;
+    uint64_t slot = blob->blob_id - g->external_blob_id;
+    off_t size;
+    int registered_fd, ret;
+
+    if (g->external_blob_fdset < 0 ||
+        blob->blob_id < g->external_blob_id || slot >= g->external_blob_count) {
+        return 0;
+    }
+    if (blob->blob_mem != VIRTIO_GPU_BLOB_MEM_HOST3D || blob->nr_entries ||
+        !blob->size ||
+        !(blob->blob_flags & VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE) ||
+        (blob->blob_flags & ~(VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE |
+                              VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE |
+                              VIRTIO_GPU_BLOB_FLAG_USE_CROSS_DEVICE))) {
+        return -EINVAL;
+    }
+
+    path = g_strdup_printf("/dev/fdset/%" PRIu64,
+                           g->external_blob_fdset + slot);
+    registered_fd = qemu_open_old(path, O_RDWR | O_CLOEXEC);
+    if (registered_fd < 0) {
+        return -errno;
+    }
+
+    /* Renderers close their own fds; do not leave fdset dup bookkeeping. */
+    *fd = qemu_dup(registered_fd);
+    ret = *fd < 0 ? -errno : 1;
+    qemu_close(registered_fd);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* A dma-buf supports seeking to its size, but has no readable payload. */
+    size = lseek(*fd, 0, SEEK_END);
+    if (size < 0 || (uint64_t)size != blob->size) {
+        close(*fd);
+        *fd = -1;
+        return -EINVAL;
+    }
+    return 1;
+}
+
 void virtio_gpu_update_cursor_data(VirtIOGPU *g,
                                    struct virtio_gpu_scanout *s,
                                    uint32_t resource_id)
@@ -1484,6 +1531,20 @@ void virtio_gpu_device_realize(DeviceState *qdev, Error **errp)
     VirtIODevice *vdev = VIRTIO_DEVICE(qdev);
     VirtIOGPU *g = VIRTIO_GPU(qdev);
 
+    g->parent_obj.external_blobs = g->external_blob_fdset >= 0;
+    if (g->external_blob_fdset >= 0) {
+        if (!g->external_blob_count || g->external_blob_count > 64 ||
+            g->external_blob_id > UINT64_MAX - (g->external_blob_count - 1)) {
+            error_setg(errp, "invalid external blob range (maximum 64 buffers)");
+            return;
+        }
+        if (!virtio_gpu_virgl_enabled(g->parent_obj.conf) &&
+            !virtio_gpu_rutabaga_enabled(g->parent_obj.conf)) {
+            error_setg(errp, "external blobs require virgl or rutabaga");
+            return;
+        }
+    }
+
     if (virtio_gpu_blob_enabled(g->parent_obj.conf)) {
         if (!virtio_gpu_rutabaga_enabled(g->parent_obj.conf) &&
             !virtio_gpu_virgl_enabled(g->parent_obj.conf) &&
@@ -1693,6 +1754,10 @@ static const Property virtio_gpu_properties[] = {
     DEFINE_PROP_BIT("blob", VirtIOGPU, parent_obj.conf.flags,
                     VIRTIO_GPU_FLAG_BLOB_ENABLED, false),
     DEFINE_PROP_SIZE("hostmem", VirtIOGPU, parent_obj.conf.hostmem, 0),
+    DEFINE_PROP_INT32("x-blob-import-fdset", VirtIOGPU, external_blob_fdset, -1),
+    DEFINE_PROP_UINT32("x-blob-import-count", VirtIOGPU, external_blob_count, 1),
+    DEFINE_PROP_UINT64("x-blob-import-id", VirtIOGPU, external_blob_id,
+                       0xffff000000000000ULL),
     DEFINE_PROP_UINT8("x-scanout-vmstate-version", VirtIOGPU, scanout_vmstate_version, 2),
 };
 

@@ -672,7 +672,7 @@ static void virgl_cmd_resource_create_blob(VirtIOGPU *g,
     g_autofree struct virtio_gpu_virgl_resource *res = NULL;
     struct virtio_gpu_resource_create_blob cblob;
     struct virgl_renderer_resource_info info;
-    int ret;
+    int ret, external_fd = -1;
 
     if (!virtio_gpu_blob_enabled(g->parent_obj.conf)) {
         cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
@@ -722,7 +722,27 @@ static void virgl_cmd_resource_create_blob(VirtIOGPU *g,
     virgl_args.iovecs = res->base.iov;
     virgl_args.num_iovs = res->base.iov_cnt;
 
-    ret = virgl_renderer_resource_create_blob(&virgl_args);
+    ret = virtio_gpu_external_blob_fd(g, &cblob, &external_fd);
+    if (ret == 1) {
+#ifdef CONFIG_VIRGL_RESOURCE_IMPORT_BLOB
+        struct virgl_renderer_resource_import_blob_args import_args = {
+            .res_handle = cblob.resource_id,
+            .blob_mem = VIRGL_RENDERER_BLOB_MEM_HOST3D,
+            .fd_type = VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF,
+            .fd = external_fd,
+            .size = cblob.size,
+        };
+
+        ret = virgl_renderer_resource_import_blob(&import_args);
+#else
+        ret = -ENOTSUP;
+#endif
+        if (ret) {
+            close(external_fd);
+        }
+    } else if (ret == 0) {
+        ret = virgl_renderer_resource_create_blob(&virgl_args);
+    }
     if (ret) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: virgl blob create error: %s\n",
                       __func__, strerror(-ret));

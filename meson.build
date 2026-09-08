@@ -2549,6 +2549,10 @@ config_host_data.set('CONFIG_VNC_JPEG', jpeg.found())
 config_host_data.set('CONFIG_VNC_SASL', sasl.found())
 if virgl.found()
   config_host_data.set('VIRGL_VERSION_MAJOR', virgl.version().split('.')[0])
+  config_host_data.set('CONFIG_VIRGL_RESOURCE_IMPORT_BLOB',
+                      cc.has_function('virgl_renderer_resource_import_blob',
+                                      prefix: '#include <virglrenderer.h>',
+                                      dependencies: virgl))
 endif
 config_host_data.set('CONFIG_VIRTFS', have_virtfs)
 config_host_data.set('CONFIG_VTE', vte.found())

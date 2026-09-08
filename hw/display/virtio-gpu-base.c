@@ -208,8 +208,9 @@ virtio_gpu_base_device_realize(DeviceState *qdev,
         }
     }
 
-    if (virtio_gpu_virgl_enabled(g->conf)) {
-        error_setg(&g->migration_blocker, "virgl is not yet migratable");
+    if (virtio_gpu_virgl_enabled(g->conf) || g->external_blobs) {
+        error_setg(&g->migration_blocker,
+                   "virgl and external GPU blobs are not migratable");
         if (migrate_add_blocker(&g->migration_blocker, errp) < 0) {
             return false;
         }
