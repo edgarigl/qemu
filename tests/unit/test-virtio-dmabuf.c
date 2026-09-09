@@ -153,11 +153,83 @@ static void test_media_blob_lifetime(void)
     close(imported);
 }
 
+static void test_uuid_dup_lifetime(void)
+{
+    QemuUUID uuid, saved;
+    struct vhost_dev dev = { 0 };
+    int owner = open("/dev/null", O_RDWR | O_CLOEXEC);
+    int imported;
+    char byte;
+
+    g_assert_cmpint(owner, >=, 0);
+    qemu_uuid_generate(&uuid);
+    saved = uuid;
+    g_assert_true(virtio_add_dmabuf(&uuid, owner));
+    /* The caller can reuse its key storage after registration. */
+    memset(&uuid, 0, sizeof(uuid));
+    g_assert_cmpint(virtio_lookup_dmabuf(&saved), ==, owner);
+    imported = virtio_dup_dmabuf(&saved);
+    g_assert_cmpint(imported, >=, 0);
+    g_assert_cmpint(fcntl(imported, F_GETFD) & FD_CLOEXEC, !=, 0);
+    g_assert_true(virtio_remove_resource(&saved));
+    g_assert_cmpint(virtio_dup_dmabuf(&saved), ==, -1);
+    g_assert_cmpint(errno, ==, ENOENT);
+    close(owner);
+    g_assert_cmpint(read(imported, &byte, 1), ==, 0);
+    close(imported);
+
+    g_assert_true(virtio_add_vhost_device(&saved, &dev));
+    g_assert_cmpint(virtio_dup_dmabuf(&saved), ==, -1);
+    g_assert_cmpint(errno, ==, EINVAL);
+    g_assert_true(virtio_remove_resource(&saved));
+}
+
+static void test_media_blob_registry_reset(void)
+{
+    QemuUUID uuid;
+    uint64_t first, second;
+    int owner = open("/dev/null", O_RDWR | O_CLOEXEC);
+    int imported;
+    char byte;
+
+    g_assert_cmpint(owner, >=, 0);
+    qemu_uuid_generate(&uuid);
+    g_assert_true(virtio_add_dmabuf(&uuid, owner));
+    first = virtio_dmabuf_blob_register(owner);
+    g_assert_cmpuint(first, >=, VIRTIO_DMABUF_BLOB_BASE);
+    imported = virtio_dmabuf_blob_dup(first);
+    g_assert_cmpint(imported, >=, 0);
+
+    /* One registry cleanup must retire both UUID and media registrations. */
+    virtio_free_resources();
+    g_assert_cmpint(virtio_dup_dmabuf(&uuid), ==, -1);
+    g_assert_cmpint(errno, ==, ENOENT);
+    g_assert_cmpint(virtio_dmabuf_blob_dup(first), ==, -1);
+    g_assert_cmpint(errno, ==, ENOENT);
+    virtio_dmabuf_blob_unregister(first);
+    virtio_free_resources();
+    g_assert_cmpint(read(owner, &byte, 1), ==, 0);
+    g_assert_cmpint(read(imported, &byte, 1), ==, 0);
+
+    second = virtio_dmabuf_blob_register(owner);
+    g_assert_cmpuint(second, >, first);
+    virtio_dmabuf_blob_unregister(second);
+    g_assert_cmpint(virtio_dmabuf_blob_dup(0), ==, -1);
+    g_assert_cmpint(errno, ==, ENOENT);
+    g_assert_cmpint(virtio_dmabuf_blob_dup(UINT64_MAX), ==, -1);
+    g_assert_cmpint(errno, ==, ENOENT);
+    close(imported);
+    close(owner);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/virtio-dmabuf/media_blob_lifetime",
                     test_media_blob_lifetime);
+    g_test_add_func("/virtio-dmabuf/uuid_dup_lifetime", test_uuid_dup_lifetime);
+    g_test_add_func("/virtio-dmabuf/media_blob_registry_reset",
+                    test_media_blob_registry_reset);
     g_test_add_func("/virtio-dmabuf/add_rm_res", test_add_remove_resources);
     g_test_add_func("/virtio-dmabuf/add_rm_dev", test_add_remove_dev);
     g_test_add_func("/virtio-dmabuf/rm_invalid_res",
