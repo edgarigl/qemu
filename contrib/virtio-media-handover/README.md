@@ -1,18 +1,74 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 # Dom0-owned camera buffer experiment
 
-This prototype tests the missing storage-import leg of multi-VM camera sharing:
-one dom0 GBM dma-buf pool becomes a set of virtio-gpu resources in each guest.
+This prototype tests the storage-import leg of multi-VM camera sharing:
+one dom0 dma-buf pool becomes a set of virtio-gpu resources in each guest.
 The producer keeps its pool alive before, during, and after guest consumption.
 The native and guest probes use Vulkan GPU readback to verify the contents.
 That diagnostic readback copies pixels; importing the source storage does not.
 
-This is an experiment, not an Android camera HAL or a display service. It does
-not yet expose subscriber V4L2 queues, transport release fences, or switch a
-physical display. The synchronous checker waits for every GPU before releasing
-a frame. Performance results from it would not represent a streaming pipeline.
+The V4L2 path uses one v4l2loopback node per consumer and needs no QMP fd
+transport. The older fdset harness below remains a diagnostic alternative.
+Neither path implements an Android camera HAL or switches a physical display.
+Continuous V4L2 reuse still needs consumer-coupled loopback completion and
+GPU/display release coordination.
 
-## QEMU interface
+## V4L2 export into the guest GPU
+
+Configure one virtio-media and one virtio-gpu device per guest:
+
+```text
+-device virtio-gpu-gl-pci,blob=on,hostmem=256M,venus=on,x-blob-import-media=on
+-device virtio-media-pci,host-device=/dev/video11,max-buffers=9,host-v4l2-memory=export-gpu,xen-grants=off
+-display egl-headless,rendernode=/dev/dri/renderD128
+```
+
+Use a separate loopback node for each QEMU. Before guest REQBUFS, bind the
+producer's pool to stable OUTPUT slots using the dma-buf pass-through support
+in [v4l2loopback PR #665](https://github.com/v4l2loopback/v4l2loopback/pull/665).
+QEMU acquires each slot with host CAPTURE EXPBUF and registers its fd in a
+process-local media/GPU registry. It neither maps nor regrants the media pages.
+The GPU duplicates the fd when importing a blob. Tokens begin at
+0xfffe000000000000 and are never reused within that QEMU. Queue teardown
+removes tokens; already imported GPU resources retain their storage references.
+
+The guest requires the companion virtio-media changes and optional virtio-gpu
+helper in
+[fanout-gpu-export](https://github.com/edgarigl/virtio-media/tree/fanout-gpu-export/guest-kernel).
+Guest VIDIOC_EXPBUF requests a token and allocation length, then the GPU helper
+exports a real virtio-gpu GEM dma-buf. Applications use ordinary V4L2 EXPBUF
+and Vulkan import; they do not create blobs or exchange host fd numbers.
+Feature bit 58 and command 10 are private experimental protocol additions.
+
+REQBUFS(MMAP), QUERYBUF and QBUF/DQBUF select indexed V4L2 queues; they do not
+imply a CPU mapping. In this mode mmap of the video node returns EOPNOTSUPP.
+An exported GPU fd uses virtio-gpu's mapping path, including Xen HMEM. The
+helper currently supports exactly one bound virtio-gpu device per guest.
+The media-import and fdset-import properties are mutually exclusive. Both
+require the virgl/Venus backend and block migration.
+
+For a finite pool whose producer will not reuse any slot, run on dom0 and
+both guests using their respective video nodes and hardware Vulkan ICDs:
+
+```sh
+make -C contrib/virtio-media-handover
+contrib/virtio-media-handover/blob-check v4l2 /dev/video0 9
+```
+
+The checker exports all slots, closes the video node, then GPU-reads each fd.
+READ lines report checksums; compare them across consumers. Compare host
+dma-buf inodes from native EXPORT lines with QEMU GPU_EXPORT diagnostics
+enabled by -d guest_errors. Guest inode numbers are in a different namespace.
+This is a storage/lifetime check, not a streaming reader: it deliberately
+does not DQBUF a frame before inspecting the frozen pool.
+
+On 5050a, native RADV and two Linux/Venus guests read nine matching slots with
+both GBM and system dma-heap allocations, xen-grants=off, and no QMP. A guest
+QBUF/DQBUF plus EXPBUF mapping check and a native GStreamer DMABUF smoke test
+also passed for the retained final frame. The camera source was vivid;
+Android/gfxstream and visible handover remain unvalidated.
+
+## Diagnostic QMP fdset interface
 
 Use a virgl/Venus GPU with these additional properties:
 
