@@ -23,6 +23,7 @@
 #include "hw/virtio/virtio.h"
 #include "migration/qemu-file-types.h"
 #include "hw/virtio/virtio-gpu.h"
+#include "hw/virtio/virtio-dmabuf.h"
 #include "hw/virtio/virtio-gpu-bswap.h"
 #include "hw/virtio/virtio-gpu-pixman.h"
 #include "hw/virtio/virtio-bus.h"
@@ -49,9 +50,12 @@ int virtio_gpu_external_blob_fd(
     uint64_t slot = blob->blob_id - g->external_blob_id;
     off_t size;
     int registered_fd, ret;
+    bool media = g->external_blob_media &&
+                 blob->blob_id >= VIRTIO_DMABUF_BLOB_BASE;
 
-    if (g->external_blob_fdset < 0 ||
-        blob->blob_id < g->external_blob_id || slot >= g->external_blob_count) {
+    if (!media &&
+        (g->external_blob_fdset < 0 || blob->blob_id < g->external_blob_id ||
+         slot >= g->external_blob_count)) {
         return 0;
     }
     if (blob->blob_mem != VIRTIO_GPU_BLOB_MEM_HOST3D || blob->nr_entries ||
@@ -63,19 +67,26 @@ int virtio_gpu_external_blob_fd(
         return -EINVAL;
     }
 
-    path = g_strdup_printf("/dev/fdset/%" PRIu64,
-                           g->external_blob_fdset + slot);
-    registered_fd = qemu_open_old(path, O_RDWR | O_CLOEXEC);
-    if (registered_fd < 0) {
-        return -errno;
-    }
+    if (media) {
+        *fd = virtio_dmabuf_blob_dup(blob->blob_id);
+        if (*fd < 0) {
+            return -errno;
+        }
+    } else {
+        path = g_strdup_printf("/dev/fdset/%" PRIu64,
+                               g->external_blob_fdset + slot);
+        registered_fd = qemu_open_old(path, O_RDWR | O_CLOEXEC);
+        if (registered_fd < 0) {
+            return -errno;
+        }
 
-    /* Renderers close their own fds; do not leave fdset dup bookkeeping. */
-    *fd = qemu_dup(registered_fd);
-    ret = *fd < 0 ? -errno : 1;
-    qemu_close(registered_fd);
-    if (ret < 0) {
-        return ret;
+        /* Renderers close their own fds; drop fdset dup bookkeeping. */
+        *fd = qemu_dup(registered_fd);
+        ret = *fd < 0 ? -errno : 1;
+        qemu_close(registered_fd);
+        if (ret < 0) {
+            return ret;
+        }
     }
 
     /* A dma-buf supports seeking to its size, but has no readable payload. */
@@ -1530,8 +1541,13 @@ void virtio_gpu_device_realize(DeviceState *qdev, Error **errp)
     VirtIODevice *vdev = VIRTIO_DEVICE(qdev);
     VirtIOGPU *g = VIRTIO_GPU(qdev);
 
-    g->parent_obj.external_blobs = g->external_blob_fdset >= 0;
-    if (g->external_blob_fdset >= 0) {
+    g->parent_obj.external_blobs = g->external_blob_fdset >= 0 ||
+                                    g->external_blob_media;
+    if (g->external_blob_media && g->external_blob_fdset >= 0) {
+        error_setg(errp, "media and fdset blob import are mutually exclusive");
+        return;
+    }
+    if (g->parent_obj.external_blobs) {
         if (!g->external_blob_count || g->external_blob_count > 64 ||
             g->external_blob_id > UINT64_MAX - (g->external_blob_count - 1)) {
             error_setg(errp,
@@ -1755,6 +1771,8 @@ static const Property virtio_gpu_properties[] = {
     DEFINE_PROP_SIZE("hostmem", VirtIOGPU, parent_obj.conf.hostmem, 0),
     DEFINE_PROP_INT32("x-blob-import-fdset", VirtIOGPU,
                       external_blob_fdset, -1),
+    DEFINE_PROP_BOOL("x-blob-import-media", VirtIOGPU,
+                     external_blob_media, false),
     DEFINE_PROP_UINT32("x-blob-import-count", VirtIOGPU,
                        external_blob_count, 1),
     DEFINE_PROP_UINT64("x-blob-import-id", VirtIOGPU, external_blob_id,

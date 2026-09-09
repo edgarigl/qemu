@@ -120,6 +120,7 @@ struct vmedia_dma_heap_allocation_data {
 #define VIRTIO_MEDIA_CMD_IMPORT_BUFFER 7
 #define VIRTIO_MEDIA_CMD_RELEASE_HANDLE 8
 #define VIRTIO_MEDIA_CMD_REGISTER_BUFFER 9
+#define VIRTIO_MEDIA_CMD_EXPORT_GPU 10
 
 #define VIRTIO_MEDIA_EVT_ERROR  0
 #define VIRTIO_MEDIA_EVT_DQBUF  1
@@ -140,6 +141,7 @@ struct vmedia_dma_heap_allocation_data {
 #define VIRTIO_MEDIA_F_EXPORT_IMPORT 62
 #define VIRTIO_MEDIA_F_PEER_GREF_IMPORT 60
 #define VIRTIO_MEDIA_F_IMPORT_BUFFER 59
+#define VIRTIO_MEDIA_F_EXPORT_GPU 58
 #define VIRTIO_MEDIA_GREF_PAGE_SIZE 4096u
 
 #define VIRTIO_MEDIA_IMPORT_F_TARGET_DOMID (1U << 1)
@@ -165,6 +167,8 @@ typedef enum VirtIOMediaHostV4L2MemMode {
     VMEDIA_HOST_V4L2_MEM_IMPORT,
     /* Import-UUID: guest virtio-gpu blob (UUID) resolved to a host dmabuf */
     VMEDIA_HOST_V4L2_MEM_IMPORT_UUID,
+    /* Host EXPBUF storage accessed through virtio-gpu, without media maps. */
+    VMEDIA_HOST_V4L2_MEM_EXPORT_GPU,
 } VirtIOMediaHostV4L2MemMode;
 
 static int vmedia_ioctl_nointr(int fd, unsigned long req, void *arg);
@@ -374,6 +378,12 @@ struct virtio_media_resp_export_buffer {
     uint32_t reserved;
 };
 
+struct virtio_media_resp_export_gpu {
+    struct virtio_media_resp_header hdr;
+    uint64_t blob_id;
+    uint64_t len;
+};
+
 struct virtio_media_cmd_import_buffer {
     struct virtio_media_cmd_header hdr;
     uint32_t session_id;
@@ -468,6 +478,8 @@ typedef struct VirtIOMediaSession {
      */
     bool host_regrant;
     bool host_import_uuid;
+    bool host_export_gpu;
+    uint64_t *host_blob_ids;
     int *host_dmabuf_fds;     /* EXPBUF fd per (buffer*planes + plane) */
     int *host_import_fds;     /* gntdev import fd per (buffer*planes + plane) */
     uint32_t **host_gref_ids; /* gref array per (buffer*planes + plane) */
@@ -701,6 +713,21 @@ static void vmedia_proxy_release_buffers(VirtIOMedia *s,
     }
 
     vmedia_regrant_teardown(session);
+
+    if (session->host_export_gpu) {
+        planes = session->host_num_planes ? session->host_num_planes : 1;
+        for (i = 0; i < session->host_num_buffers * planes; i++) {
+            if (session->host_blob_ids[i]) {
+                virtio_dmabuf_blob_unregister(session->host_blob_ids[i]);
+            }
+            if (session->host_dmabuf_fds[i] >= 0) {
+                close(session->host_dmabuf_fds[i]);
+            }
+        }
+        g_clear_pointer(&session->host_blob_ids, g_free);
+        g_clear_pointer(&session->host_dmabuf_fds, g_free);
+        session->host_export_gpu = false;
+    }
 
     if (!session->host_maps) {
         session->host_num_buffers = 0;
@@ -1287,6 +1314,7 @@ static int vmedia_alloc_buffers(VirtIOMedia *s, VirtIOMediaSession *session,
          * re-granted from the host EXPBUF dma-bufs), so skip the bounds check.
          */
         if (!session->host_regrant && !session->host_import_uuid &&
+            !session->host_export_gpu &&
             offset + buf_size > s->hostmem_size) {
             vmedia_reset_buffers(session);
             return -ENOMEM;
@@ -1647,12 +1675,47 @@ static int vmedia_dmaheap_alloc(int heap_fd, uint32_t len)
     return data.fd;
 }
 
-/*
- * Mode A helper: export host MMAP buffer (index, plane) as a dma-buf via
- * VIDIOC_EXPBUF, then re-grant its pages to the guest domain with gntdev
- * IMP_TO_REFS. On success stores the EXPBUF fd, the gntdev import fd, and the
- * grant-ref array on the session at slot @idx. Returns 0, or negative errno.
- */
+/* Retain the host allocation for GPU import without mapping or granting it. */
+static int vmedia_export_gpu_plane(VirtIOMediaSession *session,
+                                   uint32_t index, uint32_t plane,
+                                   uint32_t slot, uint32_t length)
+{
+    struct v4l2_exportbuffer exp = {
+        .type = session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                                V4L2_BUF_TYPE_VIDEO_CAPTURE,
+        .index = index,
+        .plane = plane,
+        .flags = O_RDWR | O_CLOEXEC,
+    };
+    struct stat st;
+    off_t size;
+    int ret = vmedia_proxy_ioctl(session->host_fd, VIDIOC_EXPBUF, &exp);
+
+    if (ret < 0) {
+        return ret;
+    }
+    size = lseek(exp.fd, 0, SEEK_END);
+    if (size <= 0 || (uint64_t)size < length ||
+        size % qemu_real_host_page_size()) {
+        close(exp.fd);
+        return -EINVAL;
+    }
+    session->host_dmabuf_fds[slot] = exp.fd;
+    session->host_blob_ids[slot] = virtio_dmabuf_blob_register(exp.fd);
+    if (!session->host_blob_ids[slot]) {
+        return -ENOSPC;
+    }
+    if (!fstat(exp.fd, &st)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "virtio-media: GPU_EXPORT slot=%u blob=%" PRIu64
+                      " inode=%" PRIu64 " size=%" PRIu64 "\n",
+                      slot, session->host_blob_ids[slot],
+                      (uint64_t)st.st_ino, (uint64_t)size);
+    }
+    return 0;
+}
+
+/* Export a host plane and regrant its pages with gntdev IMP_TO_REFS. */
 static int vmedia_regrant_buffer_plane(VirtIOMediaSession *session,
                                        uint32_t buf_index, uint32_t plane,
                                        uint32_t idx, uint32_t len)
@@ -1762,6 +1825,7 @@ static int vmedia_get_host_memory_mode(VirtIOMedia *s, uint32_t type,
 
     switch (s->host_v4l2_mem_mode) {
     case VMEDIA_HOST_V4L2_MEM_MMAP:
+    case VMEDIA_HOST_V4L2_MEM_EXPORT_GPU:
         *memory = V4L2_MEMORY_MMAP;
         return 0;
     case VMEDIA_HOST_V4L2_MEM_REGRANT:
@@ -1818,10 +1882,14 @@ static int vmedia_parse_host_v4l2_mem_mode(VirtIOMedia *s, Error **errp)
         s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_IMPORT_UUID;
         return 0;
     }
+    if (!strcmp(mode, "export-gpu")) {
+        s->host_v4l2_mem_mode = VMEDIA_HOST_V4L2_MEM_EXPORT_GPU;
+        return 0;
+    }
 
     error_setg(errp,
                "virtio-media: invalid host-v4l2-memory '%s' "
-               "(use auto|mmap|userptr|regrant|import)",
+               "(use auto|mmap|userptr|regrant|import|import-uuid|export-gpu)",
                mode);
     return -EINVAL;
 }
@@ -2105,6 +2173,7 @@ static int vmedia_proxy_s_fmt(VirtIOMediaSession *session,
     if (!is_try && !session->dev->regrant_only &&
         session->dev->host_v4l2_mem_mode != VMEDIA_HOST_V4L2_MEM_IMPORT &&
         session->dev->host_v4l2_mem_mode != VMEDIA_HOST_V4L2_MEM_IMPORT_UUID &&
+        session->dev->host_v4l2_mem_mode != VMEDIA_HOST_V4L2_MEM_EXPORT_GPU &&
         sizeimage &&
         (uint64_t)session->dev->max_buffers * sizeimage >
         session->dev->hostmem_size) {
@@ -2297,7 +2366,14 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
         session->host_lengths = g_new0(uint32_t, nslots);
         session->host_offsets = g_new0(uint32_t, nslots);
 
-        if (session->host_regrant) {
+        if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_EXPORT_GPU) {
+            session->host_export_gpu = true;
+            session->host_dmabuf_fds = g_new(int, nslots);
+            session->host_blob_ids = g_new0(uint64_t, nslots);
+            for (uint32_t k = 0; k < nslots; k++) {
+                session->host_dmabuf_fds[k] = -1;
+            }
+        } else if (session->host_regrant) {
             uint32_t k;
 
             session->host_dmabuf_fds = g_new0(int, nslots);
@@ -2346,7 +2422,10 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
                     session->host_offsets[idx] = planes[p].m.mem_offset;
                     session->host_lengths[idx] = planes[p].length;
 
-                    if (session->host_regrant) {
+                    if (session->host_export_gpu) {
+                        ret = vmedia_export_gpu_plane(session, i, p, idx,
+                                                      planes[p].length);
+                    } else if (session->host_regrant) {
                         ret = vmedia_regrant_buffer_plane(session, i, p, idx,
                                                           planes[p].length);
                     } else {
@@ -2386,7 +2465,10 @@ static int vmedia_proxy_reqbufs(VirtIOMedia *s, VirtIOMediaSession *session,
                 session->host_offsets[i] = buf.m.offset;
                 session->host_lengths[i] = buf.length;
 
-                if (session->host_regrant) {
+                if (session->host_export_gpu) {
+                    ret = vmedia_export_gpu_plane(session, i, 0, i,
+                                                  buf.length);
+                } else if (session->host_regrant) {
                     ret = vmedia_regrant_buffer_plane(session, i, 0, i,
                                                       buf.length);
                 } else {
@@ -4277,6 +4359,54 @@ static void vmedia_handle_command(VirtIODevice *vdev, VirtQueue *vq)
         vmedia_flush_events(s);
         break;
     }
+    case VIRTIO_MEDIA_CMD_EXPORT_GPU: {
+        struct virtio_media_cmd_export_buffer request;
+        struct virtio_media_resp_export_gpu resp = { 0 };
+        VirtIOMediaSession *session;
+        uint32_t index, plane, slot;
+        off_t size;
+        int status = -EINVAL;
+
+        if (in_len < sizeof(resp)) {
+            virtqueue_push(vq, elem, 0);
+            break;
+        }
+        if (!virtio_vdev_has_feature(vdev, VIRTIO_MEDIA_F_EXPORT_GPU)) {
+            status = -EOPNOTSUPP;
+            goto gpu_export_respond;
+        }
+        if (vmedia_iov_read(elem->out_sg, elem->out_num, 0, &request,
+                            sizeof(request)) != sizeof(request)) {
+            goto gpu_export_respond;
+        }
+        session = g_hash_table_lookup(s->sessions,
+                      GUINT_TO_POINTER(le32_to_cpu(request.session_id)));
+        index = le32_to_cpu(request.buffer_index);
+        plane = le32_to_cpu(request.plane_index);
+        if (!session || !session->host_export_gpu ||
+            index >= session->num_buffers ||
+            plane >= session->host_num_planes ||
+            le32_to_cpu(request.queue_type) !=
+                (session->mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
+                                   V4L2_BUF_TYPE_VIDEO_CAPTURE) ||
+            request.reserved) {
+            goto gpu_export_respond;
+        }
+        slot = index * session->host_num_planes + plane;
+        size = lseek(session->host_dmabuf_fds[slot], 0, SEEK_END);
+        if (size < 0) {
+            status = -errno;
+            goto gpu_export_respond;
+        }
+        resp.blob_id = cpu_to_le64(session->host_blob_ids[slot]);
+        resp.len = cpu_to_le64(size);
+        status = 0;
+gpu_export_respond:
+        vmedia_write_resp_header(&resp.hdr, status < 0 ? -status : 0);
+        vmedia_iov_write(elem->in_sg, elem->in_num, 0, &resp, sizeof(resp));
+        virtqueue_push(vq, elem, sizeof(resp));
+        break;
+    }
     case VIRTIO_MEDIA_CMD_EXPORT_BUFFER: {
         struct virtio_media_cmd_export_buffer export_cmd;
         struct virtio_media_resp_export_buffer resp = { 0 };
@@ -4608,6 +4738,9 @@ reg_respond:
         session = g_hash_table_lookup(s->sessions, GUINT_TO_POINTER(id));
         if (!session) {
             status = -EINVAL;
+        } else if (session->host_export_gpu) {
+            /* Pixels are mapped by virtio-gpu, never through media hostmem. */
+            status = -EOPNOTSUPP;
         } else {
             status = vmedia_find_plane(session,
                                        le32_to_cpu(mmap_cmd.offset),
@@ -4785,7 +4918,11 @@ static uint64_t vmedia_get_features(VirtIODevice *vdev, uint64_t f,
         f |= (1ULL << VIRTIO_MEDIA_F_GNTREF);
         f |= (1ULL << VIRTIO_MEDIA_F_PEER_GREF_IMPORT);
     }
-    f |= (1ULL << VIRTIO_MEDIA_F_EXPORT_IMPORT);
+    if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_EXPORT_GPU) {
+        f |= (1ULL << VIRTIO_MEDIA_F_EXPORT_GPU);
+    } else {
+        f |= (1ULL << VIRTIO_MEDIA_F_EXPORT_IMPORT);
+    }
     if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_IMPORT_UUID) {
         f |= (1ULL << VIRTIO_MEDIA_F_IMPORT_BUFFER);
     }
@@ -4837,6 +4974,11 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
                    "virtio-media: host-v4l2-memory=regrant requires Xen grant "
                    "references; not available (xen-grants disabled or not "
                    "running under Xen)");
+        return;
+    }
+    if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_EXPORT_GPU &&
+        (s->xen_grants || !s->host_device)) {
+        error_setg(errp, "export-gpu requires host-device and xen-grants=off");
         return;
     }
 
@@ -4948,6 +5090,8 @@ static void vmedia_realize(DeviceState *dev, Error **errp)
                       s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_REGRANT;
 
     if (s->regrant_only) {
+        s->hostmem_size = 0;
+    } else if (s->host_v4l2_mem_mode == VMEDIA_HOST_V4L2_MEM_EXPORT_GPU) {
         s->hostmem_size = 0;
     } else if (s->use_grefs) {
         if (!vmedia_gntalloc_init(s, errp)) {

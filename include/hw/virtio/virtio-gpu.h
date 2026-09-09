@@ -190,6 +190,7 @@ struct VirtIOGPU {
     uint8_t scanout_vmstate_version;
     uint64_t conf_max_hostmem;
     int32_t external_blob_fdset;
+    bool external_blob_media;
     uint32_t external_blob_count;
     uint64_t external_blob_id;
 
