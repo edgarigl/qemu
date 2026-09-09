@@ -122,9 +122,42 @@ static void test_free_resources(void)
 
 }
 
+static void test_media_blob_lifetime(void)
+{
+    char *path = NULL;
+    uint64_t first, second;
+    int owner = g_file_open_tmp("qemu-media-XXXXXX", &path, NULL);
+    int imported;
+    char byte;
+
+    g_assert_cmpint(owner, >=, 0);
+    unlink(path);
+    g_free(path);
+    g_assert_cmpint(write(owner, "x", 1), ==, 1);
+    g_assert_cmpuint(virtio_dmabuf_blob_register(-1), ==, 0);
+    first = virtio_dmabuf_blob_register(owner);
+    g_assert_cmpuint(first, >=, VIRTIO_DMABUF_BLOB_BASE);
+    imported = virtio_dmabuf_blob_dup(first);
+    g_assert_cmpint(imported, >=, 0);
+    g_assert_cmpint(fcntl(imported, F_GETFD) & FD_CLOEXEC, !=, 0);
+    virtio_dmabuf_blob_unregister(first);
+    g_assert_cmpint(virtio_dmabuf_blob_dup(first), ==, -1);
+    g_assert_cmpint(errno, ==, ENOENT);
+    /* Old renderer references survive removal; a new epoch gets a new token. */
+    second = virtio_dmabuf_blob_register(owner);
+    g_assert_cmpuint(second, >, first);
+    virtio_dmabuf_blob_unregister(second);
+    close(owner);
+    g_assert_cmpint(pread(imported, &byte, 1, 0), ==, 1);
+    g_assert_cmpint(byte, ==, 'x');
+    close(imported);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    g_test_add_func("/virtio-dmabuf/media_blob_lifetime",
+                    test_media_blob_lifetime);
     g_test_add_func("/virtio-dmabuf/add_rm_res", test_add_remove_resources);
     g_test_add_func("/virtio-dmabuf/add_rm_dev", test_add_remove_dev);
     g_test_add_func("/virtio-dmabuf/rm_invalid_res",

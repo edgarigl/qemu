@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <xf86drm.h>
 #include "virtgpu-blob.h"
@@ -90,7 +91,7 @@ static uint32_t memory_type(VkPhysicalDevice pd, uint32_t bits,
 }
 
 /* The only pixel copy is this diagnostic GPU readback into private memory. */
-static int gpu_check(int fd, uint64_t size, uint32_t expected)
+static int gpu_check(int fd, uint64_t size, uint32_t expected, bool verify)
 {
     VkApplicationInfo app = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -274,7 +275,7 @@ static int gpu_check(int fd, uint64_t size, uint32_t expected)
     uint32_t actual = checksum(data, size);
     printf("GPU=%s bytes=%" PRIu64 " checksum=0x%08x expected=0x%08x %s\n",
            props.deviceName, size, actual, expected,
-           actual == expected ? "OK" : "FAIL");
+           verify ? (actual == expected ? "OK" : "FAIL") : "READ");
     vkUnmapMemory(device, destination_memory);
     vkDestroyCommandPool(device, pool, NULL);
     vkDestroyBuffer(device, destination, NULL);
@@ -283,7 +284,7 @@ static int gpu_check(int fd, uint64_t size, uint32_t expected)
     vkFreeMemory(device, source_memory, NULL);
     vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);
-    return actual != expected;
+    return verify && actual != expected;
 }
 
 static int guest_check(uint64_t size, uint32_t expected,
@@ -309,13 +310,69 @@ static int guest_check(uint64_t size, uint32_t expected,
         drmPrimeHandleToFD(drm, blob.bo_handle, DRM_CLOEXEC | DRM_RDWR, &fd)) {
         fail("guest blob import");
     }
-    int ret = gpu_check(fd, size, expected);
+    int ret = gpu_check(fd, size, expected, true);
     close(fd);
     struct drm_gem_close close_bo = { .handle = blob.bo_handle };
     if (ioctl(drm, DRM_IOCTL_GEM_CLOSE, &close_bo) < 0) {
         fail("GEM_CLOSE");
     }
     close(drm);
+    return ret;
+}
+
+/* Read a frozen finite pool; the producer must not reuse any of its slots. */
+static int v4l2_check(const char *path, uint32_t count)
+{
+    int camera = open(path, O_RDWR | O_CLOEXEC);
+    int fds[MAX_BUFFERS], ret = 0;
+    uint64_t sizes[MAX_BUFFERS];
+    struct v4l2_requestbuffers request = {
+        .count = count, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+        .memory = V4L2_MEMORY_MMAP,
+    };
+    struct v4l2_exportbuffer exp = {
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .flags = O_RDWR | O_CLOEXEC,
+    };
+
+    if (!count || count > MAX_BUFFERS) {
+        fprintf(stderr, "invalid buffer count\n");
+        return 1;
+    }
+    if (camera < 0 || ioctl(camera, VIDIOC_REQBUFS, &request) < 0 ||
+        request.count != count) {
+        fail("V4L2 REQBUFS");
+    }
+    exp.index = count;
+    if (ioctl(camera, VIDIOC_EXPBUF, &exp) != -1 || errno != EINVAL) {
+        fprintf(stderr, "EXPBUF did not reject an invalid slot\n");
+        return 1;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        struct stat st;
+        off_t size;
+
+        exp.index = i;
+        if (ioctl(camera, VIDIOC_EXPBUF, &exp) < 0) {
+            fail("V4L2 EXPBUF");
+        }
+        fds[i] = exp.fd;
+        size = lseek(exp.fd, 0, SEEK_END);
+        if (size <= 0 || fstat(exp.fd, &st) < 0) {
+            fail("exported dma-buf size");
+        }
+        sizes[i] = size;
+        printf("EXPORT slot=%u inode=%" PRIu64 " bytes=%" PRIu64 "\n",
+               i, (uint64_t)st.st_ino, sizes[i]);
+        fflush(stdout);
+    }
+    /* Exported GPU objects must retain the storage after media closes. */
+    close(camera);
+    for (uint32_t i = 0; i < count; i++) {
+        printf("SLOT %u ", i);
+        fflush(stdout);
+        ret |= gpu_check(fds[i], sizes[i], 0, false);
+        close(fds[i]);
+    }
     return ret;
 }
 
@@ -429,7 +486,11 @@ static int capture(const char *path, uint32_t width, uint32_t height,
 int main(int argc, char **argv)
 {
     if (argc == 5 && !strcmp(argv[1], "native")) {
-        return gpu_check(number(argv[2]), number(argv[3]), number(argv[4]));
+        return gpu_check(number(argv[2]), number(argv[3]), number(argv[4]),
+                         true);
+    }
+    if (argc == 4 && !strcmp(argv[1], "v4l2")) {
+        return v4l2_check(argv[2], number(argv[3]));
     }
     if (argc >= 4 && argc <= 6 && !strcmp(argv[1], "guest")) {
         return guest_check(number(argv[2]), number(argv[3]),
@@ -449,5 +510,6 @@ int main(int argc, char **argv)
             "  %s guest SIZE EXPECTED_FNV32 [SLOT [CAPSET]]\n"
             "  %s capture DEVICE WIDTH HEIGHT FD0 FD1 ...\n",
             argv[0], argv[0], argv[0]);
+    fprintf(stderr, "  %s v4l2 DEVICE COUNT  (frozen pool only)\n", argv[0]);
     return 1;
 }
