@@ -17,6 +17,61 @@
 
 static GMutex lock;
 static GHashTable *resource_uuids;
+static GHashTable *media_blobs;
+static uint64_t next_media_blob = VIRTIO_DMABUF_BLOB_BASE;
+
+uint64_t virtio_dmabuf_blob_register(int fd)
+{
+    uint64_t *id;
+    uint64_t result;
+
+    if (fd < 0 || fd == INT_MAX) {
+        return 0;
+    }
+    g_mutex_lock(&lock);
+    if (next_media_blob == UINT64_MAX) {
+        g_mutex_unlock(&lock);
+        return 0;
+    }
+    if (!media_blobs) {
+        media_blobs = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                           g_free, NULL);
+    }
+    id = g_new(uint64_t, 1);
+    *id = next_media_blob++;
+    g_hash_table_insert(media_blobs, id, GINT_TO_POINTER(fd + 1));
+    result = *id;
+    g_mutex_unlock(&lock);
+    return result;
+}
+
+int virtio_dmabuf_blob_dup(uint64_t id)
+{
+    gpointer value;
+    int fd = -1;
+
+    g_mutex_lock(&lock);
+    value = media_blobs ? g_hash_table_lookup(media_blobs, &id) : NULL;
+    if (value) {
+        fd = qemu_dup(GPOINTER_TO_INT(value) - 1);
+    } else {
+        errno = ENOENT;
+    }
+    g_mutex_unlock(&lock);
+    return fd;
+}
+
+void virtio_dmabuf_blob_unregister(uint64_t id)
+{
+    g_mutex_lock(&lock);
+    if (media_blobs) {
+        g_hash_table_remove(media_blobs, &id);
+        if (!g_hash_table_size(media_blobs)) {
+            g_clear_pointer(&media_blobs, g_hash_table_destroy);
+        }
+    }
+    g_mutex_unlock(&lock);
+}
 
 /*
  * uuid_equal_func: wrapper for UUID is_equal function to

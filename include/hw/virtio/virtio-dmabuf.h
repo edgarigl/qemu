@@ -16,6 +16,16 @@
 #include "qemu/uuid.h"
 #include "vhost.h"
 
+/*
+ * Private media/GPU bridge. Tokens are never reused within this QEMU.
+ * Register borrows the fd until unregister; dup gives the caller ownership.
+ * The owner must unregister before closing the borrowed fd.
+ */
+#define VIRTIO_DMABUF_BLOB_BASE UINT64_C(0xfffe000000000000)
+uint64_t virtio_dmabuf_blob_register(int fd);
+int virtio_dmabuf_blob_dup(uint64_t id);
+void virtio_dmabuf_blob_unregister(uint64_t id);
+
 typedef enum SharedObjectType {
     TYPE_INVALID = 0,
     TYPE_DMABUF,
