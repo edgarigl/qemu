@@ -11,66 +11,71 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bswap.h"
 
 #include "hw/virtio/virtio-dmabuf.h"
 
 
 static GMutex lock;
 static GHashTable *resource_uuids;
-static GHashTable *media_blobs;
 static uint64_t next_media_blob = VIRTIO_DMABUF_BLOB_BASE;
+
+/*
+ * Encode the token offset in a private UUIDv8 namespace. The offset fits in
+ * 49 bits, leaving the variant bits intact. No token-to-UUID table is needed.
+ */
+static void media_blob_uuid(uint64_t id, QemuUUID *uuid)
+{
+    *uuid = (QemuUUID) {
+        .data = UUID(0x766d6564, 0x6961, 0x8000, 0x80, 0, 0, 0, 0, 0, 0, 0),
+    };
+    stq_be_p(uuid->data + 8, id - VIRTIO_DMABUF_BLOB_BASE);
+    uuid->data[8] |= 0x80;
+}
 
 uint64_t virtio_dmabuf_blob_register(int fd)
 {
-    uint64_t *id;
-    uint64_t result;
+    QemuUUID uuid;
+    uint64_t id;
 
-    if (fd < 0 || fd == INT_MAX) {
+    if (fd < 0) {
         return 0;
     }
-    g_mutex_lock(&lock);
-    if (next_media_blob == UINT64_MAX) {
+    do {
+        g_mutex_lock(&lock);
+        if (next_media_blob == UINT64_MAX) {
+            g_mutex_unlock(&lock);
+            return 0;
+        }
+        id = next_media_blob++;
         g_mutex_unlock(&lock);
-        return 0;
-    }
-    if (!media_blobs) {
-        media_blobs = g_hash_table_new_full(g_int64_hash, g_int64_equal,
-                                           g_free, NULL);
-    }
-    id = g_new(uint64_t, 1);
-    *id = next_media_blob++;
-    g_hash_table_insert(media_blobs, id, GINT_TO_POINTER(fd + 1));
-    result = *id;
-    g_mutex_unlock(&lock);
-    return result;
+        media_blob_uuid(id, &uuid);
+        /* A pre-existing UUID must never be replaced by this registration. */
+    } while (!virtio_add_dmabuf(&uuid, fd));
+    return id;
 }
 
 int virtio_dmabuf_blob_dup(uint64_t id)
 {
-    gpointer value;
-    int fd = -1;
+    QemuUUID uuid;
 
-    g_mutex_lock(&lock);
-    value = media_blobs ? g_hash_table_lookup(media_blobs, &id) : NULL;
-    if (value) {
-        fd = qemu_dup(GPOINTER_TO_INT(value) - 1);
-    } else {
+    if (id < VIRTIO_DMABUF_BLOB_BASE || id == UINT64_MAX) {
         errno = ENOENT;
+        return -1;
     }
-    g_mutex_unlock(&lock);
-    return fd;
+    media_blob_uuid(id, &uuid);
+    return virtio_dup_dmabuf(&uuid);
 }
 
 void virtio_dmabuf_blob_unregister(uint64_t id)
 {
-    g_mutex_lock(&lock);
-    if (media_blobs) {
-        g_hash_table_remove(media_blobs, &id);
-        if (!g_hash_table_size(media_blobs)) {
-            g_clear_pointer(&media_blobs, g_hash_table_destroy);
-        }
+    QemuUUID uuid;
+
+    if (id < VIRTIO_DMABUF_BLOB_BASE || id == UINT64_MAX) {
+        return;
     }
-    g_mutex_unlock(&lock);
+    media_blob_uuid(id, &uuid);
+    virtio_remove_resource(&uuid);
 }
 
 /*

@@ -18,6 +18,8 @@
 
 /*
  * Private media/GPU bridge. Tokens are never reused within this QEMU.
+ * Tokens encode UUID keys in the common virtio-dmabuf registry; there is no
+ * separate media fd table. Registry cleanup also removes media entries.
  * Register borrows the fd until unregister; dup gives the caller ownership.
  * The owner must unregister before closing the borrowed fd.
  */
