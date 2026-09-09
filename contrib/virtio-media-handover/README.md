@@ -27,10 +27,14 @@ Use a separate loopback node for each QEMU. Before guest REQBUFS, bind the
 producer's pool to stable OUTPUT slots using the dma-buf pass-through support
 in [v4l2loopback PR #665](https://github.com/v4l2loopback/v4l2loopback/pull/665).
 QEMU acquires each slot with host CAPTURE EXPBUF and registers its fd in a
-process-local media/GPU registry. It neither maps nor regrants the media pages.
-The GPU duplicates the fd when importing a blob. Tokens begin at
-0xfffe000000000000 and are never reused within that QEMU. Queue teardown
-removes tokens; already imported GPU resources retain their storage references.
+process-local virtio-dmabuf UUID registry using virtio_add_dmabuf(). It neither
+maps nor regrants the media pages. There is no separate media fd table: blob
+tokens encode keys in a private UUIDv8 namespace. The GPU resolves the key
+with virtio_dup_dmabuf(), duplicating the fd under the registry lock.
+Tokens begin at 0xfffe000000000000 and are never reused within that QEMU,
+including after registry cleanup. Queue teardown removes the UUID entry;
+already imported GPU resources retain their storage references. UUID keys
+are copied by the registry, while fd ownership stays with the media queue.
 
 The guest requires the companion virtio-media changes and optional virtio-gpu
 helper in
