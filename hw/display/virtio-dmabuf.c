@@ -90,11 +90,12 @@ static bool virtio_add_resource(QemuUUID *uuid, VirtioSharedObject *value)
     if (resource_uuids == NULL) {
         resource_uuids = g_hash_table_new_full(qemu_uuid_hash,
                                                uuid_equal_func,
-                                               NULL,
+                                               g_free,
                                                g_free);
     }
     if (g_hash_table_lookup(resource_uuids, uuid) == NULL) {
-        g_hash_table_insert(resource_uuids, uuid, value);
+        g_hash_table_insert(resource_uuids, g_memdup2(uuid, sizeof(*uuid)),
+                            value);
     } else {
         result = false;
     }
@@ -143,7 +144,7 @@ bool virtio_remove_resource(const QemuUUID *uuid)
 {
     bool result;
     g_mutex_lock(&lock);
-    result = g_hash_table_remove(resource_uuids, uuid);
+    result = resource_uuids && g_hash_table_remove(resource_uuids, uuid);
     g_mutex_unlock(&lock);
 
     return result;
@@ -172,6 +173,24 @@ int virtio_lookup_dmabuf(const QemuUUID *uuid)
     return GPOINTER_TO_INT(vso->value);
 }
 
+int virtio_dup_dmabuf(const QemuUUID *uuid)
+{
+    VirtioSharedObject *vso;
+    int fd = -1;
+
+    g_mutex_lock(&lock);
+    vso = resource_uuids ? g_hash_table_lookup(resource_uuids, uuid) : NULL;
+    if (!vso) {
+        errno = ENOENT;
+    } else if (vso->type != TYPE_DMABUF) {
+        errno = EINVAL;
+    } else {
+        fd = qemu_dup(GPOINTER_TO_INT(vso->value));
+    }
+    g_mutex_unlock(&lock);
+    return fd;
+}
+
 struct vhost_dev *virtio_lookup_vhost_device(const QemuUUID *uuid)
 {
     VirtioSharedObject *vso = get_shared_object(uuid);
@@ -194,8 +213,6 @@ SharedObjectType virtio_object_type(const QemuUUID *uuid)
 void virtio_free_resources(void)
 {
     g_mutex_lock(&lock);
-    g_hash_table_destroy(resource_uuids);
-    /* Reference count shall be 0 after the implicit unref on destroy */
-    resource_uuids = NULL;
+    g_clear_pointer(&resource_uuids, g_hash_table_destroy);
     g_mutex_unlock(&lock);
 }

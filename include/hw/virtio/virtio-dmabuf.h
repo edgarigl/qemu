@@ -39,7 +39,7 @@ typedef struct VirtioSharedObject {
 
 /**
  * virtio_add_dmabuf() - Add a new dma-buf resource to the lookup table
- * @uuid: new resource's UUID
+ * @uuid: new resource's UUID, copied by the registry
  * @dmabuf_fd: the dma-buf descriptor that will be stored and shared with
  *             other virtio devices. The caller retains ownership over the
  *             descriptor and its lifecycle.
@@ -56,7 +56,7 @@ bool virtio_add_dmabuf(QemuUUID *uuid, int dmabuf_fd);
 /**
  * virtio_add_vhost_device() - Add a new exporter vhost device that holds the
  * resource with the associated UUID
- * @uuid: new resource's UUID
+ * @uuid: new resource's UUID, copied by the registry
  * @dev: the pointer to the vhost device that holds the resource. The caller
  *       retains ownership over the device struct and its lifecycle.
  *
@@ -82,6 +82,18 @@ bool virtio_remove_resource(const QemuUUID *uuid);
  * Return: the dma-buf file descriptor integer, or -1 if the key is not found.
  */
 int virtio_lookup_dmabuf(const QemuUUID *uuid);
+
+/**
+ * virtio_dup_dmabuf() - Duplicate a dma-buf while holding the registry lock
+ * @uuid: resource's UUID
+ *
+ * The owner must remove the registration before closing its fd. Duplicates
+ * remain valid after removal and must be closed by their callers.
+ *
+ * Return: a new CLOEXEC fd, or -1 with errno set: ENOENT for a missing UUID,
+ * EINVAL for a non-dma-buf resource, or the duplication error.
+ */
+int virtio_dup_dmabuf(const QemuUUID *uuid);
 
 /**
  * virtio_lookup_vhost_device() - Looks for an exporter vhost device in the

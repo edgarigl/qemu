@@ -927,10 +927,8 @@ static void virgl_cmd_resource_assign_uuid(VirtIOGPU *g,
             }
         }
         if (dfd >= 0) {
-            /* NOTE: virtio_add_resource() stores the key BY REFERENCE (no
-             * key copy, key_destroy=NULL).  Must pass persistent storage, not
-             * the stack-local "uuid" above, or lookups dereference garbage. */
-            virtio_add_dmabuf((QemuUUID *)res->base.uuid, dfd);
+            /* The registry copies the UUID and borrows the host fd. */
+            virtio_add_dmabuf(&uuid, dfd);
             qemu_log_mask(LOG_GUEST_ERROR,
                           "%s: registered res %d host dmabuf %d in uuid table\n",
                           __func__, au.resource_id, dfd);
