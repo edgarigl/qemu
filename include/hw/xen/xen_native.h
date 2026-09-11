@@ -364,9 +364,9 @@ static inline int xen_get_default_ioreq_server_info(domid_t dom,
 static bool use_default_ioreq_server;
 
 #ifdef XEN_HMEM
-static inline void xen_hmem_sync(void *hva, size_t npages)
+static inline int xen_hmem_sync(void *hva, size_t npages)
 {
-    xenhmem_sync(xen_fmem, xen_domid, hva, npages);
+    return xenhmem_sync(xen_fmem, xen_domid, hva, npages);
 }
 
 static inline int xen_hmem_map(void *hva, xen_pfn_t gfn, size_t npages)

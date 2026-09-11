@@ -2,6 +2,7 @@
 #include "qemu/units.h"
 #include "qemu/bitops.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "qemu/target-info.h"
 #include "qapi/error.h"
 #include "exec/target_page.h"
@@ -452,10 +453,17 @@ static void cpu_ioreq_hmem(ioreq_t *req)
 {
     hwaddr addr, len;
 
+    if (!req->size || !req->count) {
+        error_report("IOREQ_TYPE_HMEM: invalid zero-sized request");
+        return;
+    }
     addr = req->addr;
-    len = req->size * req->count;
+    len = (hwaddr)req->size * req->count;
     if (req->df) {
-        addr -= len;
+        /* req->addr names the first element accessed.  With DF set, the
+         * complete range therefore starts count - 1 elements below it.
+         */
+        addr -= len - req->size;
     }
 
     RCU_READ_LOCK_GUARD();
@@ -465,6 +473,7 @@ static void cpu_ioreq_hmem(ioreq_t *req)
         uintptr_t hva;
         hwaddr xlat, l = len;
         size_t npages;
+        int rc;
 
         mr = address_space_translate(&address_space_memory, addr,
                                      &xlat, &l, true, MEMTXATTRS_UNSPECIFIED);
@@ -476,7 +485,14 @@ static void cpu_ioreq_hmem(ioreq_t *req)
         hva = (uintptr_t)qemu_map_ram_ptr(mr->ram_block, xlat);
         npages = DIV_ROUND_UP((hva & ~XC_PAGE_MASK) + l, XC_PAGE_SIZE);
         hva &= XC_PAGE_MASK;
-        xen_hmem_sync((void *)hva, npages);
+        rc = xen_hmem_sync((void *)hva, npages);
+        if (rc) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IOREQ_TYPE_HMEM: sync failed addr=0x%" PRIx64
+                          " len=0x%" PRIx64 " hva=%p npages=%zu: %s\n",
+                          addr, l, (void *)hva, npages, strerror(errno));
+            return;
+        }
 
         len -= l;
         addr += l;
