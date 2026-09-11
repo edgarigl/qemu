@@ -20,6 +20,7 @@
 #include "hw/xen/xen.h"
 #include "hw/pci/pci_device.h"
 #include "hw/xen/trace.h"
+#include "qemu/log.h"
 
 extern xc_interface *xen_xc;
 
@@ -402,6 +403,15 @@ static inline void xen_map_memory_section(domid_t dom,
 
         rc = xen_hmem_map(hva, gfn, npages);
         if (!rc) {
+            static unsigned int logged_hmem_maps;
+
+            if (logged_hmem_maps < 200) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "XEN_HMEM_MAP: gpa=0x%" PRIx64
+                              " hva=%p npages=%zu\n",
+                              start_addr, hva, npages);
+                logged_hmem_maps++;
+            }
             trace_xen_map_hmem_range(ioservid, start_addr, npages);
             xendevicemodel_map_hmem_to_ioreq_server(xen_dmod, dom, ioservid,
                                                     start_addr, end_addr);

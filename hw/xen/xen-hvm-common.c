@@ -451,6 +451,7 @@ static void cpu_ioreq_config(XenIOState *state, ioreq_t *req)
 #ifdef XEN_HMEM
 static void cpu_ioreq_hmem(ioreq_t *req)
 {
+    static unsigned int logged_requests;
     hwaddr addr, len;
 
     if (!req->size || !req->count) {
@@ -485,6 +486,16 @@ static void cpu_ioreq_hmem(ioreq_t *req)
         hva = (uintptr_t)qemu_map_ram_ptr(mr->ram_block, xlat);
         npages = DIV_ROUND_UP((hva & ~XC_PAGE_MASK) + l, XC_PAGE_SIZE);
         hva &= XC_PAGE_MASK;
+        if (logged_requests < 200) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "IOREQ_TYPE_HMEM: addr=0x%" PRIx64
+                          " size=%u count=%u df=%u dir=%u data=0x%" PRIx64
+                          " sync-addr=0x%" PRIx64 " sync-len=0x%" PRIx64
+                          " hva=%p npages=%zu\n",
+                          req->addr, req->size, req->count, req->df, req->dir,
+                          req->data, addr, l, (void *)hva, npages);
+            logged_requests++;
+        }
         rc = xen_hmem_sync((void *)hva, npages);
         if (rc) {
             qemu_log_mask(LOG_GUEST_ERROR,
