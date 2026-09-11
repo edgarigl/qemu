@@ -472,7 +472,7 @@ static void cpu_ioreq_hmem(ioreq_t *req)
     while (len > 0) {
         MemoryRegion *mr;
         uintptr_t hva;
-        hwaddr xlat, l = len;
+        hwaddr xlat, l = len, mapped;
         size_t npages;
         int rc;
 
@@ -485,6 +485,17 @@ static void cpu_ioreq_hmem(ioreq_t *req)
 
         hva = (uintptr_t)qemu_map_ram_ptr(mr->ram_block, xlat);
         npages = DIV_ROUND_UP((hva & ~XC_PAGE_MASK) + l, XC_PAGE_SIZE);
+        /*
+         * Xen may report only the first emulation fragment of an atomic
+         * vector access.  If that fragment ends near a page boundary, merely
+         * synchronizing its page makes the retried instruction fault on the
+         * following page and report the first fragment again.  Prefault one
+         * adjacent page while staying inside this MemoryRegion.
+         */
+        mapped = npages * XC_PAGE_SIZE - (hva & ~XC_PAGE_MASK);
+        if (xlat + mapped < memory_region_size(mr)) {
+            npages++;
+        }
         hva &= XC_PAGE_MASK;
         if (logged_requests < 200) {
             qemu_log_mask(LOG_GUEST_ERROR,
